@@ -22,7 +22,10 @@ def shell(command: str) -> tuple[str, dict]:
 
 
 class Calls(Model):
-    """Calls each (tool, arguments) once per user message in order, then answers; ``delay`` slows each call."""
+    """Calls each (tool, arguments) once per user message in order, then answers; ``delay`` slows each call.
+
+    A list of (tool, arguments) in ``calls`` is one step whose calls the model makes in parallel.
+    """
 
     def __init__(self, calls=(), answer="Done.", delay: float = 0):
         self.calls = list(calls)
@@ -39,10 +42,18 @@ class Calls(Model):
         if done:
             output = done[-1]["output"]
             self.outputs.append(output if isinstance(output, str) else json.dumps(output))
-        if len(done) < len(self.calls):
-            name, arguments = self.calls[len(done)]
+        steps = [step if isinstance(step, list) else [step] for step in self.calls]
+        made = 0
+        for step in steps:
+            if made == len(done):
+                break
+            made += len(step)
+        else:
+            step = None
+        if step is not None and made == len(done):
             output = [ResponseFunctionToolCall(id=f"fc_{uuid.uuid4().hex}", call_id=f"call_{uuid.uuid4().hex}",
-                                               type="function_call", name=name, arguments=json.dumps(arguments))]
+                                               type="function_call", name=name, arguments=json.dumps(arguments))
+                      for name, arguments in step]
         else:
             output = [ResponseOutputMessage(id=f"msg_{uuid.uuid4().hex}", role="assistant", type="message", status="completed",
                                             content=[ResponseOutputText(type="output_text", annotations=[], text=self.answer)])]

@@ -67,7 +67,7 @@ restored afterwards. See the [local Kubernetes guide](docs/local-kubernetes.md).
 make all
 ```
 
-**3. Check the boundary.** Seventeen probes run in real MXC containers, then a
+**3. Check the boundary.** Eighteen probes run in real MXC containers, then a
 scripted investigation runs through the harness. No model API usage.
 
 ```bash
@@ -116,7 +116,7 @@ the worker is the image built from `worker/`. See
 ## Verification
 
 The provider is pinned to `openai-agents==0.24.0` and the worker to
-`@microsoft/mxc-sdk` 1.0.1. On local ARM64 Kind, all seventeen boundary probes
+`@microsoft/mxc-sdk` 1.0.1. On local ARM64 Kind, all eighteen boundary probes
 passed in real MXC containers, including no token in the container, no direct
 route to the API, and writes, exec and raw logs refused by the worker's proxy.
 In a live investigation of a service that logs customer emails and card numbers,

@@ -198,6 +198,17 @@ async def test_steps_say_what_ran_and_where(worker, tmp_path):
     chat.store.close()
 
 
+async def test_parallel_steps_each_keep_their_own_exit_status(worker, tmp_path):
+    chat = make_chat(worker, tmp_path, Calls([[shell("exit 3"), shell("echo ok")]], answer="Done."))
+    thread_id, stream = await new_thread(chat, "Run both")
+    turn = (await chat.store.load_thread(thread_id, {})).metadata["turns"][0]
+    assert [(tool["summary"], tool["status"]) for tool in turn["tools"]] == [("exit 3", "exit 3"), ("echo ok", "exit 0")]
+    titles = [event["update"]["task"]["title"] for event in stream
+              if (event.get("update") or {}).get("type") == "workflow.task.updated"]
+    assert "exit 3 · exit 3 · sandbox" in titles and "echo ok · exit 0 · sandbox" in titles
+    chat.store.close()
+
+
 def test_the_panel_opens_a_checked_output_before_the_agents_report():
     turn = {"files": [{"path": "output/report.md", "changed": True}, {"path": "output/data.json", "changed": True},
                       {"path": "work/x.py", "changed": True}],

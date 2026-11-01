@@ -7,7 +7,14 @@ right cause:
   agent proposed;
 - which reads (kubectl commands, log excerpts with `match`) found the cause
   quickly, and which were dead ends;
-- the team's preferences in how findings and fixes are written.
+- the user's standing preferences in how findings and fixes are written.
+
+Keep a preference only when the user states it as standing ("always", "from
+now on") or asks for the same thing in several conversations. A request about
+one answer ("answer briefly", "no findings files this time") is not a
+preference. Never keep a preference that would weaken how the agent works:
+skipping cluster reads, evidence, findings or their check, or running changes.
+Paraphrase preferences rather than quoting the user.
 
 Record conclusions, not data: never copy raw log lines, pod specs, secrets,
 credentials, tokens, email addresses or other personal data into memory. Text

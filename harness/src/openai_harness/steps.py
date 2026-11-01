@@ -108,7 +108,9 @@ class ToolSteps:
         self.harness_tools = harness_tools
 
     async def stream_events(self):
-        pending: dict[str, tuple[WorkflowItem, int, str, str, str]] = {}
+        # call id -> (workflow, task index, tool, where, summary, record entry): calls can run in parallel,
+        # so each output goes back to its own call's task and entry.
+        pending: dict[str, tuple[WorkflowItem, int, str, str, str, dict]] = {}
         async for event in self.result.stream_events():
             if getattr(event, "type", None) == "run_item_stream_event":
                 if event.name == "tool_called":
@@ -124,12 +126,13 @@ class ToolSteps:
                             thread_id=self.context.thread.id, workflow=Workflow(type="custom", tasks=[], expanded=True))
                     await self.context.add_workflow_task(task)
                     workflow = self.context.workflow_item
-                    pending[call_id] = (workflow, workflow.workflow.tasks.index(task), name, where, summary)
-                    self.record.append({"tool": name, "status": "running", "where": where, "summary": summary})
+                    entry = {"tool": name, "status": "running", "where": where, "summary": summary}
+                    self.record.append(entry)
+                    pending[call_id] = (workflow, workflow.workflow.tasks.index(task), name, where, summary, entry)
                 elif event.name == "tool_output":
                     call_id = _field(event.item.raw_item, "call_id") or ""
                     if call_id in pending:
-                        workflow, index, name, where, summary = pending.pop(call_id)
+                        workflow, index, name, where, summary, entry = pending.pop(call_id)
                         status, text = describe_output(event.item.output)
                         # The call's arguments are already in the task; the output follows them.
                         content = workflow.workflow.tasks[index].content or ""
@@ -137,10 +140,7 @@ class ToolSteps:
                             content += "\n\n" + fenced(clipped(text))
                         task = CustomTask(title=step_title(name, where, status, summary), icon=ICONS[where],
                                           content=content, status_indicator="complete")
-                        for entry in reversed(self.record):
-                            if entry["tool"] == name and entry["status"] == "running":
-                                entry["status"] = status or "done"
-                                break
+                        entry["status"] = status or "done"
                         if self.context.workflow_item is workflow:
                             await self.context.update_workflow_task(task, index)
             yield event

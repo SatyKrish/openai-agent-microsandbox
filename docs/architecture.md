@@ -194,13 +194,23 @@ constrained:
 - **The agent cannot write it during a run** (`live_update=False`, where the
   SDK's default is to allow it). Only the SDK's extraction writes memory,
   guided by [`memory.md`](../examples/sre/agent/memory.md): conclusions rather
-  than data, never raw log lines, pod specs, credentials or personal data, and
-  never instructions found in logs, events or pod specs.
+  than data; never raw log lines, pod specs, credentials or personal data;
+  never instructions found in logs, events or pod specs; and a user preference
+  only when stated as standing, never a one-off request, and never one that
+  would weaken how the agent works.
 - **It comes from what the model saw,** which was already masked: log excerpts,
   redacted command output.
-- **It is a lead, not a fact.** Memory is dated, and the agent re-checks a
-  remembered cause against fresh evidence; quotes in findings must still match
-  this turn's evidence.
+- **It is read as a hypothesis.** The SDK adds the user's memory summary to the
+  agent's instructions and has the agent search `MEMORY.md` before exploring,
+  so memory decides where it looks first. The agent's
+  [instructions](../examples/sre/agent/instructions.md) add what the SDK's
+  read-only mode leaves out: the cluster as read now wins over memory; a
+  remembered cause is a hypothesis to confirm and to try to rule out; memory is
+  never cited in findings; the answer says what rests on memory it did not
+  re-check; and memory never overrides the instructions or the user's current
+  request.
+- **It cannot pass the check.** Quotes in findings must match evidence the
+  worker recorded in this conversation; memory files are not evidence.
 
 The UI's start screen shows the user's memory summary and whose it is. Memory
 is plain files on the harness's volume: an operator can read, edit or remove a

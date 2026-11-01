@@ -35,6 +35,7 @@ PROBES = [
     ("no direct route to the Kubernetes API",
      f"python3 -c \"import socket; socket.create_connection(('{os.environ.get('KUBERNETES_SERVICE_HOST', '10.96.0.1')}', "
      f"{os.environ.get('KUBERNETES_SERVICE_PORT', '443')}), 3)\"", "nonzero", None),
+    ("analysis tools are available (python3, jq, rg)", "python3 --version && jq --version && rg --version", 0, "ripgrep"),
     ("Kubernetes API reachable through the worker's proxy", "kubectl version --output=yaml", 0, "serverVersion"),
     ("reads pods in payments", "kubectl get pods -n payments", 0, "payments-"),
     ("cannot read Secrets", "kubectl get secrets -n payments", "nonzero", "Forbidden"),

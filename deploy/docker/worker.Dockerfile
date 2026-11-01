@@ -26,9 +26,10 @@ ARG KUBECTL_VERSION=v1.35.0
 # bubblewrap (0.5 or later): MXC's Linux backend. slirp4netns, iptables (nf_tables),
 # iproute2 and util-linux (unshare, nsenter, prlimit, choom): the host tools MXC's
 # proxy-only network mode needs, which lets a container reach the worker's
-# read-only API proxy and nothing else. python3 and jq: analysis.
+# read-only API proxy and nothing else. python3, jq and ripgrep: analysis; models reach for
+# rg to search files, the SDK's memory among them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bubblewrap slirp4netns iptables iproute2 util-linux ca-certificates python3 jq curl \
+      bubblewrap slirp4netns iptables iproute2 util-linux ca-certificates python3 jq ripgrep curl \
     && curl -fsSLo /usr/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
     && echo "$(curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256")  /usr/bin/kubectl" \
        | sha256sum -c - \
