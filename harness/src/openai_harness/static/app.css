@@ -88,6 +88,31 @@ button, select { font: inherit; color: inherit; }
 .popover[role="menu"] button:hover { background: var(--sunken); }
 .popover .danger { color: var(--err); }
 .settings-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+/* Memory: shown over the chat like ChatKit's history, one entry per remembered conversation, grouped by day. */
+.memory-view { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; background: var(--surface); }
+.memory-view-head { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 6px 12px; }
+.memory-view-head h2 { flex: 1 1 auto; margin: 0; font-size: 15px; font-weight: 500; }
+.memory-whose { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+.memory-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 8px 16px; }
+.memory-note, .memory-empty { margin: 0 12px 8px; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+.memory-error { margin: 0 12px 8px; font-size: 12.5px; color: var(--err); }
+.memory-group { padding: 14px 12px 6px; font-size: 12px; color: var(--muted); }
+.memory-list { list-style: none; margin: 0; padding: 0; }
+.memory-entry { display: flex; align-items: center; gap: 4px; border-radius: 10px; }
+.memory-entry:hover, .memory-entry:focus-within { background: var(--sunken); }
+.memory-open { flex: 1 1 auto; min-width: 0; padding: 9px 12px; border: 0; background: none; text-align: left; font-size: 14px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; border-radius: 10px; }
+.memory-open:disabled { color: var(--muted); cursor: default; }
+.memory-forget { flex: none; margin-right: 8px; opacity: 0; }
+.memory-entry:hover .memory-forget, .memory-entry:focus-within .memory-forget { opacity: 1; }
+.memory-more { display: grid; gap: 10px; margin: 18px 12px 0; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+.memory-more .memory-note { margin: 0; }
+.memory-section summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.memory-section pre { margin: 6px 0 0; max-height: 280px; overflow: auto; padding: 8px 10px; border-radius: 8px; background: var(--sunken);
+  white-space: pre-wrap; word-break: break-word; font: 12px/1.5 "IBM Plex Mono", monospace; color: var(--ink-2); }
+.link-button { border: 0; padding: 0; background: none; color: var(--accent-ink); font-size: 12.5px; cursor: pointer; }
+.link-button:hover { text-decoration: underline; }
+.link-button.danger { color: var(--err); }
 .settings-hint { font-size: 12px; color: var(--muted); }
 .segmented { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--border); border-radius: 10px; background: var(--sunken); }
 .segmented button { min-height: 34px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 12.5px; font-weight: 500; cursor: pointer; }
@@ -99,7 +124,7 @@ button, select { font: inherit; color: inherit; }
   min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface);
   border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
 }
-.chat-pane { flex: 1 1 auto; max-width: 880px; margin: 0 auto; width: 100%; }
+.chat-pane { position: relative; flex: 1 1 auto; max-width: 880px; margin: 0 auto; width: 100%; }
 .workspace[data-panel="open"] .chat-pane { flex: 0 1 46%; max-width: none; margin: 0; min-width: 360px; }
 .side-panel { flex: 1 1 54%; }
 .chat-host { flex: 1 1 auto; min-height: 0; }

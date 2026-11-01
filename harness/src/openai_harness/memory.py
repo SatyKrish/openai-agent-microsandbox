@@ -72,9 +72,16 @@ class MemoryStore:
                 for path in sorted(self.root.rglob("*")) if path.is_file()}
 
     async def seed(self, session) -> int:
-        """Copy the stored memory into the workspace's memories directory; returns the number of files."""
+        """Make the workspace's memories directory the stored memory; returns the number of files.
+
+        The directory is replaced, not overlaid: a conversation forgotten since this workspace was last
+        seeded must not stay in it, where consolidation would find it and publish it back.
+        """
         self.prune()
         files = self.files()
+        cleared = await session.exec("rm", "-rf", self.memories_dir, shell=False)
+        if not cleared.ok():
+            raise RuntimeError(f"could not clear {self.memories_dir}/ in the workspace")
         for name, data in files.items():
             await session.write(Path(f"{self.memories_dir}/{name}"), io.BytesIO(data))
         return len(files)
@@ -144,6 +151,22 @@ class MemoryStore:
         self._settle()
         return True
 
+    def clear(self) -> None:
+        """Forget everything."""
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def conversations(self) -> list[dict]:
+        """The remembered conversations, newest first: id, when last updated, and the SDK's one-line description."""
+        return [{"id": conversation, "updated_at": updated.isoformat(),
+                 "description": _description(self.root / "raw_memories" / f"{conversation}.md")}
+                for updated, conversation, _ in self._conversations()]
+
+    def index(self, limit: int = 64 * 1024) -> str:
+        """MEMORY.md, the consolidated memory the agent searches."""
+        path = self.root / "MEMORY.md"
+        text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+        return text[:limit] + ("…" if len(text) > limit else "")
+
     def summary(self, limit: int = 4000) -> dict:
         """What the UI shows: the consolidated summary, when it changed, and how many conversations fed it."""
         self.prune()
@@ -201,9 +224,13 @@ class UserMemory:
     def for_user(self, user: str | None) -> MemoryStore:
         return MemoryStore(self.root / "users" / user_key(user), **self.options)
 
-    def summary(self, user: str | None) -> dict:
-        return {"user": (user or "").strip() or GUEST, "shared": user_key(user) == GUEST,
-                **self.for_user(user).summary()}
+    def summary(self, user: str | None, *, detail: bool = False) -> dict:
+        """What the UI shows of a user's memory; ``detail`` adds each remembered conversation and MEMORY.md."""
+        store = self.for_user(user)
+        summary = {"user": (user or "").strip() or GUEST, "shared": user_key(user) == GUEST, **store.summary()}
+        if detail:
+            summary |= {"remembered": store.conversations(), "index": store.index()}
+        return summary
 
     def _migrate(self) -> None:
         """Memory kept before it was per user becomes the guest's, which is whose it was."""
@@ -228,6 +255,15 @@ def _header(path: Path) -> dict[str, str]:
             if colon:
                 header[key.strip()] = value.strip()
     return header
+
+
+def _description(path: Path) -> str:
+    """The ``description:`` line the SDK writes after a raw memory's header."""
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith("description:"):
+                return line.partition(":")[2].strip()[:300]
+    return ""
 
 
 def _timestamp(value: str | None) -> datetime | None:

@@ -135,9 +135,10 @@ class HarnessChatServer(ChatKitServer[dict]):
         self._open: dict[str, _Open] = {}
         # One consolidation at a time per user, so two never overwrite each other's lessons.
         self._memory_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-        # Conversations deleted while their user's memory may be consolidating, by user: forgotten
-        # again once it publishes.
+        # What a user forgot while their memory may be consolidating: forgotten again once it publishes,
+        # since the consolidation started from the memory before.
         self._forgotten: defaultdict[str, set[str]] = defaultdict(set)
+        self._cleared: set[str] = set()
 
     def conversation(self, thread: ThreadMetadata) -> Conversation:
         return Conversation(thread, self.output_dir / thread.id)
@@ -547,6 +548,7 @@ class HarnessChatServer(ChatKitServer[dict]):
         store = self.memory.for_user(opened.owner)
         async with self._memory_locks[key]:
             began = time.monotonic()
+            self._cleared.discard(key)  # this close starts from the memory as it is now
             # Consolidate on top of what the user's other conversations published since this one opened. Without
             # that, publishing could drop their lessons, so a failed seed closes the session without publishing.
             if await _quietly(store.seed(session), f"seeding memory for {thread_id}") is False:
@@ -555,6 +557,10 @@ class HarnessChatServer(ChatKitServer[dict]):
             if await _quietly(session.aclose(), f"generating memory for {thread_id}") is False:
                 return
             files = await _quietly(store.publish(session), f"publishing memory from {thread_id}")
+            if key in self._cleared:
+                self._cleared.discard(key)
+                store.clear()
+                files = 0
             for conversation in self._forgotten.pop(key, ()):
                 store.forget(conversation)
             logger.info("Closed %s %s; %s's memory has %s files (%.1f s)", thread_id, why, key, files,
@@ -596,10 +602,26 @@ class HarnessChatServer(ChatKitServer[dict]):
             finally:
                 history.close()
             shutil.rmtree(self.output_dir / thread_id, ignore_errors=True)
-            if self.memory is not None:
-                # Forget it now, and again after any consolidation of this user's memory that is running.
-                self._forgotten[user_key(owner)].add(thread_id)
-                self.memory.for_user(owner).forget(thread_id)
+            self.forget_memory(owner, thread_id)
+
+    def forget_memory(self, user: str | None, conversation: str | None = None) -> bool:
+        """Forget one conversation from a user's memory, or with none named, everything they remember;
+        returns whether there was anything to forget.
+
+        It is forgotten now, and again after a consolidation of the user's memory that is running, which
+        would otherwise publish the memory it started from.
+        """
+        if self.memory is None:
+            return False
+        key = user_key(user)
+        store = self.memory.for_user(user)
+        if conversation is None:
+            held = bool(store.files())
+            self._cleared.add(key)
+            store.clear()
+            return held
+        self._forgotten[key].add(conversation)
+        return store.forget(conversation)
 
 
 async def _quietly(awaitable, what: str):

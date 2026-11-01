@@ -58,9 +58,15 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   with its readiness, restarts and why it is unhealthy (waiting reasons, the last
   exit, recent warning events). **Investigate** starts a conversation about one
   workload; **Investigate all** about every unhealthy one. The worker builds
-  this summary with its own identity; it is not sent to the model. Below it,
-  **What the agent remembers** shows your memory summary, or the guest's when
-  you are not signed in, and how long conversations are kept.
+  this summary with its own identity; it is not sent to the model. Below it, a
+  line says how many conversations your memory holds, or the guest's when you
+  are not signed in.
+- **Memory.** The book button beside the history button shows what the agent
+  remembers the way history shows conversations: one entry per earlier
+  conversation, grouped by day. Select one to open it, forget one, or forget
+  everything. While history itself is open, the start screen steps aside. **Correct it** starts a conversation to
+  tell the agent what is wrong; it is remembered when that conversation goes
+  idle.
 - **Steps.** Each step is titled with what ran (`kubectl describe pod …`,
   `pod_logs payments-api -n payments match="timeout"`) and where: the sandbox or
   the harness.

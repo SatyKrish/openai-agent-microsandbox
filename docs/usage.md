@@ -76,9 +76,9 @@ shared harness does for each user
 ```python
 store = UserMemory(Path("/data/memory")).for_user("ana@example.com")  # None: the guest
 await session.start()
-await store.seed(session)     # earlier conversations' memory into memories/
+await store.seed(session)     # memories/ becomes the stored memory
 ...                           # the conversation's turns
-await store.seed(session)     # again, to consolidate on top of what others published
+await store.seed(session)     # again: what others published, nothing the run wrote
 await session.aclose()        # the SDK generates and consolidates memory here
 await store.publish(session)  # the consolidated memories/ back to the store
 ```

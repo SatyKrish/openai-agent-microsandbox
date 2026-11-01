@@ -53,13 +53,13 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
                 starting_files: dict[str, bytes] | None = None,
                 worker: Callable[[], Awaitable[dict]] | None = None,
                 health: Callable[[], Awaitable[dict]] | None = None,
-                memory: Callable[[str | None], Awaitable[dict]] | None = None,
                 user_header: str | None = None) -> list[Route]:
     """Routes for one agent's UI. ``derived_file(thread, path)`` may serve files the agent derived from uploads;
     ``starting_files`` are the workspace's initial files, shown before the first message.
 
     ``user_header`` names the header in which an authenticating proxy in front of the harness passes the
-    signed-in user; it decides whose memory a conversation uses. Without it, every user is the guest."""
+    signed-in user; it decides whose memory a conversation uses and which memory ``/api/memory`` shows and
+    forgets. Without it, every user is the guest."""
     origins = {f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
     max_upload = server.spec.uploads.max_bytes if server.spec.uploads else 0
 
@@ -192,10 +192,36 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
             logger.debug("health unavailable: %s", error)
             return JSONResponse({"status": "unavailable"}, status_code=503)
 
-    async def memory_summary(request: Request):
-        if memory is None:
+    async def exists(thread_id: str) -> bool:
+        try:
+            await server.store.load_thread(thread_id, {})
+            return True
+        except NotFoundError:
+            return False
+
+    async def memory_view(request: Request):
+        """GET: the user's memory (``?detail=1``: each remembered conversation and MEMORY.md); DELETE: forget it all."""
+        if server.memory is None:
             return JSONResponse({"status": "disabled"}, status_code=404)
-        return JSONResponse({"status": "ok", **await memory(user(request))}, headers={"Cache-Control": "no-store"})
+        if request.method == "DELETE":
+            if not same_origin(request):
+                return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
+            return JSONResponse({"status": "ok", "forgot": server.forget_memory(user(request))})
+        detail = request.query_params.get("detail") == "1"
+        summary = server.memory.summary(user(request), detail=detail)
+        for item in summary.get("remembered", []):
+            item["open"] = bool(_THREAD_ID.fullmatch(item["id"])) and await exists(item["id"])
+        return JSONResponse({"status": "ok", **summary}, headers={"Cache-Control": "no-store"})
+
+    async def memory_conversation(request: Request):
+        """DELETE: forget one conversation from the user's memory."""
+        if server.memory is None:
+            return JSONResponse({"status": "disabled"}, status_code=404)
+        if not same_origin(request):
+            return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
+        if not server.forget_memory(user(request), request.path_params["conversation"]):
+            return JSONResponse({"status": "not_found"}, status_code=404)
+        return JSONResponse({"status": "ok", "forgot": True})
 
     async def trace(request: Request):
         thread = await load(request)
@@ -220,7 +246,8 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
         Route("/api/starting-files/{path:path}", starting_file),
         Route("/api/worker", worker_info),
         Route("/api/health", health_summary),
-        Route("/api/memory", memory_summary),
+        Route("/api/memory", memory_view, methods=["GET", "DELETE"]),
+        Route("/api/memory/conversations/{conversation}", memory_conversation, methods=["DELETE"]),
         Route("/chatkit", chatkit, methods=["POST"]),
         Route("/uploads/{attachment_id}", upload, methods=["PUT", "POST"]),
         Route("/api/config", settings),
@@ -242,7 +269,8 @@ def ui_application(server: HarnessChatServer, *, config: dict, port: int, jaeger
                         "max_count": uploads.max_count} if uploads else None,
             "starting_files": [{"path": path, "bytes": len(data)} for path, data in (starting_files or {}).items()],
             "worker": routes.get("worker") is not None, "health": routes.get("health") is not None,
-            "memory": routes.get("memory") is not None,
+            "memory": server.memory is not None,
+            "memory_max_age_days": _days(server.memory.for_user(None).max_age) if server.memory else None,
             "preferred_output": server.preferred_output}
     mounts = [Mount("/harness", _Revalidated(directory=SHELL), name="harness")]
     if static is not None:
@@ -254,6 +282,10 @@ def ui_application(server: HarnessChatServer, *, config: dict, port: int, jaeger
     return application([*chat_routes(server, config=full, port=port, jaeger_url=jaeger_url,
                                       starting_files=starting_files, **routes), *mounts],
                        on_shutdown=server.close_all)
+
+
+def _days(age) -> float | None:
+    return round(age.total_seconds() / 86400, 2) if age else None
 
 
 def application(routes: list, *, on_shutdown: Callable[[], Awaitable[None]] | None = None) -> Starlette:

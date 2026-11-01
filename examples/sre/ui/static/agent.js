@@ -8,7 +8,7 @@
 
 const HEALTH_EVERY_MS = 10_000;
 let health = { at: 0, status: 0, body: null, pending: null };
-let memory = { at: 0, body: null };
+let memory = { at: 0, version: 0, body: null };
 
 const STATE_LABEL = { failing: "failing", degraded: "degraded", healthy: "healthy" };
 const BAD = /CrashLoopBackOff|ImagePullBackOff|ErrImagePull|Error|OOMKilled|Unschedulable|CreateContainer|InvalidImage|Failed|Evicted/;
@@ -67,42 +67,35 @@ function workloadRow(el, suggest, workload, namespace) {
       onclick: () => suggest(prompt(workload, namespace)) }, "Investigate"));
 }
 
-async function loadMemory(getJSON) {
-  if (Date.now() - memory.at < HEALTH_EVERY_MS) return memory.body;
+async function loadMemory(getJSON, version) {
+  if (memory.version === version && Date.now() - memory.at < HEALTH_EVERY_MS) return memory.body;
   const { status, body } = await getJSON("/api/memory").catch(() => ({ status: 0, body: null }));
-  memory = { at: Date.now(), body: status === 200 ? body : null };
+  memory = { at: Date.now(), version, body: status === 200 ? body : null };
   return memory.body;
 }
 
-function memorySection(el, config, remembered) {
+// One line on the start screen; the Memory view, beside the history button, lists and forgets what is remembered.
+function memorySection(el, config, remembered, openMemory) {
   if (!config.memory) return null;
   const minutes = Math.round((config.idle_close_s || 300) / 60);
-  // Memory is per signed-in user; without sign-in everyone shares the guest's.
   const whose = !remembered || remembered.shared ? "the guest memory, shared by everyone not signed in"
     : `${remembered.user}'s memory`;
-  const kept = config.memory_max_age_days ? ` Conversations are forgotten ${config.memory_max_age_days} days after `
-    + "their last message." : "";
-  if (!remembered?.text) {
-    return el("p", { class: "sre-board-note sre-memory-empty" }, `Nothing in ${whose} yet. After a conversation has been `
-      + `idle for ${minutes} minute${minutes === 1 ? "" : "s"}, the agent distils what it learned; later investigations `
-      + `start from it.${kept}`);
+  const view = el("button", { type: "button", class: "sre-link", onclick: () => openMemory?.() }, "View memory");
+  if (!remembered?.conversations) {
+    return el("p", { class: "sre-board-note sre-memory" }, `Nothing in ${whose} yet. After a conversation has been idle for `
+      + `${minutes} minute${minutes === 1 ? "" : "s"}, the agent distils what it learned; later investigations start from it.`);
   }
-  const updated = remembered.updated_at ? new Date(remembered.updated_at).toLocaleString() : "";
-  return el("details", { class: "sre-memory" },
-    el("summary", {}, "What the agent remembers",
-      el("span", { class: "sre-board-note" }, ` · ${whose} · from ${plural(remembered.conversations, "conversation")}`
-        + (updated ? ` · updated ${updated}` : ""))),
-    kept ? el("p", { class: "sre-board-note" }, kept.trim()) : null,
-    el("pre", {}, remembered.text));
+  return el("p", { class: "sre-board-note sre-memory" },
+    `Investigations start from ${whose}: ${plural(remembered.conversations, "earlier conversation")}. `, view);
 }
 
-export async function renderHome({ container, el, getJSON, suggest, config, threadId, running }) {
+export async function renderHome({ container, el, getJSON, suggest, config, threadId, running, openMemory, memoryVersion }) {
   if (!config.health || threadId || running) {
     container.hidden = true;
     return;
   }
   const [{ status, body }, remembered] = await Promise.all([loadHealth(getJSON),
-    config.memory ? loadMemory(getJSON) : null]);
+    config.memory ? loadMemory(getJSON, memoryVersion) : null]);
   if (status !== 200 || !body) {
     container.replaceChildren(el("p", { class: "sre-board-note" },
       "Cluster health is unavailable: the sandbox worker cannot be reached right now."));
@@ -134,7 +127,7 @@ export async function renderHome({ container, el, getJSON, suggest, config, thre
     el("div", { class: "sre-board-title" }, "Cluster now",
       el("span", { class: "sre-board-note" }, ` · read by the sandbox worker${updated ? ` at ${updated}` : ""}; `
         + "metadata only, never sent to the model")),
-    sections, memorySection(el, config, remembered)));
+    sections, memorySection(el, config, remembered, openMemory)));
   container.hidden = false;
 }
 

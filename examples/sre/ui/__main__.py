@@ -104,7 +104,6 @@ def main(argv=None):
     first = sorted(args.namespaces)[0]
     config = {"model": args.model, "tracing": tracing_enabled(), "namespaces": sorted(args.namespaces),
               "idle_close_s": args.idle_close,
-              "memory_max_age_days": args.memory_max_age_days if memory and max_age else None,
               "scope": f"reads {scope} · {client.worker}", "placeholder": f"Ask about workloads in {scope}…",
               "prompts": [
                   {"label": f"What's unhealthy in {scope}?", "prompt": f"Which workloads in {scope} are unhealthy, and why?"},
@@ -113,7 +112,7 @@ def main(argv=None):
               ]}
     app = create_app(server, config=config, port=args.port, jaeger_url=args.jaeger_url if tracing_enabled() else None,
                      worker=client.info, health=client.health, starting_files=runbooks(),
-                     memory=(lambda user: _summary(memory, user)) if memory else None, user_header=args.user_header)
+                     user_header=args.user_header)
     remembering = (f"{' → '.join(args.memory_models)}, kept {f'{args.memory_max_age_days:g} days' if max_age else 'forever'}"
                    if memory else "off")
     print(f"SRE agent UI: http://localhost:{args.port}  (model {args.model}, worker {client.worker}, "
@@ -124,10 +123,6 @@ def main(argv=None):
     finally:
         flush_traces()
         store.close()
-
-
-async def _summary(memory, user) -> dict:
-    return memory.summary(user)
 
 
 if __name__ == "__main__":

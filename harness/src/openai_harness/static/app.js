@@ -29,6 +29,8 @@ const state = {
   used: new Map(), // conversation -> suggestions already sent from it
   poll: null,
   themeChoice: "system",
+  memoryVersion: 0, // bumped when memory is forgotten, so views of it reload
+  historyOpen: false, // ChatKit's own history view is showing
 };
 const key = (name) => `${state.config.name || "agent"}:${name}`;
 
@@ -96,7 +98,9 @@ function chatkitOptions() {
       colorScheme: scheme, radius: "round", density: "normal",
       color: { accent: { primary: scheme === "dark" ? "#97ADE9" : "#2F5BD3", level: 1 } },
     },
-    header: { enabled: true, title: { enabled: true } },
+    // Memory sits beside ChatKit's own history button; ChatKit draws header buttons from its own icon set.
+    header: { enabled: true, title: { enabled: true },
+      ...(state.config.memory ? { rightAction: { icon: "book-open", onClick: () => openMemory() } } : {}) },
     // Deleting a conversation deletes its sandbox, so it goes through this page's own confirmation.
     history: { enabled: true, showDelete: false, showRename: true },
     // Suggestions fill the composer from outside ChatKit, so you can read and edit them first.
@@ -135,6 +139,9 @@ async function startChat() {
   state.chatkit = chatkit;
   $("chat-host").append(chatkit);
   chatkit.addEventListener("chatkit.thread.change", (event) => selectThread(event.detail.threadId));
+  // While ChatKit shows its history, give it the whole pane.
+  chatkit.addEventListener("chatkit.history.open", () => { state.historyOpen = true; render(); });
+  chatkit.addEventListener("chatkit.history.close", () => { state.historyOpen = false; render(); });
   chatkit.addEventListener("chatkit.response.start", () => {
     state.responding = true;
     $("stream-error").hidden = true;
@@ -423,7 +430,7 @@ function renderSuggestions() {
   const turn = latestTurn();
   const running = state.responding || turn?.status === "running" || state.thread?.state === "elsewhere";
   const used = state.used.get(state.threadId || "_new") || new Set();
-  const items = (running ? [] : !state.threadId ? state.config.prompts : turn ? state.config.follow_ups : [])
+  const items = (running || state.historyOpen ? [] : !state.threadId ? state.config.prompts : turn ? state.config.follow_ups : [])
     .filter((item) => !used.has(item.prompt));
   if (!items?.length) {
     box.hidden = true;
@@ -438,9 +445,15 @@ function renderSuggestions() {
 function renderHome() {
   const home = $("agent-home");
   if (!state.extension.renderHome) return;
+  if (state.historyOpen) {
+    home.hidden = true;
+    return;
+  }
   const running = state.responding || latestTurn()?.status === "running";
   Promise.resolve(state.extension.renderHome({ container: home, el, getJSON, suggest, config: state.config,
-    threadId: state.threadId, running })).catch((error) => console.warn("renderHome failed", error));
+    threadId: state.threadId, running, openMemory, memoryVersion: state.memoryVersion }))
+    .then(() => { if (state.historyOpen) home.hidden = true; })
+    .catch((error) => console.warn("renderHome failed", error));
 }
 
 function setHead(title, sub) {
@@ -627,6 +640,107 @@ function popover(buttonId, panelId) {
   return setOpen;
 }
 
+/* ---------- Memory ---------- */
+
+// What the agent remembers across this user's conversations, shown over the chat like ChatKit's history:
+// one entry per remembered conversation, grouped by day; open it, forget it, or forget everything.
+function dayGroup(when) {
+  const day = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const days = Math.round((day(new Date()) - day(when)) / 86400000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return "Previous 7 days";
+  if (days < 30) return "Previous 30 days";
+  return when.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+async function renderMemory() {
+  const body = $("memory-body");
+  const { status, body: memory } = await getJSON("/api/memory?detail=1").catch(() => ({ status: 0, body: null }));
+  if (status !== 200 || !memory) {
+    body.replaceChildren(el("p", { class: "memory-error" }, "Memory is unavailable right now."));
+    return;
+  }
+  $("memory-whose").textContent = memory.shared ? "Guest · shared by everyone not signed in" : memory.user;
+  const days = state.config.memory_max_age_days;
+  const minutes = Math.round((state.config.idle_close_s || 300) / 60);
+  const note = el("p", { class: "memory-note" }, "The agent starts each conversation with this and checks it against "
+    + `what it reads now.${days ? ` A conversation is forgotten ${plural(days, "day")} after its last message.` : ""}`);
+  if (!memory.remembered.length) {
+    body.replaceChildren(note, el("p", { class: "memory-empty" }, "Nothing remembered yet. When a conversation has been "
+      + `idle for ${plural(minutes, "minute")}, the agent distils what it learned.`));
+    return;
+  }
+  const groups = new Map();
+  for (const item of memory.remembered) {
+    const group = dayGroup(new Date(item.updated_at));
+    groups.set(group, [...(groups.get(group) || []), item]);
+  }
+  const entry = (item) => el("li", { class: "memory-entry" },
+    el("button", { type: "button", class: "memory-open", disabled: !item.open,
+      title: `${item.description || item.id}\n${new Date(item.updated_at).toLocaleString()}`
+        + (item.open ? "" : "\nThis conversation is no longer here."),
+      onclick: () => openRemembered(item.id) }, item.description || item.id),
+    el("button", { type: "button", class: "link-button danger memory-forget", "aria-label": "Forget this conversation",
+      onclick: () => forgetMemory(item, memory.shared) }, "Forget"));
+  body.replaceChildren(note,
+    ...[...groups].flatMap(([group, items]) => [el("div", { class: "memory-group" }, group),
+      el("ul", { class: "memory-list" }, items.map(entry))]),
+    el("div", { class: "memory-more" },
+      memory.text ? el("details", { class: "memory-section" }, el("summary", {}, "Summary the agent starts with"),
+        el("pre", {}, memory.text)) : null,
+      memory.index ? el("details", { class: "memory-section" }, el("summary", {}, "Everything it remembers (MEMORY.md)"),
+        el("pre", {}, memory.index)) : null,
+      el("p", { class: "memory-note" }, "Something wrong? Tell the agent in a conversation; it is remembered when that "
+        + "conversation goes idle. ", el("button", { type: "button", class: "link-button", onclick: correctMemory }, "Correct it")),
+      el("div", {}, el("button", { type: "button", class: "link-button danger", onclick: () => forgetMemory(null, memory.shared) },
+        "Forget everything…"))));
+}
+
+function openMemory() {
+  $("memory-view").hidden = false;
+  $("memory-back").focus();
+  renderMemory();
+}
+
+function closeMemory() {
+  $("memory-view").hidden = true;
+}
+
+function openRemembered(threadId) {
+  closeMemory();
+  state.chatkit?.setThreadId(threadId);
+}
+
+async function correctMemory() {
+  closeMemory();
+  await state.chatkit?.setThreadId(null);
+  suggest("Something you remember is wrong: ");
+}
+
+async function forgetMemory(item, shared) {
+  const dialog = $("forget-dialog");
+  $("forget-title").textContent = item ? "Forget this conversation?" : "Forget everything?";
+  $("forget-detail").textContent = item
+    ? `"${item.description || item.id}" is removed from memory now; what the summary drew from it goes the next time `
+      + "memory is updated. The conversation itself stays."
+    : "Everything in this memory is removed now. Your conversations stay.";
+  $("forget-shared").hidden = !shared;
+  $("forget-confirm").textContent = item ? "Forget conversation" : "Forget everything";
+  dialog.returnValue = "cancel";
+  dialog.showModal();
+  await new Promise((resolve) => dialog.addEventListener("close", resolve, { once: true }));
+  if (dialog.returnValue !== "forget") return;
+  const url = item ? `/api/memory/conversations/${encodeURIComponent(item.id)}` : "/api/memory";
+  const response = await fetch(url, { method: "DELETE" }).catch(() => null);
+  state.memoryVersion += 1;
+  await renderMemory();
+  renderHome();
+  if (!response?.ok && response?.status !== 404) {
+    $("memory-body").prepend(el("p", { class: "memory-error" }, "Memory could not be changed. The server log has the cause."));
+  }
+}
+
 async function deleteConversation() {
   const threadId = state.threadId;
   const dialog = $("delete-dialog");
@@ -670,6 +784,12 @@ async function main() {
 
   const setSettings = popover("settings-button", "settings-panel");
   const setMenu = popover("conversation-menu-button", "conversation-menu");
+  if (state.config.memory) {
+    $("memory-back").addEventListener("click", closeMemory);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !$("memory-view").hidden && !$("forget-dialog").open) closeMemory();
+    });
+  }
   for (const button of document.querySelectorAll("[data-theme-choice]")) {
     button.addEventListener("click", () => {
       state.themeChoice = button.dataset.themeChoice;

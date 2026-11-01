@@ -41,11 +41,8 @@
   color: var(--accent-ink); font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .sre-investigate:hover { border-color: var(--accent); }
 
-/* Memory */
-.sre-memory, .sre-memory-empty { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
-.sre-memory summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--ink); }
-.sre-memory pre { margin: 8px 0 0; max-height: 220px; overflow: auto; padding: 10px 12px; border-radius: 8px; background: var(--sunken);
-  white-space: pre-wrap; word-break: break-word; font: 12px/1.5 "IBM Plex Mono", monospace; color: var(--ink-2); }
+/* Memory: one line here; the Memory view beside the history button lists and forgets it */
+.sre-memory { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
 
 /* Findings */
 .sre-findings { padding: 0 0 24px; }

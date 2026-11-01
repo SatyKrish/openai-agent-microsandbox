@@ -164,9 +164,9 @@ them instead ([`memory.py`](../harness/src/openai_harness/memory.py)):
    header (`SRE_USER_HEADER`). Without it, every user is the guest and shares
    the guest's memory. Each user's memory is a directory under
    `/data/memory/users/` on the harness's volume.
-2. When a conversation's session opens, the harness copies its user's memory
-   into the workspace.
-3. When the session closes, the harness copies it in again, so consolidation
+2. When a conversation's session opens, the harness replaces the workspace's
+   `memories/` with its user's memory.
+3. When the session closes, the harness replaces it again, so consolidation
    builds on what the user's other conversations published meanwhile, and the
    SDK generates memory: `gpt-6-luna` extracts the conversation and
    `gpt-6.1-terra`, the agent's own model, consolidates, following the SDK's
@@ -212,9 +212,27 @@ constrained:
 - **It cannot pass the check.** Quotes in findings must match evidence the
   worker recorded in this conversation; memory files are not evidence.
 
-The UI's start screen shows the user's memory summary and whose it is. Memory
-is plain files on the harness's volume: an operator can read, edit or remove a
-user's directory under `/data/memory/users/`.
+Replacing `memories/` at both points, rather than copying over it, keeps two
+things out of memory: anything written there during a run, which only the
+SDK's generation at close may do, and anything forgotten while the conversation
+was open, which its stale copy would otherwise publish back.
+
+**People see and manage their memory** the way they see their conversations.
+The book button beside ChatKit's history button (ChatKit's header takes only
+its own icons) opens a Memory view over the chat, laid out like ChatKit's
+history: one entry per remembered conversation, with the SDK's one-line
+description, grouped by day. Selecting an entry opens that conversation;
+Forget appears on hover, and Forget everything below the list. It also shows the
+summary the agent starts with and `MEMORY.md` in full. A correction is made in
+a conversation ("Correct it" starts one), so it passes through the same
+extraction rules as everything else; memory is not edited as free text, which
+would put a user's words into later conversations' instructions unfiltered.
+The panel uses `GET /api/memory?detail=1`, `DELETE /api/memory/conversations/ID`
+and `DELETE /api/memory`, for the signed-in user (or the guest); the deletes are
+refused from other origins. Forgetting removes a conversation's raw memory and
+summary at once; what `MEMORY.md` drew from it goes at the next consolidation.
+Memory is plain files on the harness's volume: an operator can also read, edit
+or remove a user's directory under `/data/memory/users/`.
 
 ## Logs reach the model only as excerpts
 
