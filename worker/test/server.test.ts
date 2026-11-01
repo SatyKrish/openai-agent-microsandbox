@@ -14,7 +14,7 @@ import { after, before, test } from 'node:test';
 import * as grpc from '@grpc/grpc-js';
 
 import { createServer, loadService, type Runner } from '../src/server.js';
-import { config } from './helpers.js';
+import { config, fakeHealthSource, fakeLogSource } from './helpers.js';
 
 const PODS = 'NAME READY STATUS\npayments-api-1 0/1 CrashLoopBackOff\ntoken=abcd1234secret\n';
 
@@ -42,7 +42,7 @@ before(async () => {
   await fs.mkdir(path.join(data, 'bin'));
   await fs.writeFile(path.join(data, 'bin', 'kubectl'), `#!/bin/sh\nprintf '${PODS.replace(/\n/g, '\\n')}'\n`,
     { mode: 0o755 });
-  server = createServer(config(data, { token: 'pair-token', maxConcurrent: 2 }), fakeRunner);
+  server = createServer(config(data, { token: 'pair-token', maxConcurrent: 2 }), fakeRunner, { logs: fakeLogSource, health: fakeHealthSource });
   const port = await new Promise<number>((resolve, reject) =>
     server.bindAsync('127.0.0.1:0', grpc.ServerCredentials.createInsecure(), (error, bound) =>
       (error ? reject(error) : resolve(bound))));
@@ -152,4 +152,50 @@ test("MXC's structured errors and warnings are handled as its docs describe", as
     direct.close();
     other.forceShutdown();
   }
+});
+
+test('pod logs reach the caller only as a policy excerpt, recorded as evidence', async () => {
+  await call('InitSession', { session_id: 'conv-logs' }, auth());
+  const reply = await call<{ excerpt: string; evidence_path: string; lines_read: number; lines_shown: number;
+    lines_withheld: number; redactions: number }>('ReadLogs',
+    { session_id: 'conv-logs', namespace: 'payments', pod: 'deploy/payments-api', tail_lines: 5000 }, auth());
+  assert.equal(reply.lines_read, 1207);
+  assert.ok(reply.lines_shown <= 40 && reply.lines_withheld >= 1167, `${reply.lines_shown} shown`);
+  assert.match(reply.excerpt, /^\[log policy\] pod payments-api-7d9f8c6b5d-x2k4p in payments: read 1207 lines/);
+  assert.match(reply.excerpt, /ERROR upstream ledger timeout after 3000ms .*\[×5 more like this/);
+  assert.doesNotMatch(reply.excerpt, /@example\.com|4111/);
+  assert.equal(reply.evidence_path, 'evidence/001-pod-logs-payments-api-7d9f8c6b5d-x2k4p.txt');
+  // The evidence, the workspace copy and the excerpt are the same text; the raw log is in none of them.
+  const trusted = await call<{ content: Buffer; entry: { command: string } }>('ReadEvidence',
+    { session_id: 'conv-logs', seq: 1 }, auth());
+  assert.equal(trusted.content.toString(), reply.excerpt);
+  assert.equal(trusted.entry.command, 'pod_logs payments-api-7d9f8c6b5d-x2k4p -n payments');
+  const copy = await call<{ content: Buffer }>('ReadFile', { session_id: 'conv-logs', path: reply.evidence_path }, auth());
+  assert.equal(copy.content.toString(), reply.excerpt);
+  const journal = await fs.readFile(path.join(data, 'history', 'conv-logs', 'journal.jsonl'), 'utf8');
+  assert.match(journal, /"event":"logs".*"lines_read":1207.*"raw_sha256":"[0-9a-f]{64}"/);
+  assert.doesNotMatch(journal, /@example\.com|4111 1111/);
+
+  const asked = await call<{ excerpt: string }>('ReadLogs', { session_id: 'conv-logs', namespace: 'payments',
+    pod: 'deploy/payments-api', match: 'id=777 ' }, auth());
+  assert.match(asked.excerpt, /id=777 user=\[REDACTED_EMAIL\]/);
+
+  for (const [request, code] of [
+    [{ namespace: 'kube-system', pod: 'coredns-1' }, grpc.status.INVALID_ARGUMENT],
+    [{ namespace: 'payments', pod: '../etc' }, grpc.status.INVALID_ARGUMENT],
+    [{ namespace: 'payments', pod: 'missing-pod' }, grpc.status.NOT_FOUND],
+  ] as Array<[object, grpc.status]>) {
+    await assert.rejects(call('ReadLogs', { session_id: 'conv-logs', ...request }, auth()),
+      (error: grpc.ServiceError) => error.code === code, JSON.stringify(request));
+  }
+});
+
+test('the health summary is served to the harness with its pair token', async () => {
+  await assert.rejects(call('Health', {}), (error: grpc.ServiceError) => error.code === grpc.status.UNAUTHENTICATED);
+  const reply = await call<{ generated_at: string; namespaces: Array<{ namespace: string;
+    workloads: Array<{ name: string; state: string; reasons: string[] }> }> }>('Health', {}, auth());
+  assert.equal(reply.namespaces[0]!.namespace, 'payments');
+  assert.deepEqual(reply.namespaces[0]!.workloads.map((item) => [item.name, item.state]),
+    [['payments-processor', 'failing'], ['payments-gateway', 'healthy']]);
+  assert.ok(Date.parse(reply.generated_at) > 0);
 });

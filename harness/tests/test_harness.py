@@ -14,6 +14,7 @@ from starlette.testclient import TestClient
 
 from openai_harness import http
 from openai_harness.chat import HarnessChatServer, preferred_file, running_elsewhere
+from openai_harness.memory import MemoryStore
 from openai_harness.spec import AgentSpec
 from openai_harness.store import SQLiteStore
 from openai_harness.testing import Calls, events, message, shell
@@ -34,9 +35,9 @@ def make_chat(worker, tmp_path, model, **options):
                              model_label="scripted", **options)
 
 
-def app_for(chat, worker=None, **config):
+def app_for(chat, worker=None, health=None, **config):
     return http.ui_application(chat, config={"title": "<Test> agent", "model": "scripted", **config}, port=8009,
-                               jaeger_url=None, starting_files=STARTING, worker=worker)
+                               jaeger_url=None, starting_files=STARTING, worker=worker, health=health)
 
 
 async def new_thread(chat, text="First question"):
@@ -73,7 +74,7 @@ async def test_a_conversation_keeps_one_workspace_and_deleting_it_removes_the_wo
             "thread_id": thread_id, "input": message("Still there?")}})
         assert not [event for event in stream if event["type"] == "error"]
         turns = (await chat.store.load_thread(thread_id, {})).metadata["turns"]
-        assert turns[1]["lifecycle"] == "reopened"
+        assert turns[1]["lifecycle"] == "continued"  # the session stayed open between turns
         assert (worker.data_dir / "active" / workspace / "output/answer.txt").is_file()
 
         await chat.store.delete_thread(thread_id, {})
@@ -180,12 +181,14 @@ def test_a_turn_running_in_another_process_blocks_a_new_one_until_it_is_stale():
     assert not running_elsewhere({"turns": [{"status": "running", "started_at": stale}]}, set(), "thr_1")
 
 
-async def test_steps_say_where_they_ran(worker, tmp_path):
+async def test_steps_say_what_ran_and_where(worker, tmp_path):
     chat = make_chat(worker, tmp_path, Calls([shell("echo hi > output/a.txt")], answer="Done."))
     _, stream = await new_thread(chat, "Write a file")
     tasks = [event["update"]["task"] for event in stream if (event.get("update") or {}).get("type") == "workflow.task.updated"]
-    done = [task for task in tasks if task["title"].startswith("exec_command")]
-    assert done[-1]["title"] == "exec_command · exit 0 · sandbox"
+    done = [task for task in tasks if task["title"].startswith("echo hi")]
+    assert done[-1]["title"] == "echo hi > output/a.txt · exit 0 · sandbox"
+    thread = (await chat.store.load_threads(10, None, "desc", {})).data[0]
+    assert thread.metadata["turns"][0]["tools"][0]["summary"] == "echo hi > output/a.txt"
     assert any(task["title"].startswith("Created the workspace") for task in tasks)
     effects = [event for event in stream if event["type"] == "client_effect"]
     assert effects[-1]["data"]["path"] == "output/a.txt"
@@ -200,3 +203,87 @@ def test_the_panel_opens_a_checked_output_before_the_agents_report():
     turn["file_status"] = {}
     assert preferred_file(turn, "output/report.md") == "output/report.md"
     assert preferred_file({"files": [{"path": "work/x.py", "changed": True}]}) is None
+
+
+def test_the_page_serves_an_agents_health_summary(worker, tmp_path):
+    chat = make_chat(worker, tmp_path, Calls())
+
+    async def health():
+        return {"generated_at": "2026-11-01T06:00:00Z", "namespaces": [{"namespace": "payments", "error": "",
+                "workloads": [{"name": "payments-processor", "state": "failing"}]}]}
+
+    async def broken():
+        raise RuntimeError("worker restarting")
+
+    with TestClient(app_for(chat, health=health), base_url="http://localhost:8009") as client:
+        assert client.get("/api/config").json()["health"] is True
+        reply = client.get("/api/health").json()
+        assert reply["status"] == "ok" and reply["namespaces"][0]["workloads"][0]["state"] == "failing"
+    with TestClient(app_for(chat, health=broken), base_url="http://localhost:8009") as client:
+        assert client.get("/api/health").status_code == 503
+    with TestClient(app_for(chat), base_url="http://localhost:8009") as client:
+        assert client.get("/api/health").status_code == 404 and client.get("/api/config").json()["health"] is False
+    chat.store.close()
+
+
+async def test_memory_carries_across_conversations_through_the_harness(worker, tmp_path):
+    """The SDK distils memory into memories/ when a session closes; here the script writes it, as that step would."""
+    store = MemoryStore(tmp_path / "memory")
+    write = shell("mkdir -p memories/rollout_summaries && echo 'payments-processor needs DATABASE_URL' > memories/MEMORY.md"
+                  " && echo 'Payments: check DATABASE_URL first.' > memories/memory_summary.md"
+                  " && echo 'first incident' > memories/rollout_summaries/thr-1.md")
+    chat = make_chat(worker, tmp_path, Calls([write], answer="Noted."), memory=store, idle_close_s=0.2)
+    try:
+        first, _ = await new_thread(chat, "Investigate payments")
+        assert first in chat._open and store.files() == {}  # open, and nothing published while it is
+        await asyncio.sleep(0.6)
+        assert first not in chat._open  # closed when idle, and its memory published
+        assert store.files()["MEMORY.md"] == b"payments-processor needs DATABASE_URL\n"
+        assert store.summary()["text"].startswith("Payments: check DATABASE_URL") and store.summary()["conversations"] == 1
+
+        chat.model = Calls([shell("cat memories/MEMORY.md")], answer="I remember.")
+        second, stream = await new_thread(chat, "Anything known about payments?")
+        assert "payments-processor needs DATABASE_URL" in chat.model.outputs[0]
+        assert "Seeded with the agent's memory from earlier conversations (3 files)" in json.dumps(stream)
+
+        # A deleted conversation is not remembered, even with memory waiting in its open session.
+        chat.model = Calls([shell("echo 'forget me' > memories/MEMORY.md")], answer="Done.")
+        stream = await events(chat, {"type": "threads.add_user_message", "params": {
+            "thread_id": second, "input": message("Overwrite it")}})
+        await chat.store.delete_thread(second, {})
+        assert second not in chat._open
+        assert store.files()["MEMORY.md"] == b"payments-processor needs DATABASE_URL\n"
+    finally:
+        await chat.close_all()
+        chat.store.close()
+
+
+
+async def test_stopping_the_server_closes_open_sessions_and_keeps_their_memory(worker, tmp_path):
+    store = MemoryStore(tmp_path / "memory")
+    write = shell("mkdir -p memories && echo 'remembered at shutdown' > memories/MEMORY.md")
+    chat = make_chat(worker, tmp_path, Calls([write], answer="Noted."), memory=store, idle_close_s=3600)
+    try:
+        thread_id, _ = await new_thread(chat, "Investigate payments")
+        assert thread_id in chat._open
+        app = app_for(chat)
+        async with app.router.lifespan_context(app):
+            pass
+        assert thread_id not in chat._open and store.files()["MEMORY.md"] == b"remembered at shutdown\n"
+    finally:
+        await chat.close_all()
+        chat.store.close()
+
+async def test_a_turn_that_runs_out_of_steps_ends_with_a_message_instead_of_failing(worker, tmp_path):
+    chat = make_chat(worker, tmp_path, Calls([shell("echo one"), shell("echo two"), shell("echo three")], answer="Done."),
+                     max_turns=2)
+    try:
+        thread_id, stream = await new_thread(chat, "Do three things")
+        turn = (await chat.store.load_thread(thread_id, {})).metadata["turns"][0]
+        assert turn["status"] == "completed" and turn["step_limit"] is True
+        assert "limit of 2 model steps" in json.dumps(stream) and "ask me to continue" in json.dumps(stream)
+        # The partial turn stays in the history, so "continue" picks up from it.
+        assert await user_messages(chat, thread_id) == ["Do three things"]
+    finally:
+        await chat.close_all()
+        chat.store.close()

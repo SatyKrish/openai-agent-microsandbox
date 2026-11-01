@@ -1,7 +1,9 @@
 # The payments application, broken two ways for the SRE agent to investigate:
 # payments-processor exits at startup without DATABASE_URL (CrashLoopBackOff),
 # payments-ledger names an image tag that was never published (ImagePullBackOff),
-# and payments-gateway is healthy.
+# and payments-gateway is healthy. payments-api is running but logs a customer's
+# email and card number on every request and an upstream timeout every 200
+# requests: its log must reach the model only as a masked excerpt.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -67,6 +69,40 @@ spec:
         - name: gateway
           image: busybox:1.37.0
           command: ["sh", "-c", "echo 'payments-gateway 1.9.4 serving on :8080'; exec sleep 2147483647"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: payments
+  labels: {app: payments-api}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: payments-api}}
+  template:
+    metadata: {labels: {app: payments-api}}
+    spec:
+      containers:
+        - name: api
+          image: busybox:1.37.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "payments-api 4.1.0 serving on :8080"
+              i=0
+              while true; do
+                i=$((i + 1))
+                user="customer$((i % 50))@example.com"
+                now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                echo "$now INFO request id=$i user=$user path=/v1/charges card=4111 1111 1111 1111 status=200 latency_ms=$((i % 90))"
+                if [ $((i % 200)) -eq 0 ]; then
+                  echo "$now ERROR upstream ledger timeout after 3000ms id=$i user=$user"
+                fi
+                sleep 0.05
+              done
           resources:
             requests: {cpu: 10m, memory: 16Mi}
             limits: {memory: 64Mi}

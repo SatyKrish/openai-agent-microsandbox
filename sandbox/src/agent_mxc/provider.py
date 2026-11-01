@@ -22,7 +22,7 @@ from pydantic import field_validator
 
 from agents.sandbox import Manifest
 from agents.sandbox.entries import BaseEntry, Dir, File, LocalDir, LocalFile
-from agents.sandbox.errors import ExecTimeoutError, ExecTransportError
+from agents.sandbox.errors import ExecTimeoutError, ExecTransportError, WorkspaceReadNotFoundError
 from agents.sandbox.session import SandboxSession, SandboxSessionState
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
@@ -35,6 +35,11 @@ from .transport import MIB, WorkerError, WorkerTransport
 BACKEND = "mxc-kubernetes-worker"
 MAX_FILE_BYTES = 10 * MIB
 _SESSION_ID = re.compile(r"[a-z0-9][a-z0-9-]{2,62}")
+
+
+class WorkspaceFileNotFoundError(WorkspaceReadNotFoundError, FileNotFoundError):
+    """A missing workspace file. SDK capabilities such as Memory expect the SDK's own not-found error;
+    other callers expect a ``FileNotFoundError``. This is both."""
 
 
 def workspace_id(value: str) -> str:
@@ -117,6 +122,18 @@ class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
                 "mxc_sdk_version": reply.mxc_sdk_version, "egress": reply.egress,
                 "active_sessions": reply.active_sessions, "namespaces": list(reply.namespaces)}
 
+    async def health(self) -> dict:
+        """The worker's summary of its namespaces' workloads: for people, not for the model."""
+        reply = await self.transport.health()
+        return {"generated_at": reply.generated_at, "namespaces": [
+            {"namespace": item.namespace, "error": item.error, "workloads": [
+                {"kind": workload.kind, "name": workload.name, "desired": workload.desired, "ready": workload.ready,
+                 "restarts": workload.restarts, "state": workload.state, "reasons": list(workload.reasons),
+                 "warnings": workload.warnings, "last_warning": workload.last_warning,
+                 "last_warning_at": workload.last_warning_at}
+                for workload in item.workloads]}
+            for item in reply.namespaces]}
+
     @traced_operation("sandbox.create")
     async def create(self, *, options: MXCSandboxOptions | None = None, manifest: Manifest | None = None,
                      snapshot: SnapshotSpec | SnapshotBase | None = None) -> SandboxSession:
@@ -155,6 +172,10 @@ class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
         if not inner.deleted:
             await self.transport.destroy(inner.state.workspace_id, purge_history=purge_history)
             inner.deleted = True
+            # A deleted workspace is not remembered: skip the pre-stop hooks, where the SDK's memory
+            # generation runs, and close.
+            session._pre_stop_hooks_ran = True
+            inner._pre_stop_hooks_ran = True
             await session.aclose()
         return session
 
@@ -215,7 +236,7 @@ class _MXCSession(BaseSandboxSession):
 
     def _file_error(self, error: WorkerError, path: str) -> Exception:
         if error.code == grpc.StatusCode.NOT_FOUND:
-            return FileNotFoundError(path)
+            return WorkspaceFileNotFoundError(path=Path(path))
         if error.code == grpc.StatusCode.RESOURCE_EXHAUSTED:
             return ValueError(f"{path} exceeds the {self.client.max_file_bytes / MIB:g} MiB file limit")
         if error.code == grpc.StatusCode.INVALID_ARGUMENT:
@@ -264,6 +285,20 @@ class _MXCSession(BaseSandboxSession):
     async def read_evidence(self, seq: int) -> bytes:
         """The worker's own copy of an evidence entry, which no container can edit."""
         return (await self.transport.read_evidence(self.state.workspace_id, seq)).content
+
+    async def read_logs(self, namespace: str, pod: str, *, container: str | None = None, previous: bool = False,
+                        tail_lines: int = 0, since_seconds: int = 0, match: str | None = None) -> dict:
+        """A pod's log through the worker's log policy: an excerpt, never the raw log.
+
+        ``pod`` is a pod name or ``deploy/NAME``. The worker records the excerpt as evidence.
+        """
+        with operation("sandbox.logs"):
+            reply = await self.transport.read_logs(
+                self.state.workspace_id, namespace, pod, container=container or "", previous=previous,
+                tail_lines=tail_lines, since_seconds=since_seconds, match=match or "")
+        return {"excerpt": reply.excerpt, "evidence_path": reply.evidence_path, "lines_read": reply.lines_read,
+                "lines_shown": reply.lines_shown, "lines_withheld": reply.lines_withheld,
+                "redactions": reply.redactions}
 
     async def persist_workspace(self) -> io.IOBase:
         raise NotImplementedError("The workspace persists on the worker's volume")

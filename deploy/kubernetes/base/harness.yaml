@@ -26,6 +26,9 @@ spec:
         runAsGroup: 10001
         fsGroup: 10001
         seccompProfile: {type: RuntimeDefault}
+      # On SIGTERM the harness closes its open sessions, and the SDK distils each one's memory
+      # (about a minute each); sessions still open when the grace period ends are not remembered.
+      terminationGracePeriodSeconds: 180
       containers:
         - name: harness
           image: sre-agent-harness:local
@@ -40,6 +43,10 @@ spec:
             - {name: MXC_WORKSPACE_BASE, value: /sandboxes/active}
             - {name: SRE_NAMESPACES, value: payments}
             - {name: SRE_DATA_DIR, value: /data}
+            # A conversation's session closes after this long without a message; the SDK distils
+            # its memory then, and the harness shares it with later conversations (/data/memory).
+            - {name: SRE_SESSION_IDLE_S, value: "300"}
+            - {name: SRE_MAX_TURNS, value: "25"}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -158,6 +158,90 @@ class ReadEvidenceResponse(_message.Message):
     content: bytes
     def __init__(self, entry: _Optional[_Union[Evidence, _Mapping]] = ..., content: _Optional[bytes] = ...) -> None: ...
 
+class ReadLogsRequest(_message.Message):
+    __slots__ = ("session_id", "namespace", "pod", "container", "previous", "tail_lines", "since_seconds", "match")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
+    POD_FIELD_NUMBER: _ClassVar[int]
+    CONTAINER_FIELD_NUMBER: _ClassVar[int]
+    PREVIOUS_FIELD_NUMBER: _ClassVar[int]
+    TAIL_LINES_FIELD_NUMBER: _ClassVar[int]
+    SINCE_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    MATCH_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    namespace: str
+    pod: str
+    container: str
+    previous: bool
+    tail_lines: int
+    since_seconds: int
+    match: str
+    def __init__(self, session_id: _Optional[str] = ..., namespace: _Optional[str] = ..., pod: _Optional[str] = ..., container: _Optional[str] = ..., previous: _Optional[bool] = ..., tail_lines: _Optional[int] = ..., since_seconds: _Optional[int] = ..., match: _Optional[str] = ...) -> None: ...
+
+class ReadLogsResponse(_message.Message):
+    __slots__ = ("excerpt", "evidence_path", "lines_read", "lines_shown", "lines_withheld", "redactions")
+    EXCERPT_FIELD_NUMBER: _ClassVar[int]
+    EVIDENCE_PATH_FIELD_NUMBER: _ClassVar[int]
+    LINES_READ_FIELD_NUMBER: _ClassVar[int]
+    LINES_SHOWN_FIELD_NUMBER: _ClassVar[int]
+    LINES_WITHHELD_FIELD_NUMBER: _ClassVar[int]
+    REDACTIONS_FIELD_NUMBER: _ClassVar[int]
+    excerpt: str
+    evidence_path: str
+    lines_read: int
+    lines_shown: int
+    lines_withheld: int
+    redactions: int
+    def __init__(self, excerpt: _Optional[str] = ..., evidence_path: _Optional[str] = ..., lines_read: _Optional[int] = ..., lines_shown: _Optional[int] = ..., lines_withheld: _Optional[int] = ..., redactions: _Optional[int] = ...) -> None: ...
+
+class HealthRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class Workload(_message.Message):
+    __slots__ = ("namespace", "kind", "name", "desired", "ready", "restarts", "state", "reasons", "warnings", "last_warning", "last_warning_at")
+    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    DESIRED_FIELD_NUMBER: _ClassVar[int]
+    READY_FIELD_NUMBER: _ClassVar[int]
+    RESTARTS_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    REASONS_FIELD_NUMBER: _ClassVar[int]
+    WARNINGS_FIELD_NUMBER: _ClassVar[int]
+    LAST_WARNING_FIELD_NUMBER: _ClassVar[int]
+    LAST_WARNING_AT_FIELD_NUMBER: _ClassVar[int]
+    namespace: str
+    kind: str
+    name: str
+    desired: int
+    ready: int
+    restarts: int
+    state: str
+    reasons: _containers.RepeatedScalarFieldContainer[str]
+    warnings: int
+    last_warning: str
+    last_warning_at: str
+    def __init__(self, namespace: _Optional[str] = ..., kind: _Optional[str] = ..., name: _Optional[str] = ..., desired: _Optional[int] = ..., ready: _Optional[int] = ..., restarts: _Optional[int] = ..., state: _Optional[str] = ..., reasons: _Optional[_Iterable[str]] = ..., warnings: _Optional[int] = ..., last_warning: _Optional[str] = ..., last_warning_at: _Optional[str] = ...) -> None: ...
+
+class NamespaceHealth(_message.Message):
+    __slots__ = ("namespace", "workloads", "error")
+    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
+    WORKLOADS_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    namespace: str
+    workloads: _containers.RepeatedCompositeFieldContainer[Workload]
+    error: str
+    def __init__(self, namespace: _Optional[str] = ..., workloads: _Optional[_Iterable[_Union[Workload, _Mapping]]] = ..., error: _Optional[str] = ...) -> None: ...
+
+class HealthResponse(_message.Message):
+    __slots__ = ("generated_at", "namespaces")
+    GENERATED_AT_FIELD_NUMBER: _ClassVar[int]
+    NAMESPACES_FIELD_NUMBER: _ClassVar[int]
+    generated_at: str
+    namespaces: _containers.RepeatedCompositeFieldContainer[NamespaceHealth]
+    def __init__(self, generated_at: _Optional[str] = ..., namespaces: _Optional[_Iterable[_Union[NamespaceHealth, _Mapping]]] = ...) -> None: ...
+
 class DestroySessionRequest(_message.Message):
     __slots__ = ("session_id", "purge_history")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]

@@ -3,12 +3,19 @@
 """ChatKit server for any agent: one thread is one conversation backed by one MXC sandbox session.
 
 Each message takes the conversation's lock and reloads the thread, refuses to start
-while another process is running a turn of it, creates or reopens the conversation's
-workspace on its MXC sandbox worker, copies uploads into it, runs the agent loop with
-the conversation's SDK session history (every command in a fresh MXC container),
-fetches the cluster reads the worker recorded as evidence, copies the agent's output
-folders to the host and runs the agent's host check. Deleting the thread deletes the
-workspace, the history and the host copies; the worker keeps its audit journal.
+while another process is running a turn of it, continues the conversation's open
+sandbox session or opens it (creating the workspace on its MXC sandbox worker the first
+time), copies uploads into it, runs the agent loop with the conversation's SDK session
+history (every command in a fresh MXC container), fetches the cluster reads the worker
+recorded as evidence, copies the agent's output folders to the host and runs the
+agent's host check.
+
+The session stays open between turns, as the SDK expects for a multi-turn
+conversation, and closes after ``idle_close_s`` without a message. Closing is when the
+SDK's Memory capability distils the conversation into memory; with a ``MemoryStore``
+the harness seeds that memory from, and publishes it back to, the agent's memory
+across conversations. Deleting the thread deletes the workspace, the history and the
+host copies without generating memory; the worker keeps its audit journal.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from typing import Callable
 
 from agents import Runner, SQLiteSession, trace
 from agents.run import RunConfig
+from agents.run_error_handlers import RunErrorHandlerResult
 from agents.sandbox import SandboxRunConfig
 from agents.tracing import gen_trace_id
 from chatkit.agents import AgentContext, stream_agent_response
@@ -36,7 +44,8 @@ from chatkit.errors import CustomStreamError
 from chatkit.server import ChatKitServer
 from chatkit.store import NotFoundError
 from chatkit.types import (
-    ClientEffectEvent, CustomTask, ThreadItemAddedEvent, ThreadItemDoneEvent, ThreadItemUpdatedEvent, ThreadMetadata,
+    AssistantMessageContent, AssistantMessageItem, ClientEffectEvent, CustomTask, ThreadItemAddedEvent,
+    ThreadItemDoneEvent, ThreadItemUpdatedEvent, ThreadMetadata,
     UserMessageItem, WidgetItem, Workflow, WorkflowItem, WorkflowTaskAdded, WorkflowTaskUpdated,
 )
 from chatkit.widgets import DynamicWidgetRoot
@@ -45,6 +54,7 @@ from agent_mxc import MXCSandboxOptions, WorkerError
 from agent_mxc.instrumentation import operation
 from agent_mxc.tracing import otel_trace_id, tracing_enabled
 
+from .memory import MemoryStore
 from .spec import AgentSpec, Conversation, TurnContext
 from .steps import ToolSteps, fenced, user_text
 from .uploads import UploadRejected, UploadStore, upload_name
@@ -94,7 +104,7 @@ class HarnessChatServer(ChatKitServer[dict]):
                  base_url: str = "http://localhost:8000", model_label: str | None = None, max_turns: int = 25,
                  card: Callable[[Conversation, dict, set[str]], list[dict]] | None = None,
                  file_status: Callable[[Conversation, dict], dict[str, dict]] | None = None,
-                 preferred_output: str | None = None):
+                 preferred_output: str | None = None, memory: MemoryStore | None = None, idle_close_s: float = 300):
         self.spec = spec
         self.output_dir = Path(output_dir)
         self.uploads = UploadStore(store, self.output_dir / ".staged", base_url, spec.uploads)
@@ -111,6 +121,11 @@ class HarnessChatServer(ChatKitServer[dict]):
         self.history_path = self.output_dir / "history.sqlite3"
         self.running: set[str] = set()
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.memory = memory
+        self.idle_close_s = idle_close_s
+        # thread id -> (open sandbox session, its idle-close task); a running turn takes its session out.
+        self._open: dict[str, tuple[object, asyncio.Task | None]] = {}
+        self._memory_lock = asyncio.Lock()
 
     def conversation(self, thread: ThreadMetadata) -> Conversation:
         return Conversation(thread, self.output_dir / thread.id)
@@ -204,6 +219,18 @@ class HarnessChatServer(ChatKitServer[dict]):
 
     async def _run_turn(self, conversation: Conversation, context_: AgentContext, turn: dict, text: str, attachments: list):
         thread, meta = conversation.thread, conversation.metadata
+        opened = self._open.pop(thread.id, None)
+        if opened is not None:
+            session, closer = opened
+            if closer is not None:
+                closer.cancel()
+            turn["lifecycle"] = "continued"
+            try:
+                async for event in self._continue_turn(conversation, context_, turn, text, attachments, session):
+                    yield event
+            finally:
+                self._park(thread.id, session)
+            return
         created = meta.get("sandbox") is None
         step = CustomTask(title="Creating the workspace" if created else "Reopening the workspace", status_indicator="loading")
         workflow = WorkflowItem(id=context_.generate_id("workflow"), created_at=datetime.now(), thread_id=thread.id,
@@ -228,71 +255,106 @@ class HarnessChatServer(ChatKitServer[dict]):
         except WorkerError as error:
             raise TurnError(f"The sandbox worker {self.client.worker} is unavailable ({error.code.name}). "
                             "Retry when it is back.", retry=True) from error
-        async with contextlib.aclosing(session):
+        try:
             if created:
                 boundary = await session.exec('test -z "${OPENAI_API_KEY:-}"')
                 if not boundary.ok():
                     raise RuntimeError("The sandbox must not contain the harness API key")
+            remembered = await self.memory.seed(session) if self.memory is not None else 0
             seconds = time.monotonic() - began
             turn["start_s"] = round(seconds, 1)
             verb = "Created" if created else "Reopened"
             detail = (f"Session `{workspace}`: a workspace on the worker's volume. Every command runs in its own "
                       "Microsoft eXecution Container that sees only this workspace." if created
                       else f"Same session `{workspace}`; its workspace still holds the earlier turns' files.")
+            if remembered:
+                detail += f" Seeded with the agent's memory from earlier conversations ({remembered} files)."
             step = CustomTask(title=f"{verb} the workspace · {seconds:.1f} s", content=detail, status_indicator="complete")
             workflow.workflow.tasks[0] = step
             yield ThreadItemUpdatedEvent(item_id=workflow.id, update=WorkflowTaskUpdated(task=step, task_index=0))
+            async for event in self._continue_turn(conversation, context_, turn, text, attachments, session, workflow):
+                yield event
+        finally:
+            self._park(thread.id, session)
 
-            if attachments:
-                noun = "upload" if len(attachments) == 1 else "uploads"
-                copying = CustomTask(title=f"Copying {len(attachments)} {noun} into the workspace", status_indicator="loading")
-                workflow.workflow.tasks.append(copying)
-                index = len(workflow.workflow.tasks) - 1
-                yield ThreadItemUpdatedEvent(item_id=workflow.id, update=WorkflowTaskAdded(task=copying, task_index=index))
-                added = await self._store_uploads(session, conversation, turn, attachments, context_.request_context)
-                described = [(item, self._describe_upload(item)) for item in added]
-                listing = "\n".join(f"{item['path']}  {item['bytes']} bytes  sha256 {item['sha256'][:12]}…"
-                                    + (f"  {summary}" if summary else "") for item, summary in described)
-                copied = CustomTask(title=f"Copied {len(added)} {noun} to inputs/uploads/", content=fenced(listing),
-                                    status_indicator="complete")
-                workflow.workflow.tasks[index] = copied
-                yield ThreadItemUpdatedEvent(item_id=workflow.id, update=WorkflowTaskUpdated(task=copied, task_index=index))
-                # Show what the sandbox made of the first upload while the model reads it.
-                yield ClientEffectEvent(name="open_file", data={"thread_id": thread.id, "turn": turn["number"],
-                                                                "path": added[0]["path"]})
-                text += "\n\n[Uploaded to the workspace this turn: " + ", ".join(
-                    f"{item['path']} ({item['bytes']} bytes" + (f"; {summary}" if summary else "") + ")"
-                    for item, summary in described) + "]"
+    async def _continue_turn(self, conversation: Conversation, context_: AgentContext, turn: dict, text: str,
+                             attachments: list, session, workflow: WorkflowItem | None = None):
+        """The turn itself, in an open session: uploads, the agent loop, evidence, outputs and the check."""
+        thread, meta = conversation.thread, conversation.metadata
+        if workflow is None:
+            step = CustomTask(title="Continued in the open workspace", status_indicator="complete",
+                              content=f"Same session `{meta['workspace']}`, still open from the last turn.")
+            workflow = WorkflowItem(id=context_.generate_id("workflow"), created_at=datetime.now(), thread_id=thread.id,
+                                    workflow=Workflow(type="custom", tasks=[step], expanded=True))
+            context_.workflow_item = workflow
+            yield ThreadItemAddedEvent(item=workflow)
+            turn["start_s"] = 0.0
+        if attachments:
+            noun = "upload" if len(attachments) == 1 else "uploads"
+            copying = CustomTask(title=f"Copying {len(attachments)} {noun} into the workspace", status_indicator="loading")
+            workflow.workflow.tasks.append(copying)
+            index = len(workflow.workflow.tasks) - 1
+            yield ThreadItemUpdatedEvent(item_id=workflow.id, update=WorkflowTaskAdded(task=copying, task_index=index))
+            added = await self._store_uploads(session, conversation, turn, attachments, context_.request_context)
+            described = [(item, self._describe_upload(item)) for item in added]
+            listing = "\n".join(f"{item['path']}  {item['bytes']} bytes  sha256 {item['sha256'][:12]}…"
+                                + (f"  {summary}" if summary else "") for item, summary in described)
+            copied = CustomTask(title=f"Copied {len(added)} {noun} to inputs/uploads/", content=fenced(listing),
+                                status_indicator="complete")
+            workflow.workflow.tasks[index] = copied
+            yield ThreadItemUpdatedEvent(item_id=workflow.id, update=WorkflowTaskUpdated(task=copied, task_index=index))
+            # Show what the sandbox made of the first upload while the model reads it.
+            yield ClientEffectEvent(name="open_file", data={"thread_id": thread.id, "turn": turn["number"],
+                                                            "path": added[0]["path"]})
+            text += "\n\n[Uploaded to the workspace this turn: " + ", ".join(
+                f"{item['path']} ({item['bytes']} bytes" + (f"; {summary}" if summary else "") + ")"
+                for item, summary in described) + "]"
 
-            harness_tools = list(self.spec.tools(TurnContext(conversation, turn, session)))
-            agent = self.spec.build_agent(session.state.manifest, self.model)
-            extra = self.spec.instructions(conversation)
-            agent = agent.clone(instructions=agent.instructions + ("\n\n" + extra if extra else ""),
-                                tools=[*agent.tools, *harness_tools])
-            history = self.history(thread.id)
-            kept = len(await history.get_items())
-            try:
-                result = Runner.run_streamed(
-                    agent, text, session=history, max_turns=self.max_turns,
-                    run_config=RunConfig(sandbox=SandboxRunConfig(session=session), tracing_disabled=not tracing_enabled(),
-                                         trace_include_sensitive_data=False))
-                steps = ToolSteps(result, context_, turn["tools"], frozenset(tool.name for tool in harness_tools))
-                async for event in stream_agent_response(context_, steps):
-                    yield event
-            except BaseException:
-                # The SDK saves items as the run goes; a failed turn must not leave half of itself in the history.
-                while len(await history.get_items()) > kept:
-                    await history.pop_item()
-                raise
-            finally:
-                history.close()
-            await self._collect_evidence(session, conversation, turn)
-            files = await self._collect(session, conversation, turn)
-            _, check_operation = self.spec.trace_operations
-            with operation(check_operation):
-                turn["check"] = self.spec.check(conversation, turn, files)
-            if self.file_status is not None:
-                turn["file_status"] = self.file_status(conversation, turn)
+        harness_tools = list(self.spec.tools(TurnContext(conversation, turn, session)))
+        agent = self.spec.build_agent(session.state.manifest, self.model)
+        extra = self.spec.instructions(conversation)
+        agent = agent.clone(instructions=agent.instructions + ("\n\n" + extra if extra else ""),
+                            tools=[*agent.tools, *harness_tools])
+        history = self.history(thread.id)
+        kept = len(await history.get_items())
+        out_of_turns: list[str] = []
+
+        def step_limit(data) -> RunErrorHandlerResult:
+            # Keep the turn and its evidence instead of failing it: the next message can pick up from here.
+            message = (f"I reached this turn's limit of {self.max_turns} model steps before finishing. The evidence "
+                       "I gathered is saved in the workspace; ask me to continue and I'll pick up from it.")
+            out_of_turns.append(message)
+            return RunErrorHandlerResult(final_output=message, include_in_history=True)
+
+        try:
+            result = Runner.run_streamed(
+                agent, text, session=history, max_turns=self.max_turns, error_handlers={"max_turns": step_limit},
+                run_config=RunConfig(sandbox=SandboxRunConfig(session=session), tracing_disabled=not tracing_enabled(),
+                                     trace_include_sensitive_data=False,
+                                     # A misspelled tool name is the model's mistake to correct, not a failed turn.
+                                     tool_not_found_behavior="return_error_to_model"))
+            steps = ToolSteps(result, context_, turn["tools"], frozenset(tool.name for tool in harness_tools))
+            async for event in stream_agent_response(context_, steps):
+                yield event
+            if out_of_turns:
+                turn["step_limit"] = True
+                yield ThreadItemDoneEvent(item=AssistantMessageItem(
+                    id=self.store.generate_item_id("message", thread, context_.request_context), thread_id=thread.id,
+                    created_at=datetime.now(), content=[AssistantMessageContent(text=out_of_turns[0])]))
+        except BaseException:
+            # The SDK saves items as the run goes; a failed turn must not leave half of itself in the history.
+            while len(await history.get_items()) > kept:
+                await history.pop_item()
+            raise
+        finally:
+            history.close()
+        await self._collect_evidence(session, conversation, turn)
+        files = await self._collect(session, conversation, turn)
+        _, check_operation = self.spec.trace_operations
+        with operation(check_operation):
+            turn["check"] = self.spec.check(conversation, turn, files)
+        if self.file_status is not None:
+            turn["file_status"] = self.file_status(conversation, turn)
         meta["sandbox"] = self.client.serialize_session_state(session.state)
 
     async def _collect_evidence(self, session, conversation: Conversation, turn: dict) -> None:
@@ -447,12 +509,62 @@ class HarnessChatServer(ChatKitServer[dict]):
             id=self.store.generate_item_id("message", thread, context), thread_id=thread.id,
             created_at=datetime.now(), widget=widget))
 
+    def _park(self, thread_id: str, session) -> None:
+        """Keep a conversation's session open after its turn, and close it once it has been idle."""
+        self._open[thread_id] = (session, asyncio.get_running_loop().create_task(self._close_when_idle(thread_id)))
+
+    async def _close_when_idle(self, thread_id: str) -> None:
+        await asyncio.sleep(self.idle_close_s)
+        async with self._locks[thread_id]:
+            opened = self._open.get(thread_id)
+            if opened is None or opened[1] is not asyncio.current_task():
+                return  # a turn took the session meanwhile
+            del self._open[thread_id]
+            await self._close(thread_id, opened[0], f"after {self.idle_close_s:.0f} s idle")
+
+    async def _close(self, thread_id: str, session, why: str) -> None:
+        """Close a session; with a memory store, the SDK's memory generation runs here and its result is published."""
+        if self.memory is None:
+            await _quietly(session.aclose(), f"closing {thread_id}")
+            return
+        async with self._memory_lock:
+            began = time.monotonic()
+            # Consolidate on top of what other conversations published since this one opened. Without that,
+            # publishing could drop their lessons, so a failed seed closes the session without publishing.
+            if await _quietly(self.memory.seed(session), f"seeding memory for {thread_id}") is False:
+                await _quietly(session.aclose(), f"closing {thread_id}")
+                return
+            if await _quietly(session.aclose(), f"generating memory for {thread_id}") is False:
+                return
+            files = await _quietly(self.memory.publish(session), f"publishing memory from {thread_id}")
+            logger.info("Closed %s %s; memory has %s files (%.1f s)", thread_id, why, files,
+                        time.monotonic() - began)
+
+    async def close_all(self) -> None:
+        """Close every open session now, as an idle close would (tests and shutdown)."""
+        for thread_id in list(self._open):
+            async with self._locks[thread_id]:
+                opened = self._open.pop(thread_id, None)
+                if opened is None:
+                    continue
+                if opened[1] is not None:
+                    opened[1].cancel()
+                await self._close(thread_id, opened[0], "on shutdown")
+
     async def delete_workspace(self, thread_id: str) -> None:
-        """Delete the workspace on the worker, the history, then the host copies. The worker keeps its journal."""
+        """Delete the workspace on the worker, the history, then the host copies. The worker keeps its journal.
+
+        A deleted conversation is not remembered: its open session closes without generating memory.
+        """
         thread = await self.store.load_thread(thread_id, {})
         state = thread.metadata.get("sandbox")
         async with self._locks[thread_id]:
-            if state is not None:
+            opened = self._open.pop(thread_id, None)
+            if opened is not None and opened[1] is not None:
+                opened[1].cancel()
+            if opened is not None:
+                await self.client.delete(opened[0])
+            elif state is not None:
                 # A workspace that is already gone is not an error: the worker reports it and moves on.
                 session = await self.client.resume(self.client.deserialize_session_state(state))
                 await self.client.delete(session)
@@ -462,6 +574,16 @@ class HarnessChatServer(ChatKitServer[dict]):
             finally:
                 history.close()
             shutil.rmtree(self.output_dir / thread_id, ignore_errors=True)
+
+
+async def _quietly(awaitable, what: str):
+    """Memory is best effort: log a failure and carry on. Returns the result, or False on failure."""
+    try:
+        result = await awaitable
+        return True if result is None else result
+    except Exception:
+        logger.exception("Failed %s", what)
+        return False
 
 
 def _has_badge(node: dict) -> bool:

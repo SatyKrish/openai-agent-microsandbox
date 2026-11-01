@@ -8,6 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { evidenceName, kubectlRead } from '../src/evidence.js';
+import { apiLogSource, LogError } from '../src/logs.js';
 import { redact } from '../src/redact.js';
 import { buildRequest, quote } from '../src/runner.js';
 import { Workspaces, WorkspaceError } from '../src/workspace.js';
@@ -17,7 +18,9 @@ import { config } from './helpers.js';
 test('kubectl reads qualify as evidence only when plain', () => {
   assert.deepEqual(kubectlRead(['sh', '-lc', 'kubectl get pods -n payments -o wide']),
     ['kubectl', 'get', 'pods', '-n', 'payments', '-o', 'wide']);
-  assert.ok(kubectlRead(['kubectl', 'logs', 'deploy/checkout', '--previous', '--namespace=payments']));
+  // Logs are never evidence from a command: containers cannot read them.
+  assert.equal(kubectlRead(['kubectl', 'logs', 'deploy/checkout', '--previous', '--namespace=payments']), null);
+  assert.ok(kubectlRead(['kubectl', 'get', 'events', '--namespace=payments']));
   assert.ok(kubectlRead(['sh', '-c', 'kubectl -n payments describe pod/api-1']));
   for (const line of [
     'kubectl get pods | grep api', 'kubectl get pods > x', 'kubectl get pods; echo hi', 'kubectl get pods $(id)',
@@ -45,6 +48,7 @@ test('redaction removes credentials and keeps context', () => {
   const out = redact([
     `token ${jwt}`, 'AKIAABCDEFGHIJKLMNOP', 'DATABASE_URL: postgres://app:hunter2@db:5432/orders',
     'password=s3cr3t-value', 'Authorization: Bearer abcdefghijklmnop1234', 'automountServiceAccountToken: false',
+    'echo "user=ops@example.com card=4111 1111 1111 1111 replicas=3 resourceVersion=1234567890"',
     '-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----',
   ].join('\n'));
   assert.ok(!out.includes(jwt) && out.includes('[REDACTED_JWT]'));
@@ -53,6 +57,8 @@ test('redaction removes credentials and keeps context', () => {
   assert.ok(out.includes('password=[REDACTED]'));
   assert.ok(out.includes('Bearer [REDACTED]'));
   assert.ok(out.includes('automountServiceAccountToken: false'));
+  // Personal data in pod specs and events too, without touching ordinary numbers.
+  assert.ok(out.includes('user=[REDACTED_EMAIL] card=[REDACTED_CARD] replicas=3 resourceVersion=1234567890'));
   assert.ok(out.includes('[REDACTED_PRIVATE_KEY]') && !out.includes('MIIabc'));
 });
 
@@ -107,4 +113,14 @@ test('workspace paths stay inside the session', async () => {
   assert.equal(await spaces.destroy('conv-1'), true);
   assert.equal(await spaces.exists('conv-1'), false);
   assert.equal(await fs.readFile(path.join(data, 'history', 'secret'), 'utf8'), 'journal');
+});
+
+test("a log the kubelet no longer has is an error, not the container's output", async () => {
+  const body = { text: 'line one\nline two\n' };
+  const source = apiLogSource({ get: async () => body.text, json: async () => { throw new Error('unused'); } });
+  const query = { namespace: 'payments', pod: 'p-1', previous: true, tailLines: 10, limitBytes: 1024 };
+  assert.equal((await source(query)).text, body.text);
+  body.text = 'unable to retrieve container logs for containerd://10d63f5c38de';
+  await assert.rejects(source(query), (error: unknown) =>
+    error instanceof LogError && error.status === 404 && /no longer has the previous container's log/.test(error.message));
 });

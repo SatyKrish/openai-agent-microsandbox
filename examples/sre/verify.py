@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 import time
@@ -41,11 +42,24 @@ PROBES = [
     ("writes are refused before they reach the API",
      "kubectl delete pod payments-probe -n payments --dry-run=server", "nonzero", "read-only"),
     ("exec into pods is refused", "kubectl exec -n payments deploy/payments-gateway -- true", "nonzero", None),
+    ("raw pod logs are refused in the sandbox", "kubectl logs deploy/payments-gateway -n payments", "nonzero",
+     "pod_logs"),
     ("credentials in output are redacted", "echo DATABASE_URL=postgres://app:hunter2@db/orders password=hunter2hunter2",
      0, "postgres://app:[REDACTED]@db/orders password=[REDACTED]"),
 ]
 PODS = "evidence/001-kubectl-get-pods-n-payments-o-wide.txt"
-LOGS = "evidence/002-kubectl-logs-deploy-payments-processor-n-payments.txt"
+
+
+def findings_command(logs_glob: str = "evidence/002-pod-logs-*.txt") -> str:
+    """A sandbox command that writes findings citing the log excerpt, whose name holds the real pod's name."""
+    return ("python3 - <<'PY'\nimport glob, json\nlogs = sorted(glob.glob('" + logs_glob + "'))[0]\n"
+            "json.dump({'findings': [{'resource': 'deployment/payments-processor', 'namespace': 'payments', "
+            "'problem': 'CrashLoopBackOff', 'cause': 'DATABASE_URL is not set', "
+            "'fix': 'Set DATABASE_URL from the payments-db Secret', 'evidence': ["
+            "{'file': logs, 'quote': 'Missing required env var DATABASE_URL'}, "
+            # The pod's status alternates between Error and CrashLoopBackOff; its name does not.
+            "{'file': '" + PODS + "', 'quote': 'payments-processor-'}]}]}, open('output/findings.json', 'w'))\n"
+            "open('output/findings.md', 'w').write('# payments-processor\\n')\nPY")
 
 
 def report(ok: bool, name: str, detail: str = "") -> bool:
@@ -73,6 +87,14 @@ async def probes(client) -> bool:
             if not ok:
                 detail += f": {output.strip()[:300]!r}"
             passed &= report(ok, name, detail)
+        # A busy service's log reaches the harness only as a bounded, masked excerpt.
+        reply = await session._inner.read_logs("payments", "deploy/payments-api", tail_lines=5000)
+        excerpt = reply["excerpt"]
+        leaked = re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+|\b4111[ -]?1111", excerpt)
+        passed &= report(reply["lines_read"] > 200 and reply["lines_shown"] <= 40 and not leaked
+                         and "ERROR" in excerpt, "logs reach the harness only as a policy excerpt",
+                         f"read {reply['lines_read']}, shown {reply['lines_shown']}, {reply['redactions']} masked, "
+                         f"{len(excerpt)} bytes" + (f", leaked {leaked[:2]}" if leaked else ""))
     await client.delete(session, purge_history=True)
     harness_token = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
     passed &= report(not harness_token.exists(), "harness pod has no Kubernetes token")
@@ -80,8 +102,6 @@ async def probes(client) -> bool:
 
 
 async def investigation(client, namespaces) -> bool:
-    import json
-
     from openai_harness.chat import HarnessChatServer
     from openai_harness.store import SQLiteStore
     from openai_harness.testing import Calls, events, message, shell
@@ -89,17 +109,11 @@ async def investigation(client, namespaces) -> bool:
     from .agent.spec import REPORT, make_spec
     from .ui.card import check_rows, file_status
 
-    findings = json.dumps({"findings": [{
-        "resource": "deployment/payments-processor", "namespace": "payments", "problem": "CrashLoopBackOff",
-        "cause": "DATABASE_URL is not set", "fix": "Set DATABASE_URL from the payments-db Secret",
-        "evidence": [{"file": LOGS, "quote": "Missing required env var DATABASE_URL"},
-                     # The pod's status alternates between Error and CrashLoopBackOff; its name does not.
-                     {"file": PODS, "quote": "payments-processor-"}]}]})
     model = Calls([
         shell("kubectl get pods -n payments -o wide"),
-        shell("kubectl logs deploy/payments-processor -n payments"),
+        ("pod_logs", {"pod": "deploy/payments-processor", "namespace": "payments"}),
         shell("grep -c payments-processor evidence/*.txt; grep -c DATABASE_URL runbooks/payments.md"),
-        shell(f"printf '%s' '{findings}' > output/findings.json && echo '# payments-processor' > output/findings.md"),
+        shell(findings_command()),
     ], answer="payments-processor crashes at startup: DATABASE_URL is not set.")
     with tempfile.TemporaryDirectory() as data:
         store = SQLiteStore(Path(data) / "threads.sqlite3")
@@ -116,7 +130,7 @@ async def investigation(client, namespaces) -> bool:
             evidence = [entry["label"] for entry in (thread.metadata.get("evidence", []) if thread else [])]
             passed = report(not errors and turn.get("status") == "completed", "scripted turn completed",
                             f"{time.monotonic() - began:.1f} s" + (f": {errors[0].get('message')}" if errors else ""))
-            passed &= report(len(evidence) == 2, "kubectl reads recorded as evidence", "; ".join(evidence))
+            passed &= report(len(evidence) == 2, "kubectl read and log excerpt recorded as evidence", "; ".join(evidence))
             check = turn.get("check") or {}
             passed &= report(check.get("status") == "evidence_passed", "findings quotes match the journal copy",
                              check.get("detail") or f"{check.get('quotes', 0)} quotes")

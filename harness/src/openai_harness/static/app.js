@@ -350,6 +350,7 @@ function render() {
   renderStatus();
   renderResult();
   renderSuggestions();
+  renderHome();
   renderPanel();
 }
 
@@ -431,6 +432,15 @@ function renderSuggestions() {
   box.replaceChildren(el("span", { class: "muted" }, state.threadId ? "Next" : "Try"),
     ...items.map((item) => el("button", { type: "button", title: item.prompt, onclick: () => suggest(item.prompt) }, item.label)));
   box.hidden = false;
+}
+
+// An agent's own area above the suggestions (agent.js renderHome), e.g. the state of what it looks after.
+function renderHome() {
+  const home = $("agent-home");
+  if (!state.extension.renderHome) return;
+  const running = state.responding || latestTurn()?.status === "running";
+  Promise.resolve(state.extension.renderHome({ container: home, el, getJSON, suggest, config: state.config,
+    threadId: state.threadId, running })).catch((error) => console.warn("renderHome failed", error));
 }
 
 function setHead(title, sub) {
@@ -528,7 +538,9 @@ async function renderFile(turn, file, body, isCurrent) {
   download.hidden = false;
   const highlight = state.view?.path === file.path ? state.view.highlight : null;
   const page = state.view?.path === file.path ? state.view.page : null;
-  if (state.extension.renderFile && await state.extension.renderFile({ file, turn, threadId: state.threadId, body, el, url, highlight, page })) return;
+  const open = (path, quote = null) => apply({ tab: "files", view: { path, highlight: quote } });
+  if (state.extension.renderFile && await state.extension.renderFile({ file, turn, threadId: state.threadId, body, el, url,
+    highlight, page, open, check: turn?.check || null })) return;
   body.replaceChildren(el("div", { class: "empty" }, el("p", {}, "Loading…")));
   const response = await fetch(url);
   const text = response.ok ? await response.text() : "";
@@ -695,7 +707,7 @@ async function main() {
   render();
   if (state.threadId) refreshThread({ followLatest: true, opening: true });
   refreshWorker();
-  setInterval(() => { if (!document.hidden) refreshWorker(); }, 10000);
+  setInterval(() => { if (!document.hidden) { refreshWorker(); renderHome(); } }, 10000);
   await startChat();
 }
 

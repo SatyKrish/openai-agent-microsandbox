@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from openai_harness import http
 from openai_harness.chat import HarnessChatServer
 
@@ -28,7 +30,12 @@ UI = {
 }
 
 
+STATIC = Path(__file__).resolve().parent / "static"
+
+
 def create_app(server: HarnessChatServer, *, config: dict, port: int, jaeger_url: str | None, worker=None,
-               starting_files: dict[str, bytes] | None = None):
+               health=None, memory=None, starting_files: dict[str, bytes] | None = None):
+    """``health`` is the worker's summary of its namespaces and ``memory`` what the agent remembers,
+    both shown on the start screen; the health summary is never sent to the model."""
     return http.ui_application(server, config={**UI, **config}, port=port, jaeger_url=jaeger_url, worker=worker,
-                               starting_files=starting_files)
+                               health=health, memory=memory, starting_files=starting_files, static=STATIC)

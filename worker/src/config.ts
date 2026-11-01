@@ -8,6 +8,8 @@ import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
 
+import type { LogPolicy } from './log-policy.js';
+
 const MIB = 1024 * 1024;
 
 export type Egress = 'kube-api' | 'none';
@@ -33,6 +35,10 @@ export interface Config {
   maxConcurrent: number;
   limitAddressSpaceBytes: number;
   token: string | null;
+  logTailLines: number;     // default lines read from the end of a log
+  logMaxTailLines: number;  // the most a caller may ask for
+  logMaxBytes: number;      // the most raw log the worker reads at once
+  logPolicy: LogPolicy;     // what of it may reach the model
 }
 
 function integer(name: string, fallback: number): number {
@@ -90,5 +96,15 @@ export function loadConfig(): Config {
     maxConcurrent: integer('MXC_MAX_CONCURRENT', 8),
     limitAddressSpaceBytes: integer('MXC_LIMIT_AS_BYTES', 2048 * MIB),
     token,
+    logTailLines: integer('MXC_LOG_TAIL_LINES', 500),
+    logMaxTailLines: integer('MXC_LOG_MAX_TAIL_LINES', 5000),
+    logMaxBytes: integer('MXC_LOG_MAX_BYTES', 4 * MIB),
+    logPolicy: {
+      maxLines: integer('MXC_LOG_EXCERPT_LINES', 40),
+      maxBytes: integer('MXC_LOG_EXCERPT_BYTES', 6000),
+      context: integer('MXC_LOG_CONTEXT_LINES', 2),
+      tail: integer('MXC_LOG_LAST_LINES', 3),
+      lineChars: 240,
+    },
   };
 }

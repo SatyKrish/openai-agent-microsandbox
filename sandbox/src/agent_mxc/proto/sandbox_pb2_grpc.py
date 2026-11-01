@@ -69,6 +69,16 @@ class SandboxStub:
                 request_serializer=sandbox__pb2.ReadEvidenceRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.ReadEvidenceResponse.FromString,
                 _registered_method=True)
+        self.ReadLogs = channel.unary_unary(
+                '/mxc.sandbox.v1.Sandbox/ReadLogs',
+                request_serializer=sandbox__pb2.ReadLogsRequest.SerializeToString,
+                response_deserializer=sandbox__pb2.ReadLogsResponse.FromString,
+                _registered_method=True)
+        self.Health = channel.unary_unary(
+                '/mxc.sandbox.v1.Sandbox/Health',
+                request_serializer=sandbox__pb2.HealthRequest.SerializeToString,
+                response_deserializer=sandbox__pb2.HealthResponse.FromString,
+                _registered_method=True)
         self.DestroySession = channel.unary_unary(
                 '/mxc.sandbox.v1.Sandbox/DestroySession',
                 request_serializer=sandbox__pb2.DestroySessionRequest.SerializeToString,
@@ -127,6 +137,25 @@ class SandboxServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReadLogs(self, request, context):
+        """A pod's log, through the worker's log policy: the caller gets a bounded,
+        redacted excerpt of the lines that matter, never the raw log. Containers
+        cannot read logs at all; the worker's API proxy refuses them. The excerpt is
+        recorded as evidence and saved in the session's workspace.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Health(self, request, context):
+        """A health summary of the workloads in the worker's namespaces, for the UI:
+        pod status, restarts, waiting reasons and recent warning events. No logs,
+        and nothing here goes to the model.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def DestroySession(self, request, context):
         """Remove the session's workspace. The audit journal stays unless purged.
         """
@@ -171,6 +200,16 @@ def add_SandboxServicer_to_server(servicer, server):
                     servicer.ReadEvidence,
                     request_deserializer=sandbox__pb2.ReadEvidenceRequest.FromString,
                     response_serializer=sandbox__pb2.ReadEvidenceResponse.SerializeToString,
+            ),
+            'ReadLogs': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReadLogs,
+                    request_deserializer=sandbox__pb2.ReadLogsRequest.FromString,
+                    response_serializer=sandbox__pb2.ReadLogsResponse.SerializeToString,
+            ),
+            'Health': grpc.unary_unary_rpc_method_handler(
+                    servicer.Health,
+                    request_deserializer=sandbox__pb2.HealthRequest.FromString,
+                    response_serializer=sandbox__pb2.HealthResponse.SerializeToString,
             ),
             'DestroySession': grpc.unary_unary_rpc_method_handler(
                     servicer.DestroySession,
@@ -367,6 +406,60 @@ class Sandbox:
             '/mxc.sandbox.v1.Sandbox/ReadEvidence',
             sandbox__pb2.ReadEvidenceRequest.SerializeToString,
             sandbox__pb2.ReadEvidenceResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReadLogs(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/mxc.sandbox.v1.Sandbox/ReadLogs',
+            sandbox__pb2.ReadLogsRequest.SerializeToString,
+            sandbox__pb2.ReadLogsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Health(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/mxc.sandbox.v1.Sandbox/Health',
+            sandbox__pb2.HealthRequest.SerializeToString,
+            sandbox__pb2.HealthResponse.FromString,
             options,
             channel_credentials,
             insecure,

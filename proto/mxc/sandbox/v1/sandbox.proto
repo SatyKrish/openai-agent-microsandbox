@@ -31,6 +31,15 @@ service Sandbox {
   // the containers cannot see.
   rpc ListEvidence(ListEvidenceRequest) returns (ListEvidenceResponse);
   rpc ReadEvidence(ReadEvidenceRequest) returns (ReadEvidenceResponse);
+  // A pod's log, through the worker's log policy: the caller gets a bounded,
+  // redacted excerpt of the lines that matter, never the raw log. Containers
+  // cannot read logs at all; the worker's API proxy refuses them. The excerpt is
+  // recorded as evidence and saved in the session's workspace.
+  rpc ReadLogs(ReadLogsRequest) returns (ReadLogsResponse);
+  // A health summary of the workloads in the worker's namespaces, for the UI:
+  // pod status, restarts, waiting reasons and recent warning events. No logs,
+  // and nothing here goes to the model.
+  rpc Health(HealthRequest) returns (HealthResponse);
   // Remove the session's workspace. The audit journal stays unless purged.
   rpc DestroySession(DestroySessionRequest) returns (DestroySessionResponse);
 }
@@ -123,6 +132,53 @@ message ReadEvidenceRequest {
 message ReadEvidenceResponse {
   Evidence entry = 1;
   bytes content = 2;
+}
+
+message ReadLogsRequest {
+  string session_id = 1;
+  string namespace = 2;          // must be one the worker serves
+  string pod = 3;
+  string container = 4;          // optional
+  bool previous = 5;             // the last terminated container
+  uint32 tail_lines = 6;         // lines to read from the end; capped by the worker
+  uint32 since_seconds = 7;      // optional
+  string match = 8;              // optional literal text to look for, case-insensitive
+}
+
+message ReadLogsResponse {
+  string excerpt = 1;            // what the policy lets through, with a header saying what it withheld
+  string evidence_path = 2;      // the workspace copy, e.g. evidence/004-pod-logs-checkout-1.txt
+  uint32 lines_read = 3;
+  uint32 lines_shown = 4;
+  uint32 lines_withheld = 5;
+  uint32 redactions = 6;
+}
+
+message HealthRequest {}
+
+message Workload {
+  string namespace = 1;
+  string kind = 2;               // Deployment, StatefulSet or Pod
+  string name = 3;
+  uint32 desired = 4;
+  uint32 ready = 5;
+  uint32 restarts = 6;
+  string state = 7;              // failing, degraded or healthy
+  repeated string reasons = 8;   // e.g. CrashLoopBackOff, "last exit: Error (code 1)"
+  uint32 warnings = 9;           // warning events in the last hour
+  string last_warning = 10;      // redacted
+  string last_warning_at = 11;
+}
+
+message NamespaceHealth {
+  string namespace = 1;
+  repeated Workload workloads = 2;
+  string error = 3;
+}
+
+message HealthResponse {
+  string generated_at = 1;
+  repeated NamespaceHealth namespaces = 2;
 }
 
 message DestroySessionRequest {

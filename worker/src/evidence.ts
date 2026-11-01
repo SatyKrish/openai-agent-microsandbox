@@ -8,8 +8,8 @@
 // in a journal the containers cannot see, and the harness checks the agent's
 // quotes against that copy rather than anything the agent could edit.
 
-const READ_VERBS = new Set(['get', 'describe', 'logs', 'events', 'top', 'explain', 'api-resources', 'api-versions',
-  'version']);
+// Not logs: containers cannot read them, and the worker records log excerpts itself (ReadLogs).
+const READ_VERBS = new Set(['get', 'describe', 'events', 'top', 'explain', 'api-resources', 'api-versions', 'version']);
 // Flags that would read from somewhere other than the in-cluster API as the worker's identity.
 const FORBIDDEN = new Set(['--kubeconfig', '--server', '-s', '--token', '--as', '--as-group', '--as-uid', '--user',
   '--cluster', '--context', '--certificate-authority', '--client-certificate', '--client-key',

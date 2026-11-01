@@ -170,7 +170,8 @@ async def evidence_rpcs(client, ids) -> None:
 
     listed = {name: await client.transport.list_evidence(ids[name]) for name in NAMES}
     commands = {name: [entry.command for entry in entries] for name, entries in listed.items()}
-    report(commands["A"] == ["kubectl get pods -n payments -o wide", "kubectl logs deploy/payments-processor -n payments"]
+    report(len(commands["A"]) == 2 and commands["A"][0] == "kubectl get pods -n payments -o wide"
+           and commands["A"][1].startswith("pod_logs payments-processor-")
            and [entry.seq for entry in listed["A"]] == [1, 2], "A's evidence lists only A's two reads", str(commands["A"]))
     report([entry.seq for entry in listed["B"]] == [1, 2, 3] and "kubectl get events -n payments" in commands["B"]
            and len(listed["C"]) == 2, "B and C number their own evidence", f"B {len(listed['B'])}, C {len(listed['C'])}")
@@ -214,7 +215,7 @@ async def harness_check(client, namespaces) -> list[str]:
         return thread, thread.metadata["turns"][-1].get("check") or {}
 
     model_b = Calls([shell("kubectl get pods -n payments -o wide"),
-                     shell("kubectl logs deploy/payments-processor -n payments"),
+                     ("pod_logs", {"pod": "deploy/payments-processor", "namespace": "payments"}),
                      shell("kubectl get events -n payments")], answer="Read.")
     chat_b, thread_b = await conversation("B", model_b)
     thread, _ = await last_check(chat_b, thread_b)
@@ -272,9 +273,13 @@ async def in_pod() -> int:
 
         async def setup(name):
             session = sessions[name]
-            for command in ["kubectl get pods -n payments -o wide", "kubectl logs deploy/payments-processor -n payments",
+            for command in ["kubectl get pods -n payments -o wide", "pod_logs",
                             *(["kubectl get events -n payments"] if name == "B" else []),
                             f"echo {markers[name]} > work/marker.txt && cat work/marker.txt"]:
+                if command == "pod_logs":
+                    # Logs come only through the worker's log policy.
+                    await session._inner.read_logs("payments", "deploy/payments-processor")
+                    continue
                 result = await session.exec(command, timeout=60)
                 if not result.ok():
                     raise RuntimeError(f"{name}: {command} exited {result.exit_code}")

@@ -59,6 +59,9 @@ class WorkerTransport:
     async def info(self) -> pb.InfoResponse:
         return await self._call("Info", pb.InfoRequest())
 
+    async def health(self) -> pb.HealthResponse:
+        return await self._call("Health", pb.HealthRequest())
+
     async def init_session(self, session_id: str) -> pb.InitSessionResponse:
         return await self._call("InitSession", pb.InitSessionRequest(session_id=session_id))
 
@@ -79,6 +82,12 @@ class WorkerTransport:
 
     async def read_evidence(self, session_id: str, seq: int) -> pb.ReadEvidenceResponse:
         return await self._call("ReadEvidence", pb.ReadEvidenceRequest(session_id=session_id, seq=seq))
+
+    async def read_logs(self, session_id: str, namespace: str, pod: str, *, container: str = "", previous: bool = False,
+                        tail_lines: int = 0, since_seconds: int = 0, match: str = "") -> pb.ReadLogsResponse:
+        return await self._call("ReadLogs", pb.ReadLogsRequest(
+            session_id=session_id, namespace=namespace, pod=pod, container=container, previous=previous,
+            tail_lines=tail_lines, since_seconds=since_seconds, match=match), timeout=60)
 
     async def destroy(self, session_id: str, *, purge_history: bool = False) -> bool:
         response = await self._call("DestroySession",

@@ -9,6 +9,7 @@ editing evidence/ inside the sandbox cannot make a quote pass.
 from __future__ import annotations
 
 import json
+import re
 
 
 def _normal(text: str) -> str:
@@ -30,6 +31,7 @@ def check(conversation, files: dict[str, bytes]) -> dict:
     texts: dict[str, str] = {}
     quotes = 0
     resources = []
+    summary = []  # one line per finding, for the turn card
     listed = []  # every checked quote and its evidence file, for the UI
     for finding in findings:
         if not isinstance(finding, dict):
@@ -47,7 +49,9 @@ def check(conversation, files: dict[str, bytes]) -> dict:
             if not isinstance(quote, str) or not _normal(quote):
                 return {"status": "failed", "detail": f"{resource} has an empty quote from {path}.", "unchecked": unchecked}
             if path not in texts:
-                texts[path] = _normal(conversation.host_copy(evidence[path]).read_text(encoding="utf-8", errors="replace"))
+                text = conversation.host_copy(evidence[path]).read_text(encoding="utf-8", errors="replace")
+                # A log excerpt numbers its lines ("   12| ..."); quotes may span lines without the numbers.
+                texts[path] = _normal(re.sub(r"(?m)^ *\d+\| ", "", text))
             if _normal(quote) not in texts[path]:
                 shown = quote if len(quote) <= 120 else quote[:120] + "…"
                 return {"status": "failed", "detail": f"Not found in {path}: {shown}", "unchecked": unchecked}
@@ -56,7 +60,9 @@ def check(conversation, files: dict[str, bytes]) -> dict:
                 listed.append({"source": path, "quote": quote if len(quote) <= 240 else quote[:240] + "…",
                                "context": resource})
         resources.append(resource)
+        if len(summary) < 12:
+            summary.append({"resource": resource[:80], "problem": str(finding.get("problem") or "")[:60]})
     if not findings:
         return {"status": "no_findings", "unchecked": unchecked}
     return {"status": "evidence_passed", "findings": len(findings), "quotes": quotes, "resources": resources,
-            "unchecked": unchecked, "checked_quotes": listed, "quotes_from": "output/findings.json"}
+            "unchecked": unchecked, "checked_quotes": listed, "quotes_from": "output/findings.json", "summary": summary}

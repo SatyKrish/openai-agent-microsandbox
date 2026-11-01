@@ -6,8 +6,9 @@ description: Find unhealthy workloads in a Kubernetes namespace, explain each ro
 # Kubernetes triage
 
 Work from evidence. A plain kubectl read (no pipes, redirections, quotes or `$`)
-is recorded by the sandbox worker and saved under `evidence/`; read those files
-with the shell rather than relying on the output you saw scroll past.
+and every `pod_logs` excerpt are recorded by the sandbox worker and saved under
+`evidence/`; read those files with the shell rather than relying on the output
+you saw scroll past. Logs come only from `pod_logs`, as excerpts.
 
 1. **Survey.** For each namespace in scope run
    `kubectl get pods -n NAMESPACE -o wide`,
@@ -18,10 +19,11 @@ with the shell rather than relying on the output you saw scroll past.
    `kubectl get pods -o wide` output and prints each pod that is not ready,
    is waiting, or has restarted, with the evidence file it came from.
 3. **Drill in.** For each suspect, `kubectl describe pod NAME -n NAMESPACE` and
-   read its logs with `kubectl logs NAME -n NAMESPACE --tail=200`. For a
-   container that restarts, also read `--previous`: the current container may
-   not have logged anything yet. Describe the owning Deployment when replicas
-   or rollout state matter.
+   read its log with `pod_logs` (pod NAME or `deploy/NAME`). For a container
+   that restarts, also read `previous=true`: the current container may not have
+   logged anything yet. If the excerpt withheld what you need, call it again
+   with `match` set to the text you are looking for. Describe the owning
+   Deployment when replicas or rollout state matter.
 4. **Check the runbooks.** `ls runbooks/` and read the one for the affected
    service; it often names the configuration a service needs.
 5. **Diagnose.** Match the evidence to a cause:
@@ -46,12 +48,13 @@ with the shell rather than relying on the output you saw scroll past.
      {"findings": [{
        "resource": "deployment/payments-processor", "namespace": "payments",
        "problem": "CrashLoopBackOff", "cause": "...", "fix": "...",
-       "evidence": [{"file": "evidence/004-kubectl-logs-....txt", "quote": "exact text from that file"}]
+       "evidence": [{"file": "evidence/004-pod-logs-....txt", "quote": "exact text from that file"}]
      }]}
      ```
 
      Each finding needs at least one evidence entry, citing a file the worker
-     saved. A quote is text copied exactly from that file; whitespace
-     differences are allowed. Runbooks are context, not evidence.
+     saved. A quote is text copied exactly from that file, without the line
+     number prefix of a log excerpt; whitespace differences are allowed.
+     Runbooks are context, not evidence.
 7. Reopen both files and confirm every quote appears in its evidence file, for
    example with `grep -F`. Fix any mismatch before you answer.

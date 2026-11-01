@@ -33,7 +33,10 @@ command reaches the cluster only from inside an MXC container, which has no
 capabilities and no credentials, a private network that reaches nothing but the
 worker's read-only Kubernetes API proxy, and no view of the journal or of other
 conversations. The proxy adds the worker's token and refuses anything but
-reads, so the token never enters a container. Plain kubectl reads are
+reads, so the token never enters a container. Logs never reach the model raw:
+containers cannot read them, and the agent's `pod_logs` tool gets them from the
+worker as excerpts, with only the error and warning lines kept, repeats
+collapsed, credentials and personal data masked, and a hard size cap. Plain kubectl reads are
 recorded as evidence outside the containers, and the harness checks every quote
 in the agent's findings against those copies. See the
 [architecture](docs/architecture.md).
@@ -55,7 +58,8 @@ cp .env.example .env
 
 **2. Set up the cluster and deploy the pair.** This starts a dedicated Colima
 VM, creates the Kind cluster, builds the worker and harness images, and deploys
-them with a payments application that is broken in two ways. Every command
+them with a payments application that is broken in two ways, plus a service
+whose logs are full of customer data. Every command
 names the `kind-openai-agent-mxc` context, and your current kubectl context is
 restored afterwards. See the [local Kubernetes guide](docs/local-kubernetes.md).
 
@@ -63,15 +67,16 @@ restored afterwards. See the [local Kubernetes guide](docs/local-kubernetes.md).
 make all
 ```
 
-**3. Check the boundary.** Sixteen probes run in real MXC containers, then a
+**3. Check the boundary.** Seventeen probes run in real MXC containers, then a
 scripted investigation runs through the harness. No model API usage.
 
 ```bash
 make verify
 ```
 
-**4. Open the UI** at <http://localhost:8001> and ask which workloads in
-`payments` are unhealthy.
+**4. Open the UI** at <http://localhost:8001>. The start screen lists the
+workloads in `payments`, failing first, with why; select **Investigate** on one,
+or ask which workloads are unhealthy.
 
 ```bash
 make ui
@@ -79,9 +84,11 @@ make ui
 
 You see each command as it runs, every one in its own MXC container. The agent
 writes `output/findings.md` and `output/findings.json`; the side panel shows the
-files, the kubectl reads the worker recorded as evidence, the quotes the
-harness checked, and the turn's trace when tracing is on. Later messages reopen
-the same workspace. `make loadtest` runs many conversations and users at once;
+findings as cards with their proposed fixes, the kubectl reads and log excerpts
+the worker recorded as evidence, the quotes the harness checked, and the turn's
+trace when tracing is on. Later messages continue in the same workspace. When a
+conversation goes idle, the SDK distils what it learned into the agent's
+memory, which the next conversation starts with. `make loadtest` runs many conversations and users at once;
 `make journal` prints the worker's audit journal; `make teardown` deletes the
 cluster and stops the VM.
 
@@ -92,7 +99,9 @@ kubectl in its sandbox, using the worker's read-only identity: it can read pods,
 logs, events and workload objects in `payments`, and cannot read Secrets or
 change anything. It loads a `kubernetes-triage` skill, reads the application
 team's runbooks seeded into every workspace, and proposes fixes for a person to
-run. The UI is the shared SRE UI of
+run. It remembers across conversations through the SDK's `Memory` capability:
+the harness shares each conversation's distilled lessons with the next, and the
+agent cannot write memory itself. The UI is the shared SRE UI of
 [openai-agent-substrate](https://github.com/SatyKrish/openai-agent-substrate), reused with its harness.
 
 ## Use the provider in your own application
@@ -106,16 +115,21 @@ the worker is the image built from `worker/`. See
 ## Verification
 
 The provider is pinned to `openai-agents==0.24.0` and the worker to
-`@microsoft/mxc-sdk` 1.0.1. On local ARM64 Kind, all sixteen boundary probes
+`@microsoft/mxc-sdk` 1.0.1. On local ARM64 Kind, all seventeen boundary probes
 passed in real MXC containers, including no token in the container, no direct
-route to the API, and writes and exec refused by the worker's proxy. Live
+route to the API, and writes, exec and raw logs refused by the worker's proxy.
+In a live investigation of a service that logs customer emails and card numbers,
+the model's whole history held none of either. Live
 investigations with `gpt-6.1-terra` ran every tool call in MXC containers and
 every quote in their findings matched the worker's recorded evidence. One user
 with six conversations, twelve users at once and three users on one shared
 conversation all passed; with three sessions open at once, none could reach
 another's workspace, evidence, logs or the worker's journal; and a pod outside
-the pair could not reach the worker. An MXC command costs about 110 ms with the
-proxy-only network. AKS and Kata remain unverified. See the
+the pair could not reach the worker. With memory on, a second conversation
+started from the first's lessons and confirmed them against fresh evidence;
+memory held no email address, card number or credential, and a harness restart
+closed an open conversation and kept its memory. An MXC command costs about
+110 ms with the proxy-only network. AKS and Kata remain unverified. See the
 [verification record](docs/verification.md).
 
 ## Tracing

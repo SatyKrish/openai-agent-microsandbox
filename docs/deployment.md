@@ -66,6 +66,12 @@ Role and RoleBinding, the ServiceAccount, both StatefulSets and Services, the
 `sre.example.com/domain` labels, the pair token Secret, and the harness's
 `MXC_WORKER_TARGET`, `MXC_WORKER_NAME` and `SRE_NAMESPACES`. Each domain gets
 its own pair, identity and token; a harness can reach only its own worker.
+Each domain's agent also has its own memory, on its harness's volume.
+
+The harness's pod keeps `terminationGracePeriodSeconds: 180`: when it stops, it
+closes its open conversations, and the SDK generates each one's memory (about
+a minute each). Lower `SRE_SESSION_IDLE_S` if many conversations are usually
+open at a rollout, or raise the grace period.
 
 ## Reaching the UI
 

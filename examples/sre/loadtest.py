@@ -125,19 +125,14 @@ def serve_scripted(port: int, data: Path) -> None:
     from .agent.spec import REPORT, make_spec
     from .ui.app import create_app
     from .ui.card import check_rows, file_status
+    from .verify import findings_command
 
-    findings = json.dumps({"findings": [{
-        "resource": "deployment/payments-processor", "namespace": "payments", "problem": "CrashLoopBackOff",
-        "cause": "DATABASE_URL is not set", "fix": "Set DATABASE_URL from the payments-db Secret",
-        "evidence": [{"file": "evidence/002-kubectl-logs-deploy-payments-processor-n-payments.txt",
-                      "quote": "Missing required env var DATABASE_URL"},
-                     {"file": "evidence/001-kubectl-get-pods-n-payments-o-wide.txt", "quote": "payments-processor-"}]}]})
     model = Calls([
         shell("kubectl get pods -n payments -o wide"),
-        shell("kubectl logs deploy/payments-processor -n payments"),
+        ("pod_logs", {"pod": "deploy/payments-processor", "namespace": "payments"}),
         # How many workspaces can this container see? Only its own, if sessions are isolated.
         shell("ls /sandboxes/active | wc -l | tr -d ' ' > work/visible.txt && sleep 1 && cat work/visible.txt"),
-        shell(f"printf '%s' '{findings}' > output/findings.json && echo '# payments-processor' > output/findings.md"),
+        shell(findings_command()),
     ], answer="payments-processor crashes at startup: DATABASE_URL is not set.")
     token_file = os.environ.get("MXC_WORKER_TOKEN_FILE")
     client = MXCSandboxClient(os.environ.get("MXC_WORKER_TARGET", "127.0.0.1:50051"),

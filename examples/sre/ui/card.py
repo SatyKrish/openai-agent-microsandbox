@@ -11,13 +11,18 @@ def check_rows(conversation, turn: dict, changed: set[str]) -> list[dict]:
     rows = []
     if evidence:
         rows.append({"type": "Text", "size": "sm", "color": "secondary", "value":
-                     f"{evidence} kubectl read{'s' if evidence != 1 else ''} recorded as evidence by the sandbox worker "
-                     "(read-only identity, journal outside the containers)."})
+                     f"{evidence} read{'s' if evidence != 1 else ''} recorded as evidence by the sandbox worker "
+                     "(kubectl through its read-only proxy, logs only as policy excerpts; journal outside the containers)."})
     fresh = "output/findings.json" in changed
     if check.get("status") == "evidence_passed" and fresh:
         count, quotes = check["findings"], check["quotes"]
         rows.append({"type": "Row", "children": [{"type": "Badge", "variant": "soft", "color": "success", "label":
                      f"{count} finding{'s' if count != 1 else ''} · {quotes} quote{'s' if quotes != 1 else ''} match the evidence"}]})
+        if check.get("summary"):
+            rows.append({"type": "Row", "gap": 2, "wrap": "wrap", "children": [
+                {"type": "Badge", "variant": "outline", "color": "danger" if item["problem"] else "secondary",
+                 "label": f"{item['resource']} · {item['problem']}" if item["problem"] else item["resource"]}
+                for item in check["summary"]]})
         rows.append({"type": "Text", "size": "sm", "color": "secondary", "value":
                      "Every quote in findings.json appears in the worker's journal copy of the evidence it cites. "
                      "Causes and fixes are the agent's own reasoning, and fixes are proposals: "

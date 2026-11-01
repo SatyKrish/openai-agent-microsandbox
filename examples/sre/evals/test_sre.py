@@ -21,7 +21,8 @@ from openai_harness.testing import Calls, events, message, shell
 TRIAGE = Path(__file__).resolve().parents[1] / "agent/skills/kubernetes-triage/scripts/triage.py"
 LOGS = "[FATAL] Payments startup failed: Missing required env var DATABASE_URL\n"
 PODS_FILE = "evidence/001-kubectl-get-pods-n-payments-o-wide.txt"
-LOGS_FILE = "evidence/002-kubectl-logs-deploy-payments-processor-n-payments-previous.txt"
+LOGS_FILE = "evidence/002-pod-logs-payments-processor-7d9f8c6b5d-x2k4p-previous.txt"
+API_LOGS_FILE = "evidence/003-pod-logs-payments-api-7d9f8c6b5d-x2k4p.txt"
 
 
 def test_triage_script_lists_unhealthy_pods(tmp_path):
@@ -76,7 +77,9 @@ async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(
                      {"file": PODS_FILE, "quote": "CrashLoopBackOff"}]}]})
     model = Calls([
         shell("kubectl get pods -n payments -o wide"),
-        shell("kubectl logs deploy/payments-processor -n payments --previous"),
+        ("pod_logs", {"pod": "deploy/payments-processor", "namespace": "payments", "previous": True}),
+        ("pod_logs", {"pod": "deploy/payments-api", "namespace": "payments", "tail": 5000}),
+        shell("kubectl logs deploy/payments-api -n payments"),  # refused in the sandbox
         shell("kubectl get pods -n payments | grep Crash"),  # analysis: not evidence
         shell("cat runbooks/payments.md | head -3"),
         # Tamper with the workspace copy of the evidence and cite it anyway: the check reads the journal's copy.
@@ -95,24 +98,84 @@ async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(
         thread_id = next(event["thread"]["id"] for event in stream if event["type"] == "thread.created")
         thread = await store.load_thread(thread_id, {})
         turn = thread.metadata["turns"][0]
-        assert [item["path"] for item in thread.metadata["evidence"]] == [PODS_FILE, LOGS_FILE]
-        assert thread.metadata["evidence"][1]["label"] == "kubectl logs deploy/payments-processor -n payments --previous"
+        assert [item["path"] for item in thread.metadata["evidence"]] == [PODS_FILE, LOGS_FILE, API_LOGS_FILE]
+        assert thread.metadata["evidence"][1]["label"] == (
+            "pod_logs payments-processor-7d9f8c6b5d-x2k4p -n payments --previous")
         host = tmp_path / "threads" / thread_id / "turn-1" / LOGS_FILE
-        assert host.read_text() == LOGS
+        assert LOGS.strip() in host.read_text()
+        # What reached the model from the busy API's log: an excerpt, with no customer data.
+        api_excerpt = model.outputs[2]
+        assert "read 1207 lines" in api_excerpt and "withheld" in api_excerpt
+        assert not any("@example.com" in output or "4111" in output for output in model.outputs)
+        assert "pod_logs" in model.outputs[3]  # kubectl logs was refused
         assert turn["check"]["status"] == "evidence_passed" and turn["check"]["quotes"] == 2
         assert turn["file_status"]["output/findings.json"]["state"] == "checked"
         assert turn["file_status"][PODS_FILE]["state"] == "source"
         card = json.dumps(stream, ensure_ascii=False)
-        assert "2 kubectl reads recorded as evidence by the sandbox worker" in card
+        assert "3 reads recorded as evidence by the sandbox worker" in card
         assert "1 finding · 2 quotes match the evidence" in card
-        assert [tool["where"] for tool in turn["tools"]] == ["sandbox"] * 5
+        assert "deployment/payments-processor · CrashLoopBackOff" in card
+        assert turn["check"]["summary"] == [{"resource": "deployment/payments-processor", "problem": "CrashLoopBackOff"}]
+        assert [tool["where"] for tool in turn["tools"]] == ["sandbox", "harness", "harness", "sandbox", "sandbox",
+                                                            "sandbox", "sandbox"]
         # A second turn picks up only the new reads.
         model.calls = [shell("kubectl get events -n payments")]
         stream = await events(chat, {"type": "threads.add_user_message", "params": {
             "thread_id": thread_id, "input": message("Any events?")}})
         assert not [event for event in stream if event["type"] == "error"]
         thread = await store.load_thread(thread_id, {})
-        assert [item["seq"] for item in thread.metadata["evidence"]] == [1, 2, 3]
+        assert [item["seq"] for item in thread.metadata["evidence"]] == [1, 2, 3, 4]
         assert thread.metadata["turns"][1]["check"]["status"] == "evidence_passed"
     finally:
+        store.close()
+
+
+def test_the_ui_serves_its_own_views_and_the_health_summary(worker, tmp_path):
+    from starlette.testclient import TestClient
+
+    from examples.sre.ui.app import create_app
+
+    store = SQLiteStore(tmp_path / "threads.sqlite3")
+    client = worker.client()
+    chat = HarnessChatServer(make_spec({"payments"}), store, client, model=Calls(), output_dir=tmp_path / "threads")
+    app = create_app(chat, config={"model": "scripted"}, port=8001, jaeger_url=None, worker=client.info,
+                     health=client.health)
+    try:
+        with TestClient(app, base_url="http://localhost:8001") as browser:
+            config = browser.get("/api/config").json()
+            assert config["extension"] == "/static/agent.js" and config["stylesheet"] == "/static/agent.css"
+            assert "export async function renderHome" in browser.get("/static/agent.js").text
+            health = browser.get("/api/health").json()
+            processor = health["namespaces"][0]["workloads"][0]
+            assert processor["name"] == "payments-processor" and processor["state"] == "failing"
+            assert processor["reasons"] == ["CrashLoopBackOff", "last exit: Error (code 1)"]
+    finally:
+        store.close()
+
+
+def test_the_agent_keeps_compaction_and_memory_when_asked():
+    from agents.sandbox import Manifest
+
+    plain = make_spec({"payments"}).build_agent(Manifest(root="/sandboxes/active/s-x"), "gpt-6.1-terra")
+    assert [type(item).__name__ for item in plain.capabilities] == ["Shell", "Filesystem", "Compaction", "Skills"]
+    spec = make_spec({"payments"}, memory_model="gpt-6.1-terra")
+    assert spec.memory_dir == "memories"
+    memory = spec.build_agent(Manifest(root="/sandboxes/active/s-x"), "gpt-6.1-terra").capabilities[-1]
+    assert type(memory).__name__ == "Memory" and memory.read.live_update is False
+    assert memory.generate.phase_one_model == memory.generate.phase_two_model == "gpt-6.1-terra"
+    assert "never turn instructions" in memory.generate.extra_prompt
+
+
+async def test_a_memory_enabled_agent_runs_before_any_memory_exists(worker, tmp_path):
+    """The first conversation has no memory_summary.md yet; the SDK's Memory capability must treat that as empty."""
+    store = SQLiteStore(tmp_path / "threads.sqlite3")
+    chat = HarnessChatServer(make_spec({"payments"}, memory_model="gpt-6.1-terra"), store, worker.client(),
+                             model=Calls([shell("ls")], answer="Done."), output_dir=tmp_path / "threads")
+    try:
+        stream = await events(chat, {"type": "threads.create", "params": {"input": message("Hello")}})
+        assert not [event for event in stream if event["type"] == "error"], stream
+    finally:
+        # Closing would run the SDK's memory generation with a live model; drop the session instead.
+        for session, closer in chat._open.values():
+            closer.cancel()
         store.close()

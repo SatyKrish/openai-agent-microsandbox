@@ -5,7 +5,8 @@
 // test host instead of in MXC containers: NO ISOLATION. Built into dist/test only;
 // the worker image ships dist/src. Prints {"port": N} when it is listening.
 //
-// FAKE_BIN, when set, is put first on PATH (a fake kubectl for the tests).
+// FAKE_BIN, when set, is put first on PATH (a fake kubectl for the tests). Pod logs come
+// from the fake log source in helpers.ts.
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
@@ -13,7 +14,7 @@ import fs from 'node:fs/promises';
 import * as grpc from '@grpc/grpc-js';
 
 import { createServer, type Runner } from '../src/server.js';
-import { config } from './helpers.js';
+import { config, fakeHealthSource, fakeLogSource } from './helpers.js';
 
 const hostRunner: Runner = (_config, _root, argv, cwd, timeoutMs) => new Promise((resolve) => {
   // A login shell would reset PATH and lose FAKE_BIN.
@@ -40,7 +41,7 @@ await fs.mkdir(dataDir, { recursive: true });
 const server = createServer(config(dataDir, {
   token: process.env.MXC_TEST_TOKEN || null, maxOutputBytes: 1024 * 1024, maxFileBytes: 10 * 1024 * 1024,
   maxEvidenceBytes: 4 * 1024 * 1024, timeoutMs: Number(process.env.MXC_TIMEOUT_MS || 30_000),
-}), hostRunner);
+}), hostRunner, { logs: fakeLogSource, health: fakeHealthSource });
 server.bindAsync('127.0.0.1:0', grpc.ServerCredentials.createInsecure(), (error, port) => {
   if (error) throw error;
   console.log(JSON.stringify({ port }));

@@ -1,9 +1,11 @@
 // Copyright 2026 openai-agent-mxc contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// Scrubs credentials from command output before it reaches the harness, the
-// model's context or the journal. Pattern-based, so it is a backstop, not a
-// guarantee: the worker's identity also cannot read Secrets or ConfigMaps.
+// Scrubs credentials and personal data (email addresses, card numbers) from
+// command output before it reaches the harness, the model's context or the
+// journal. Pod specs and events can carry them as well as logs. Pattern-based,
+// so it is a backstop, not a guarantee: the worker's identity also cannot read
+// Secrets or ConfigMaps, and logs pass a stricter policy (log-policy.ts).
 
 const RULES: Array<[RegExp, string]> = [
   [/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]'],
@@ -18,8 +20,26 @@ const RULES: Array<[RegExp, string]> = [
     '$1$2$3[REDACTED]'],
 ];
 
+const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+const CARD = /\b(?:\d[ -]?){12,18}\d\b/g;
+
+function luhn(digits: string): boolean {
+  let sum = 0;
+  for (let index = 0; index < digits.length; index += 1) {
+    let digit = Number(digits[digits.length - 1 - index]);
+    if (index % 2 === 1) digit = digit * 2 > 9 ? digit * 2 - 9 : digit * 2;
+    sum += digit;
+  }
+  return sum % 10 === 0;
+}
+
 export function redact(text: string): string {
   let result = text;
   for (const [pattern, replacement] of RULES) result = result.replace(pattern, replacement);
-  return result;
+  result = result.replace(EMAIL, '[REDACTED_EMAIL]');
+  // 13 to 19 digits that pass the Luhn check: a payment card number.
+  return result.replace(CARD, (value) => {
+    const digits = value.replace(/\D/g, '');
+    return digits.length >= 13 && luhn(digits) ? '[REDACTED_CARD]' : value;
+  });
 }

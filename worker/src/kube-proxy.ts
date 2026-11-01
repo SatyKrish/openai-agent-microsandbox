@@ -8,8 +8,9 @@
 // it reads from the kubelet-rotated file on every request, and forwards over TLS to
 // the API server. It forwards only reads (GET and HEAD) of API paths, never
 // upgrades or the exec, attach, port-forward and proxy subresources, and drops any
-// credential or impersonation header a container sends. RBAC still decides what
-// the token can read; the proxy keeps writes out even if the Role grows.
+// credential or impersonation header a container sends. Pod logs are refused too:
+// they reach the agent only through the worker's log policy (ReadLogs). RBAC still
+// decides what the token can read; the proxy keeps writes out even if the Role grows.
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -23,6 +24,7 @@ export interface ProxyUpstream {
 
 const API_PATH = /^\/(api|apis|version|openapi)(\/|$)/;
 const STREAMING = /\/(exec|attach|portforward|proxy)(\/|$)/;
+const POD_LOG = /\/pods\/[^/]+\/log$/;
 // Hop-by-hop headers, and every header that could carry or change an identity.
 const DROPPED = new Set(['authorization', 'proxy-authorization', 'cookie', 'connection', 'proxy-connection', 'keep-alive',
   'upgrade', 'te', 'trailer', 'transfer-encoding', 'host']);
@@ -53,6 +55,9 @@ export function refusal(method: string | undefined, rawUrl: string | undefined, 
   }
   if (!API_PATH.test(url.pathname)) return `${url.pathname} is not a Kubernetes API path`;
   if (STREAMING.test(url.pathname)) return 'exec, attach, port-forward and proxy subresources are not allowed';
+  if (POD_LOG.test(url.pathname)) {
+    return "pod logs are not readable from the sandbox; use the pod_logs tool, which returns an excerpt through the worker's log policy";
+  }
   return null;
 }
 

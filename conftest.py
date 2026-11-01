@@ -27,7 +27,8 @@ case "$*" in
     'NAME                                  READY   STATUS             RESTARTS      AGE   IP           NODE' \
     'payments-processor-7d9f8c6b5d-x2k4p   0/1     CrashLoopBackOff   5 (40s ago)   4m    10.244.0.7   kind' \
     'payments-gateway-5b7c8d9e6f-a1b2c     1/1     Running            0             4m    10.244.0.6   kind' ;;
-  "logs"*) printf '%s\\n' '[FATAL] Payments startup failed: Missing required env var DATABASE_URL' ;;
+  "logs"*) echo "Error from server (Forbidden): pod logs are not readable from the sandbox; use the pod_logs tool" >&2
+     exit 1 ;;
   "get events"*) printf '%s\\n' 'LAST SEEN   TYPE      REASON    OBJECT    MESSAGE' \
     '30s         Warning   BackOff   pod/payments-processor-7d9f8c6b5d-x2k4p   Back-off restarting failed container' ;;
   *) echo "fake kubectl: unsupported: $*" >&2; exit 1 ;;

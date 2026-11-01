@@ -68,7 +68,7 @@ port-forward still holds it; stop that one first, or pass `UI_PORT=8002`.
 | Command | What it checks | Model usage |
 | --- | --- | --- |
 | `make test` | Worker unit tests and the Python tests, against the worker's real gRPC service with commands on the test host | None |
-| `make verify` | Sixteen boundary probes in real MXC containers, then a scripted investigation through the harness | None |
+| `make verify` | Seventeen boundary probes in real MXC containers, a check that a busy service's log reaches the harness only as a masked excerpt, then a scripted investigation through the harness | None |
 | `make loadtest` | One user with six conversations, twelve users at once, three users on one shared conversation, and workspace cleanup | None |
 | `uv run python -m examples.sre.loadtest --live http://localhost:8001` | Three users asking the deployed UI different questions at once (with `make ui` running) | Three investigations |
 | `make isolation` | Three sessions at once: one cannot reach another's workspace, evidence, logs or the journal through containers, file calls or the findings check; journals hold only their own commands; pod logs hold no output | None |

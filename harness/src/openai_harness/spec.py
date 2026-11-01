@@ -111,6 +111,9 @@ class AgentSpec:
     uploads: Uploads | None = None
     check: Callable[[Conversation, dict, dict[str, bytes]], dict | None] = lambda conversation, turn, files: None
     collect: tuple[str, ...] = ("output", "work")
+    # The workspace directory of the SDK Memory capability, when the agent has one; the launcher
+    # then gives the harness a MemoryStore so memory carries across conversations.
+    memory_dir: str | None = None
     default_question: str = "Continue."
 
     @property

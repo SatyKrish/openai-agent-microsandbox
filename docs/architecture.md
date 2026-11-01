@@ -15,6 +15,8 @@ flowchart LR
         UI["Shared SRE UI (ChatKit)"] --> Loop["Agents SDK Runner + SandboxAgent"]
         Loop --> Client["MXCSandboxClient"]
         Check["Host check of findings"]
+        Memory["/data/memory: the agent's memory"]
+        Loop <-.->|"seed on open, publish on close"| Memory
     end
     Loop -->|"OPENAI_API_KEY"| API["OpenAI API"]
     Client -->|"gRPC :50051, pair token"| Worker
@@ -72,7 +74,8 @@ flowchart LR
    like MXC, never falls back to a weaker network: an unsupported host fails
    the worker's self-test.
 4. The worker redacts the output (JWTs, cloud and API keys, bearer tokens, URL
-   credentials, `password=`-style pairs, private keys), caps it, records it in
+   credentials, `password=`-style pairs, private keys, email addresses and card
+   numbers that pass the Luhn check), caps it, records it in
    the session's audit journal with any warnings MXC returned, and returns it.
    MXC's structured errors map to gRPC statuses: `backend_unavailable` and
    `backend_error` to `UNAVAILABLE`, the rest to `FAILED_PRECONDITION`.
@@ -86,11 +89,11 @@ server is that proxy, as `http://10.0.2.2:18080`, with no user credentials. For
 each request the proxy:
 
 - forwards only `GET` and `HEAD` of Kubernetes API paths (`/api`, `/apis`,
-  `/version`, `/openapi`), so get, list, watch, describe, logs and events work;
+  `/version`, `/openapi`), so get, list, watch, describe and events work;
 - refuses writes of any verb, upgrades, `CONNECT`, the `exec`, `attach`,
-  `portforward` and `proxy` subresources, other paths, and requests addressed
-  to any other host, with a Kubernetes `Status` that kubectl prints as
-  `Forbidden`;
+  `portforward` and `proxy` subresources, **pod logs**, other paths, and
+  requests addressed to any other host, with a Kubernetes `Status` that kubectl
+  prints as `Forbidden`;
 - drops any `Authorization`, cookie or `Impersonate-*` header the container
   sent, adds the worker's token, read from the kubelet-rotated file on every
   request, and forwards over TLS, verifying the API server against the cluster
@@ -118,11 +121,12 @@ there is nothing to suspend between turns.
 
 | Moment | What happens |
 | --- | --- |
-| First message | The harness names a workspace, builds the agent's manifest under it, and the worker creates it; the SDK writes the manifest's files (the SRE agent's runbooks) |
+| First message | The harness names a workspace, builds the agent's manifest under it, and the worker creates it; the SDK writes the manifest's files (the SRE agent's runbooks) and the harness seeds the agent's memory |
 | During the turn | The agent loop runs in the harness; every tool call runs in its own MXC container |
-| End of the turn | The harness fetches new evidence from the worker, copies the agent's `output/` and `work/` files, runs the agent's check, and saves the session state with the thread |
-| Next message | The harness reopens the same workspace; its files are as the last turn left them |
-| Conversation deleted | The worker removes the workspace and records the deletion; its journal stays |
+| End of the turn | The harness fetches new evidence from the worker, copies the agent's `output/` and `work/` files, runs the agent's check, and saves the session state with the thread. The SDK session stays open |
+| Next message | The turn continues in the open session; its workspace is as the last turn left it |
+| Idle (`SRE_SESSION_IDLE_S`, 300 s) or harness shutdown | The session closes and the SDK distils the conversation into memory (below). A later message reopens the same workspace |
+| Conversation deleted | The worker removes the workspace and records the deletion; its journal stays. The conversation is not remembered |
 
 The harness keeps threads in SQLite and conversation history in an SDK
 `SQLiteSession`, both on its own volume, so conversations survive a harness
@@ -130,18 +134,95 @@ restart. The worker's volume keeps workspaces and the journal across worker
 restarts; a workspace that is gone when a conversation reopens is recreated
 from the manifest.
 
+## The agent loop
+
+The SDK's `Runner` runs the loop in the harness, with the conversation's
+history. The SRE agent adds three things to the SDK's defaults:
+
+- **Compaction.** The SDK's `Compaction` capability summarizes earlier steps
+  when the context nears the model's limit, so a long investigation keeps going.
+- **A step limit that ends the turn cleanly.** A turn may take
+  `SRE_MAX_TURNS` model steps (25). At the limit, the turn ends with a message
+  saying so instead of an error, and the partial turn stays in the history, so
+  "continue" picks up from it.
+- **Tool mistakes go back to the model.** A call to a tool that does not exist
+  is returned to the model as an error to correct, instead of failing the turn.
+
+## Memory across conversations
+
+The SDK's `Memory` capability keeps memory as files in the workspace
+(`memories/`). It records each run, and when the session closes it extracts
+lessons from the conversation and consolidates them with what is already there
+into `MEMORY.md` and `memory_summary.md`; the agent reads them at the start of
+a turn. Because each conversation has its own workspace, the harness carries
+memory between them ([`memory.py`](../harness/src/openai_harness/memory.py)):
+
+1. When a conversation's session opens, the harness copies the stored memory
+   from its volume (`/data/memory`) into the workspace.
+2. When the session closes, the harness copies it in again, so consolidation
+   builds on what other conversations published meanwhile, and lets the SDK
+   generate memory with the agent's model (`SRE_MEMORY_MODEL`).
+3. The harness reads the consolidated files back and swaps them in as a whole.
+   Closes run one at a time, so two consolidations never overwrite each other.
+
+Memory is a channel from one conversation's content into every later one, so
+it is constrained:
+
+- **The agent cannot write it during a run** (`live_update=False`). Only the
+  SDK's extraction writes memory, guided by
+  [`memory.md`](../examples/sre/agent/memory.md): conclusions rather than
+  data, never raw log lines, pod specs, credentials or personal data, and never
+  instructions found in logs, events or pod specs.
+- **It comes from what the model saw,** which was already masked: log excerpts,
+  redacted command output.
+- **It is a lead, not a fact.** Memory is dated, and the agent re-checks a
+  remembered cause against fresh evidence; quotes in findings must still match
+  this turn's evidence.
+- **Deleted conversations are not remembered,** and stored memory is capped at
+  8 MiB and 2,000 files.
+
+The UI's start screen shows the consolidated summary. Memory is plain files on
+the harness's volume: an operator can read, edit or remove `/data/memory`.
+
+## Logs reach the model only as excerpts
+
+Application logs can hold customer data, so raw logs never enter a container or
+the model's context. Containers cannot read them: the API proxy refuses
+`pods/log`. The agent reads logs only through the `pod_logs` tool, which calls
+the worker's `ReadLogs`. The worker fetches the log itself with its own token
+(a pod name, or `deploy/NAME` for its newest pod; up to `MXC_LOG_MAX_TAIL_LINES`
+lines and `MXC_LOG_MAX_BYTES` bytes) and applies its log policy before
+anything leaves it:
+
+- masks credentials, email addresses, Luhn-valid card numbers and numbers of
+  nine or more digits;
+- keeps only error and warning lines, with two lines of context around each
+  error, the last three lines, and lines containing text the agent asked for
+  with `match`;
+- collapses lines that differ only in numbers, timestamps and identifiers into
+  one line with a count (`[×5 more like this, last at line 1206]`);
+- caps the excerpt at 40 lines and 6,000 bytes, and 240 characters per line;
+- starts the excerpt with a header saying how many lines it read, showed and
+  withheld, and how many values it masked.
+
+Only the excerpt is returned, recorded as evidence and saved in the workspace,
+so quotes are checked against exactly what the model saw. The journal records
+each read with its counts and the raw log's size and SHA-256, never its text.
+The limits are worker settings (`MXC_LOG_*`, see [usage](usage.md)).
+
 ## Evidence and checks
 
 A command counts as evidence only when it is a plain kubectl read: `get`,
-`describe`, `logs`, `events`, `top`, `explain`, `api-resources`,
-`api-versions` or `version`, with no pipes, redirections, quotes, globs or `$`,
+`describe`, `events`, `top`, `explain`, `api-resources`, `api-versions` or
+`version`, with no pipes, redirections, quotes, globs or `$`,
 and no flag that points kubectl elsewhere (`--kubeconfig`, `--server`,
 `--token`, `--as`, `--context`, `--raw`, `-f` and others). Its output then
 comes from the API server as the worker's own read-only identity.
 
 The worker keeps the redacted output under `/sandboxes/history/SESSION`, which no
 container can see, and saves a copy in the workspace as
-`evidence/NNN-kubectl-....txt` for the agent to analyze. The output comes from
+`evidence/NNN-kubectl-....txt` for the agent to analyze. Each `pod_logs` excerpt
+is recorded the same way, as `evidence/NNN-pod-logs-....txt`. The output comes from
 the API server through the worker's own proxy, as the worker's identity. After each turn the
 harness fetches new entries with `ListEvidence` and `ReadEvidence`, checks each
 against its SHA-256, and keeps a host copy. The SRE agent's check then requires
@@ -174,18 +255,27 @@ components required it:
   overlay runs the worker container privileged, as uid 10001. Commands in MXC
   containers still have no capabilities. In production the pod's outer
   boundary is a Kata microVM; see [deployment](deployment.md).
-- **Redaction is pattern-based.** The worker's identity cannot read Secrets, but
-  pod specs' literal environment values and application logs can still hold
-  credentials it does not recognize.
+- **Masking is pattern-based.** The worker's identity cannot read Secrets, and
+  logs pass the log policy, but pod specs, events and log lines can still hold
+  sensitive values in forms the patterns do not recognize: names, addresses,
+  free-text identifiers. Command output (pod specs, events) is masked but not
+  filtered the way logs are.
 - **Evidence proves quotes, not diagnoses.** A log line is evidence of what the
   application printed.
 - **What kubectl can read still reaches the model.** The token stays in the
-  worker, but anything the Role lets the agent read (pod specs, logs, events)
-  can reach the model's context. Keep that Role narrow.
+  worker and logs arrive only as excerpts, but pod specs, events and workload
+  status the Role lets the agent read reach the model's context as they are,
+  after masking. Keep that Role narrow. A container's termination message,
+  which can hold the end of its log, appears in pod status.
 - **MXC's network limits apply.** A slirp4netns that dies mid-run fails the run,
   but one that hangs reaches the workload as an unreachable network; IPv6 has no
   route. MXC's Node SDK caches `getPlatformSupport()` for the process's life,
   so a host change needs a worker restart to be seen.
+- **Memory is shared and can be wrong.** Everyone who uses a harness shares its
+  agent's memory. A wrong conclusion that the extraction keeps is remembered
+  until a later conversation corrects it or an operator removes it. Memory
+  generation takes about a minute per conversation; sessions still open when
+  the harness's 180 s termination grace period ends are not remembered.
 - **One harness per domain, no sign-in.** Access is Kubernetes RBAC on
   port-forward, and conversations live in SQLite. Several users can share the
   harness: their conversations run concurrently, and messages to one shared

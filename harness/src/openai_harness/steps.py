@@ -55,9 +55,33 @@ def describe_call(raw) -> tuple[str, str, str]:
     return str(name), str(call_id), str(arguments)
 
 
-def step_title(name: str, where: str, status: str = "") -> str:
-    """``exec_command · exit 0 · sandbox``: the tool first, so a terminal can recognize it."""
-    return " · ".join(part for part in (name, status, where) if part)
+def headline(name: str, raw) -> str:
+    """What a step did, in one line: the command it ran, or the tool and its main arguments."""
+    arguments = _field(raw, "arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            arguments = None
+    if not isinstance(arguments, dict):
+        return name
+    if isinstance(arguments.get("cmd"), str):
+        line = " ".join(arguments["cmd"].split())
+        return line if len(line) <= 90 else line[:89] + "…"
+    if isinstance(arguments.get("skill_name"), str):
+        return f"{name} {arguments['skill_name']}"
+    if name == "pod_logs" and isinstance(arguments.get("pod"), str):
+        flags = [f"-n {arguments['namespace']}" if arguments.get("namespace") else "",
+                 f"-c {arguments['container']}" if arguments.get("container") else "",
+                 "--previous" if arguments.get("previous") else "",
+                 f"match={json.dumps(arguments['match'])}" if arguments.get("match") else ""]
+        return " ".join(part for part in (name, arguments["pod"], *flags) if part)
+    return name
+
+
+def step_title(name: str, where: str, status: str = "", summary: str = "") -> str:
+    """``kubectl get pods -n payments · exit 0 · sandbox``: what ran, how it ended, and where."""
+    return " · ".join(part for part in (summary or name, status, where) if part)
 
 
 def describe_output(output) -> tuple[str, str]:
@@ -84,14 +108,15 @@ class ToolSteps:
         self.harness_tools = harness_tools
 
     async def stream_events(self):
-        pending: dict[str, tuple[WorkflowItem, int, str, str]] = {}
+        pending: dict[str, tuple[WorkflowItem, int, str, str, str]] = {}
         async for event in self.result.stream_events():
             if getattr(event, "type", None) == "run_item_stream_event":
                 if event.name == "tool_called":
                     name, call_id, arguments = describe_call(event.item.raw_item)
                     where = "harness" if name in self.harness_tools else "sandbox"
-                    task = CustomTask(title=step_title(name, where), icon=ICONS[where], content=fenced(clipped(arguments)),
-                                      status_indicator="loading")
+                    summary = headline(name, event.item.raw_item)
+                    task = CustomTask(title=step_title(name, where, summary=summary), icon=ICONS[where],
+                                      content=fenced(clipped(arguments)), status_indicator="loading")
                     if self.context.workflow_item is None:
                         # Open while the agent works; ChatKit collapses it into "Worked for …" when it ends.
                         self.context.workflow_item = WorkflowItem(
@@ -99,19 +124,19 @@ class ToolSteps:
                             thread_id=self.context.thread.id, workflow=Workflow(type="custom", tasks=[], expanded=True))
                     await self.context.add_workflow_task(task)
                     workflow = self.context.workflow_item
-                    pending[call_id] = (workflow, workflow.workflow.tasks.index(task), name, where)
-                    self.record.append({"tool": name, "status": "running", "where": where})
+                    pending[call_id] = (workflow, workflow.workflow.tasks.index(task), name, where, summary)
+                    self.record.append({"tool": name, "status": "running", "where": where, "summary": summary})
                 elif event.name == "tool_output":
                     call_id = _field(event.item.raw_item, "call_id") or ""
                     if call_id in pending:
-                        workflow, index, name, where = pending.pop(call_id)
+                        workflow, index, name, where, summary = pending.pop(call_id)
                         status, text = describe_output(event.item.output)
                         # The call's arguments are already in the task; the output follows them.
                         content = workflow.workflow.tasks[index].content or ""
                         if text:
                             content += "\n\n" + fenced(clipped(text))
-                        task = CustomTask(title=step_title(name, where, status), icon=ICONS[where], content=content,
-                                          status_indicator="complete")
+                        task = CustomTask(title=step_title(name, where, status, summary), icon=ICONS[where],
+                                          content=content, status_indicator="complete")
                         for entry in reversed(self.record):
                             if entry["tool"] == name and entry["status"] == "running":
                                 entry["status"] = status or "done"

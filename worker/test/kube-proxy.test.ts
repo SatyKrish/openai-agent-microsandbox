@@ -89,6 +89,7 @@ test('writes, streams, other paths and other hosts are refused before reaching t
     ['GET', '/api/v1/namespaces/payments/pods/x/portforward', {}],
     ['GET', '/api/v1/namespaces/payments/services/x/proxy/admin', {}],
     ['GET', '/api/v1/namespaces/payments/pods/x/attach', { connection: 'Upgrade', upgrade: 'websocket' }],
+    ['GET', '/api/v1/namespaces/payments/pods/x/log?tailLines=100', {}],
     ['GET', '/metrics', {}],
     ['GET', 'http://pypi.org/simple/requests/', {}],
   ] as Array<[string, string, http.OutgoingHttpHeaders]>) {

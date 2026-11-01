@@ -12,7 +12,7 @@ from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Filesystem, Shell
 from agents.sandbox.entries import Dir, File
-from agents.sandbox.errors import ExecTimeoutError
+from agents.sandbox.errors import ExecTimeoutError, WorkspaceReadNotFoundError
 
 from agent_mxc import MXCSandboxClient, MXCSandboxOptions, WorkerError
 from openai_harness.testing import Calls, shell
@@ -39,6 +39,9 @@ async def test_a_session_runs_commands_and_moves_files_in_its_own_workspace(work
         assert failed.exit_code == 3
         with pytest.raises(FileNotFoundError):
             await session.read(Path("output/missing.md"))
+        # SDK capabilities (Memory reads memory_summary.md, which may not exist yet) expect the SDK's own error.
+        with pytest.raises(WorkspaceReadNotFoundError):
+            await session.read(Path("memories/memory_summary.md"))
         assert await session.running()
 
     # State round-trips; the workspace outlives the session object.
@@ -56,15 +59,14 @@ async def test_kubectl_reads_become_evidence_the_workspace_cannot_forge(worker):
     client = worker.client()
     session = await client.create(manifest=manifest(client, "s-beta"), options=MXCSandboxOptions(workspace_id="s-beta"))
     async with session:
-        read = await session.exec("kubectl logs deploy/payments-processor -n payments --previous")
-        assert "Missing required env var DATABASE_URL" in read.stdout.decode()
-        assert "saved as evidence/001-kubectl-logs-deploy-payments-processor-n-payments-previous.txt" in read.stderr.decode()
-        await session.exec("echo forged > evidence/001-kubectl-logs-deploy-payments-processor-n-payments-previous.txt")
+        read = await session.exec("kubectl get pods -n payments -o wide")
+        assert "CrashLoopBackOff" in read.stdout.decode()
+        assert "saved as evidence/001-kubectl-get-pods-n-payments-o-wide.txt" in read.stderr.decode()
+        await session.exec("echo forged > evidence/001-kubectl-get-pods-n-payments-o-wide.txt")
         entries = await session._inner.evidence()
-        assert [entry["command"] for entry in entries] == [
-            "kubectl logs deploy/payments-processor -n payments --previous"]
+        assert [entry["command"] for entry in entries] == ["kubectl get pods -n payments -o wide"]
         trusted = await session._inner.read_evidence(entries[0]["seq"])
-        assert b"Missing required env var DATABASE_URL" in trusted
+        assert b"CrashLoopBackOff" in trusted
         assert await session._inner.evidence(after_seq=1) == []
     await client.delete(session, purge_history=True)
     assert not (worker.data_dir / "history/s-beta").exists()
@@ -118,6 +120,40 @@ async def test_a_sandbox_agent_runs_its_tools_through_the_worker(worker):
         assert "payments-processor-7d9f8c6b5d-x2k4p" in model.outputs[0]
         assert (await session.read(Path("output/count.txt"))).read().strip() == b"1"
     await client.delete(session)
+
+
+async def test_logs_reach_the_harness_only_as_policy_excerpts(worker):
+    client = worker.client()
+    session = await client.create(manifest=manifest(client, "s-logs"), options=MXCSandboxOptions(workspace_id="s-logs"))
+    async with session:
+        # Inside the sandbox, kubectl cannot read logs at all.
+        raw = await session.exec("kubectl logs deploy/payments-api -n payments")
+        assert raw.exit_code != 0 and "pod_logs" in raw.stderr.decode()
+        reply = await session._inner.read_logs("payments", "deploy/payments-api", tail_lines=5000)
+        assert reply["lines_read"] == 1207 and reply["lines_shown"] <= 40 and reply["redactions"] > 0
+        assert "@example.com" not in reply["excerpt"] and "4111" not in reply["excerpt"]
+        assert "ERROR upstream ledger timeout" in reply["excerpt"]
+        copy = (await session.read(Path(reply["evidence_path"]))).read().decode()
+        assert copy == reply["excerpt"]
+        with pytest.raises(WorkerError) as refused:
+            await session._inner.read_logs("kube-system", "coredns-1")
+        assert refused.value.code == grpc.StatusCode.INVALID_ARGUMENT
+    await client.delete(session, purge_history=True)
+
+
+async def test_deleting_a_session_skips_its_pre_stop_hooks(worker):
+    """The SDK generates memory in a pre-stop hook; a deleted conversation must not be remembered."""
+    client = worker.client()
+    session = await client.create(manifest=manifest(client, "s-hooks"), options=MXCSandboxOptions(workspace_id="s-hooks"))
+    ran = []
+
+    async def hook():
+        ran.append(True)
+
+    await session.start()
+    session.register_pre_stop_hook(hook)
+    await client.delete(session)
+    assert ran == []
 
 
 def test_session_ids_are_validated():

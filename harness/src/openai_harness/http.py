@@ -10,6 +10,7 @@ loopback only, refuses cross-site requests, and serves only files it recorded it
 
 from __future__ import annotations
 
+import contextlib
 import html
 import logging
 import re
@@ -50,7 +51,9 @@ class _Revalidated(StaticFiles):
 def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_url: str | None, index: Path = SHELL / "index.html",
                 state_fields: tuple[str, ...] = (), derived_file: Callable | None = None,
                 starting_files: dict[str, bytes] | None = None,
-                worker: Callable[[], Awaitable[dict]] | None = None) -> list[Route]:
+                worker: Callable[[], Awaitable[dict]] | None = None,
+                health: Callable[[], Awaitable[dict]] | None = None,
+                memory: Callable[[], Awaitable[dict]] | None = None) -> list[Route]:
     """Routes for one agent's UI. ``derived_file(thread, path)`` may serve files the agent derived from uploads;
     ``starting_files`` are the workspace's initial files, shown before the first message."""
     origins = {f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
@@ -173,6 +176,20 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
             logger.debug("worker unavailable: %s", error)
             return JSONResponse({"status": "unavailable"}, status_code=503)
 
+    async def health_summary(request: Request):
+        if health is None:
+            return JSONResponse({"status": "disabled"}, status_code=404)
+        try:
+            return JSONResponse({"status": "ok", **await health()}, headers={"Cache-Control": "no-store"})
+        except Exception as error:  # the worker may be restarting; the page says so
+            logger.debug("health unavailable: %s", error)
+            return JSONResponse({"status": "unavailable"}, status_code=503)
+
+    async def memory_summary(request: Request):
+        if memory is None:
+            return JSONResponse({"status": "disabled"}, status_code=404)
+        return JSONResponse({"status": "ok", **await memory()}, headers={"Cache-Control": "no-store"})
+
     async def trace(request: Request):
         thread = await load(request)
         turn = find_turn(thread, request.path_params["turn"]) if thread else None
@@ -195,6 +212,8 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
         Route("/favicon.ico", icon),
         Route("/api/starting-files/{path:path}", starting_file),
         Route("/api/worker", worker_info),
+        Route("/api/health", health_summary),
+        Route("/api/memory", memory_summary),
         Route("/chatkit", chatkit, methods=["POST"]),
         Route("/uploads/{attachment_id}", upload, methods=["PUT", "POST"]),
         Route("/api/config", settings),
@@ -215,7 +234,9 @@ def ui_application(server: HarnessChatServer, *, config: dict, port: int, jaeger
             "uploads": {"types": uploads.types, "hint": uploads.hint, "max_bytes": uploads.max_bytes,
                         "max_count": uploads.max_count} if uploads else None,
             "starting_files": [{"path": path, "bytes": len(data)} for path, data in (starting_files or {}).items()],
-            "worker": routes.get("worker") is not None, "preferred_output": server.preferred_output}
+            "worker": routes.get("worker") is not None, "health": routes.get("health") is not None,
+            "memory": routes.get("memory") is not None,
+            "preferred_output": server.preferred_output}
     mounts = [Mount("/harness", _Revalidated(directory=SHELL), name="harness")]
     if static is not None:
         mounts.append(Mount("/static", _Revalidated(directory=static), name="static"))
@@ -224,10 +245,20 @@ def ui_application(server: HarnessChatServer, *, config: dict, port: int, jaeger
         if (static / "agent.css").is_file():
             full["stylesheet"] = "/static/agent.css"
     return application([*chat_routes(server, config=full, port=port, jaeger_url=jaeger_url,
-                                      starting_files=starting_files, **routes), *mounts])
+                                      starting_files=starting_files, **routes), *mounts],
+                       on_shutdown=server.close_all)
 
 
-def application(routes: list) -> Starlette:
+def application(routes: list, *, on_shutdown: Callable[[], Awaitable[None]] | None = None) -> Starlette:
+    """``on_shutdown`` runs when the server stops, after in-flight requests finish: the chat server
+    closes its open sessions there, so a restart does not lose the memory they would have generated."""
     # Reject other Host headers so a rebinding DNS name cannot reach the loopback server.
     middleware = [Middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])]
-    return Starlette(routes=routes, middleware=middleware)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        yield
+        if on_shutdown is not None:
+            await on_shutdown()
+
+    return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)

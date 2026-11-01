@@ -54,11 +54,37 @@ await client.delete(session)  # removes the workspace; the worker keeps its jour
 await client.aclose()         # closes the gRPC channel
 ```
 
-Closing a session closes it on the client side only: no process runs between
-commands, so there is nothing to suspend. Run one turn of a conversation at a
-time; the worker runs one session's commands in order, but two harnesses
-resuming the same workspace would interleave their turns. Different
-conversations run concurrently.
+No process runs between commands, so there is nothing to suspend between
+turns. Keep a session open across a conversation's turns, as the SDK expects,
+and close it when the conversation goes idle: closing runs the SDK's pre-stop
+hooks, such as the `Memory` capability's memory generation, which makes model
+calls. `client.delete` skips those hooks, so a deleted conversation is not
+remembered. Run one turn of a conversation at a time; the worker runs one
+session's commands in order, but two harnesses resuming the same workspace
+would interleave their turns. Different conversations run concurrently.
+
+## Memory
+
+The SDK's `Memory` capability works on this provider unchanged: its files live
+in the workspace under `memories/`. Each workspace has its own, so to carry
+memory between conversations, copy it in and out around each session, as the
+shared harness's `MemoryStore` does
+([`memory.py`](../harness/src/openai_harness/memory.py)):
+
+```python
+store = MemoryStore(Path("/data/memory"))
+await session.start()
+await store.seed(session)     # earlier conversations' memory into memories/
+...                           # the conversation's turns
+await store.seed(session)     # again, to consolidate on top of what others published
+await session.aclose()        # the SDK generates and consolidates memory here
+await store.publish(session)  # the consolidated memories/ back to the store
+```
+
+Serialize the close-and-publish step across conversations, or two
+consolidations can overwrite each other's lessons. See
+[architecture](architecture.md#memory-across-conversations) for how the SRE
+agent constrains what memory may hold.
 
 ## Errors
 
@@ -67,15 +93,33 @@ conversations run concurrently.
 | A command exits nonzero | An `ExecResult` with its exit code |
 | A command exceeds its timeout (60 s by default, `exec_timeout`) | `ExecTimeoutError` |
 | The worker is unreachable, refuses the token or cannot launch a container | `ExecTransportError` for commands; `WorkerError` with the gRPC status elsewhere |
-| A file is missing | `FileNotFoundError` |
+| A file is missing | `FileNotFoundError`, which is also the SDK's `WorkspaceReadNotFoundError` |
 | A file is over the limit (10 MiB by default) | `ValueError` |
 | A path leaves the workspace | `ValueError` (the SDK's own checks usually refuse it first) |
 
 Commands are never retried: one that failed in transit may already have run.
 
+## Logs
+
+Containers cannot read pod logs. Read them through the worker's log policy
+(see [architecture](architecture.md#logs-reach-the-model-only-as-excerpts)):
+
+```python
+reply = await session._inner.read_logs("payments", "deploy/payments-api", previous=False,
+                                       tail_lines=500, match="ledger timeout")
+reply["excerpt"]        # the only log text that leaves the worker
+reply["evidence_path"]  # the excerpt's copy in the workspace, also recorded as evidence
+```
+
+`read_logs` raises `WorkerError` with `INVALID_ARGUMENT` for a namespace outside
+the worker's `SRE_NAMESPACES` or a malformed name, and `NOT_FOUND` for a pod
+that does not exist or a log the kubelet no longer has (a previous container's,
+after it was removed). Give agents a function tool around it, as the SRE agent's
+`pod_logs` does (`examples/sre/agent/tools/logs.py`).
+
 ## Evidence
 
-The worker records plain kubectl reads as evidence (see
+The worker records plain kubectl reads and log excerpts as evidence (see
 [architecture](architecture.md#evidence-and-checks)). The session lists and
 reads them; the SDK's session wrapper does not forward provider methods, so
 call them on `session._inner`:
@@ -88,11 +132,20 @@ content = await session._inner.read_evidence(entries[0]["seq"])
 The shared harness does this after every turn and keeps host copies for the
 agent's check.
 
+## Health summary
+
+`await client.health()` returns the worker's summary of the workloads in its
+namespaces: each deployment and stateful set, and any pod outside them, with its readiness,
+restarts, a state (`failing`, `degraded` or `healthy`) and the reasons (waiting
+reasons, the last exit, unschedulable pods, recent warning events, redacted).
+The worker reads it with its own identity and caches it for 5 s. It is for
+people: the SRE UI's start screen shows it, and it is never sent to the model.
+
 ## The worker's contract
 
 [`proto/mxc/sandbox/v1/sandbox.proto`](../proto/mxc/sandbox/v1/sandbox.proto)
 defines `Info`, `InitSession`, `Exec`, `WriteFile`, `ReadFile`, `ListEvidence`,
-`ReadEvidence` and `DestroySession`. The worker takes these settings from its
+`ReadEvidence`, `ReadLogs`, `Health` and `DestroySession`. The worker takes these settings from its
 environment:
 
 | Variable | Default | Meaning |
@@ -106,4 +159,8 @@ environment:
 | `MXC_MAX_FILE_BYTES`, `MXC_MAX_OUTPUT_BYTES`, `MXC_MAX_EVIDENCE_BYTES` | 10 MiB, 1 MiB, 4 MiB | Size limits |
 | `MXC_LIMIT_AS_BYTES` | 2 GiB | Address space per command (`prlimit`) |
 | `MXC_WORKER_TOKEN_FILE` | unset | The pair token every call must carry |
+| `SRE_NAMESPACES` | none | The namespaces `ReadLogs` serves |
+| `MXC_LOG_TAIL_LINES`, `MXC_LOG_MAX_TAIL_LINES`, `MXC_LOG_MAX_BYTES` | 500, 5000, 4 MiB | How much raw log the worker reads per call, by default and at most |
+| `MXC_LOG_EXCERPT_LINES`, `MXC_LOG_EXCERPT_BYTES` | 40, 6000 | The most an excerpt may hold |
+| `MXC_LOG_CONTEXT_LINES`, `MXC_LOG_LAST_LINES` | 2, 3 | Context kept around each error, and last lines always kept |
 | `MXC_READONLY_PATHS` | none | Extra read-only mounts for every container, beyond MXC's baseline and the kubeconfig directory |
