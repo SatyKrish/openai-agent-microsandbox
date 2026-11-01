@@ -1,23 +1,22 @@
 // Copyright 2026 openai-agent-substrate contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// The shared agent UI. ChatKit runs the conversation; around it the page shows the
-// turn's result, suggestions, and a side panel with the conversation's files, the
-// quotes the host checked and the turn's trace. The panel opens when a turn has
-// something to show and stays collapsed once you collapse it. The agent's ui/
-// folder configures all of this through /api/config, and its optional agent.js
-// renders its own file types.
+// The SRE agent's UI. ChatKit runs the conversation; around it the page shows the
+// cluster's health on the start screen (sre.js), follow-up suggestions, what the agent
+// remembers, and a side panel with the conversation's files, the quotes the host
+// checked and the turn's trace. The panel opens when a turn has something to show
+// and stays collapsed once you collapse it. The harness's API serves the data.
 
 import { $, el, formatBytes, getJSON, plural, readStorage, writeStorage } from "./dom.js";
 import { findQuote, renderCode, renderText } from "./render.js";
+import { renderFile as renderSreFile, renderHome as renderSreHome } from "./sre.js";
 import { renderTrace } from "./trace.js";
 
 const media = window.matchMedia("(prefers-color-scheme: dark)");
 const wide = window.matchMedia("(min-width: 900px)");
 const THREAD_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const state = {
-  config: { prompts: [], follow_ups: [], starting_files: [] },
-  extension: {},
+  config: { follow_ups: [], starting_files: [] },
   chatkit: null,
   threadId: null,
   thread: null,
@@ -49,26 +48,6 @@ function remember(name, threadKey, value) {
 const panelPreference = () => readJSON("panel")[state.threadId || "_new"];
 const seenTurn = () => readJSON("seen")[state.threadId] || 0;
 
-/* ---------- Icons ---------- */
-
-const ICON_PATHS = {
-  document: ["M6 3h8l4 4v14H6z", "M14 3v4h4", "M9 13h6", "M9 17h4"],
-  pulse: ["M3 12h4l3-8 4 16 3-8h4"],
-  spark: ["M12 3v4", "M12 17v4", "M3 12h4", "M17 12h4", "M6 6l2.5 2.5", "M15.5 15.5 18 18", "M6 18l2.5-2.5", "M15.5 8.5 18 6"],
-};
-
-function icon(name) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  for (const [attr, value] of Object.entries({ width: 22, height: 22, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
-    "stroke-width": 1.8, "stroke-linecap": "round", "stroke-linejoin": "round" })) svg.setAttribute(attr, value);
-  for (const d of ICON_PATHS[name] || ICON_PATHS.spark) {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", d);
-    svg.append(path);
-  }
-  return svg;
-}
-
 /* ---------- Theme ---------- */
 
 function resolvedScheme() {
@@ -87,12 +66,8 @@ function applyTheme() {
 
 function chatkitOptions() {
   const scheme = resolvedScheme();
-  const uploads = state.config.uploads;
-  const accept = {};
-  for (const [extension, type] of Object.entries(uploads?.types || {})) (accept[type] ||= []).push(extension);
   return {
-    // two_phase: attachments.create returns our upload URL, then the browser PUTs the file there.
-    api: { url: "/chatkit", domainKey: "local-dev", ...(uploads ? { uploadStrategy: { type: "two_phase" } } : {}) },
+    api: { url: "/chatkit", domainKey: "local-dev" },
     initialThread: state.threadId,
     theme: {
       colorScheme: scheme, radius: "round", density: "normal",
@@ -105,12 +80,7 @@ function chatkitOptions() {
     history: { enabled: true, showDelete: false, showRename: true },
     // Suggestions fill the composer from outside ChatKit, so you can read and edit them first.
     startScreen: { greeting: state.config.greeting || "", prompts: [] },
-    composer: {
-      placeholder: state.config.placeholder || "Ask the agent…",
-      attachments: uploads
-        ? { enabled: true, maxCount: uploads.max_count, maxSize: uploads.max_bytes, accept }
-        : { enabled: false },
-    },
+    composer: { placeholder: state.config.placeholder || "Ask the agent…", attachments: { enabled: false } },
     threadItemActions: { feedback: false, retry: true },
     widgets: {
       async onAction(action) {
@@ -209,9 +179,8 @@ function selectThread(threadId) {
   state.tab = "files";
   if (!firstMessage) {
     const preference = panelPreference();
-    // A new conversation shows the files it starts with; a saved one opens the panel once it loads, if it has files.
-    state.panelOpen = wide.matches && preference !== "closed"
-      && (preference === "open" || (!state.threadId && state.config.starting_files.length > 0));
+    // A saved conversation opens the panel once it loads, if it has files; a new one starts with it closed.
+    state.panelOpen = wide.matches && preference === "open";
   }
   if (!state.threadId) {
     stopPolling();
@@ -355,14 +324,12 @@ function badgeFor(file, turn) {
 function render() {
   renderHeader();
   renderStatus();
-  renderResult();
   renderSuggestions();
   renderHome();
   renderPanel();
 }
 
 function renderHeader() {
-  $("thread-title").textContent = state.thread?.title || state.config.new_label || "New conversation";
   $("conversation-menu-host").hidden = !state.threadId;
   const toggle = $("panel-toggle");
   toggle.setAttribute("aria-expanded", String(state.panelOpen));
@@ -372,57 +339,14 @@ function renderHeader() {
   $("panel-count").textContent = `${count} new`;
 }
 
+// A line under the chat only while something runs; the workspace's name is in its title.
 function renderStatus() {
   const thread = state.thread;
-  const text = $("workspace-text");
-  $("workspace-dot").classList.toggle("running", thread?.state === "running" || thread?.state === "elsewhere");
+  const running = thread?.state === "running";
   $("elsewhere").hidden = thread?.state !== "elsewhere";
-  if (!thread || !thread.workspace) {
-    text.textContent = "No workspace yet · the first message creates an MXC session";
-  } else if (thread.state === "running") {
-    text.textContent = `Turn running · ${thread.workspace} · each command in its own MXC container`;
-  } else if (thread.state === "elsewhere") {
-    text.textContent = `Workspace in use by another window · ${thread.workspace}`;
-  } else {
-    const reopened = (thread.turns || []).filter((turn) => turn.lifecycle === "reopened").length;
-    const kept = reopened ? `kept on the worker's volume, reopened ${plural(reopened, "time")}` : "kept on the worker's volume";
-    text.textContent = `Workspace idle · ${thread.workspace} · ${kept} · nothing runs between turns`;
-  }
-}
-
-function checkHeadline(turn) {
-  if (turn.status === "failed") return { tone: "err", text: `Turn ${turn.number} failed (${turn.error || "error"})` };
-  if (turn.status === "stopped") return { tone: "", text: `Turn ${turn.number} was stopped` };
-  const check = turn.check || {};
-  const status = turn.file_status || {};
-  const changed = (turn.files || []).filter((file) => file.changed && file.path.startsWith("output/")).map((file) => file.path);
-  const name = (path) => path.split("/").pop();
-  if ((check.status || "").includes("failed")) return { tone: "err", text: `Host check failed${check.detail ? `: ${check.detail}` : ""}` };
-  const checked = changed.filter((path) => status[path]?.state === "checked");
-  if (checked.length) return { tone: "ok", text: `Checked on the host: ${checked.map(name).join(", ")}` };
-  if (changed.length) return { tone: "warn", text: `Not checked on the host: ${changed.map(name).join(", ")}` };
-  return { tone: "", text: "No output files changed · nothing to check" };
-}
-
-function renderResult() {
-  const bar = $("result-bar");
-  const turn = latestTurn();
-  if (!turn || state.responding || turn.status === "running" || state.thread?.state === "elsewhere") {
-    bar.hidden = true;
-    return;
-  }
-  const headline = checkHeadline(turn);
-  const preferred = defaultPath(turn, filesUpTo(turn.number));
-  const quotes = (turn.check?.quotes_from && (turn.files || []).some((file) => file.path === turn.check.quotes_from && file.changed)) ? (turn.check.checked_quotes || []).length : 0;
-  bar.replaceChildren(
-    el("span", { class: `result-state ${headline.tone}` }, headline.text),
-    el("span", { class: "muted" }, `Turn ${turn.number}${turn.duration_s !== undefined ? ` · ${turn.duration_s} s` : ""}`),
-    el("span", { class: "result-actions" },
-      preferred ? el("button", { type: "button", onclick: () => openPanel({ tab: "files", turn: turn.number, view: { path: preferred } }) },
-        `Open ${preferred.split("/").pop()}`) : null,
-      quotes ? el("button", { type: "button", onclick: () => openPanel({ tab: "quotes", turn: turn.number }) }, `Show ${plural(quotes, "quote")}`) : null,
-      turn.otel_trace_id ? el("button", { type: "button", onclick: () => openPanel({ tab: "trace", turn: turn.number }) }, "Trace") : null));
-  bar.hidden = false;
+  $("workspace-status").hidden = !running;
+  $("workspace-text").textContent = running ? "Investigating · each command runs in its own MXC container" : "";
+  $("workspace-status").title = thread?.workspace ? `Workspace ${thread.workspace} on the sandbox worker` : "";
 }
 
 function renderSuggestions() {
@@ -430,28 +354,27 @@ function renderSuggestions() {
   const turn = latestTurn();
   const running = state.responding || turn?.status === "running" || state.thread?.state === "elsewhere";
   const used = state.used.get(state.threadId || "_new") || new Set();
-  const items = (running || state.historyOpen ? [] : !state.threadId ? state.config.prompts : turn ? state.config.follow_ups : [])
-    .filter((item) => !used.has(item.prompt));
+  // Follow-ups after a turn; the start screen has the health board instead.
+  const items = (running || state.historyOpen || !turn ? [] : state.config.follow_ups).filter((item) => !used.has(item.prompt));
   if (!items?.length) {
     box.hidden = true;
     return;
   }
-  box.replaceChildren(el("span", { class: "muted" }, state.threadId ? "Next" : "Try"),
+  box.replaceChildren(el("span", { class: "muted" }, "Next"),
     ...items.map((item) => el("button", { type: "button", title: item.prompt, onclick: () => suggest(item.prompt) }, item.label)));
   box.hidden = false;
 }
 
-// An agent's own area above the suggestions (agent.js renderHome), e.g. the state of what it looks after.
+// The start screen's health board and memory line (sre.js), above the composer's suggestions.
 function renderHome() {
   const home = $("agent-home");
-  if (!state.extension.renderHome) return;
   if (state.historyOpen) {
     home.hidden = true;
     return;
   }
   const running = state.responding || latestTurn()?.status === "running";
-  Promise.resolve(state.extension.renderHome({ container: home, el, getJSON, suggest, config: state.config,
-    threadId: state.threadId, running, openMemory, memoryVersion: state.memoryVersion }))
+  renderSreHome({ container: home, suggest, config: state.config, threadId: state.threadId, running, openMemory,
+    memoryVersion: state.memoryVersion })
     .then(() => { if (state.historyOpen) home.hidden = true; })
     .catch((error) => console.warn("renderHome failed", error));
 }
@@ -520,12 +443,14 @@ function renderFiles(turn, body, isCurrent) {
     }
     const badge = badgeFor(file, turn);
     const tone = file.status?.state || (file.start ? "source" : "");
+    // Evidence is named by the read that produced it; its file name is on hover.
+    const name = file.evidence && file.command ? file.command : file.path.replace(/^(output|inputs|evidence|work)\//, "");
     bar.append(el("button", {
       type: "button", class: `file-chip ${tone}`, "aria-pressed": String(state.view?.path === file.path),
       title: [file.path, file.status?.label].filter(Boolean).join(" · "),
       onclick: () => apply({ tab: "files", view: { path: file.path } }),
     }, tone && tone !== "source" ? el("span", { class: `state-dot ${tone}`, "aria-hidden": "true" }) : null,
-      file.path.replace(/^(output|inputs|evidence|work)\//, ""), badge ? el("span", { class: "badge" }, badge) : null));
+      el("span", { class: "file-chip-label" }, name), badge ? el("span", { class: "badge" }, badge) : null));
   }
   const path = state.view?.path && files.some((file) => file.path === state.view.path) ? state.view.path : defaultPath(turn, files);
   const file = files.find((item) => item.path === path);
@@ -552,8 +477,7 @@ async function renderFile(turn, file, body, isCurrent) {
   const highlight = state.view?.path === file.path ? state.view.highlight : null;
   const page = state.view?.path === file.path ? state.view.page : null;
   const open = (path, quote = null) => apply({ tab: "files", view: { path, highlight: quote } });
-  if (state.extension.renderFile && await state.extension.renderFile({ file, turn, threadId: state.threadId, body, el, url,
-    highlight, page, open, check: turn?.check || null })) return;
+  if (await renderSreFile({ file, body, url, highlight, open, check: turn?.check || null })) return;
   body.replaceChildren(el("div", { class: "empty" }, el("p", {}, "Loading…")));
   const response = await fetch(url);
   const text = response.ok ? await response.text() : "";
@@ -602,19 +526,23 @@ function renderQuotes(turn, quotes, body) {
 
 /* ---------- Sandbox worker ---------- */
 
+// One chip: what the agent reads and with which model; the worker's details on hover, amber when it is down.
 async function refreshWorker() {
   if (!state.config.worker) return;
-  const chip = $("capacity");
-  const { status, body } = await getJSON("/api/worker");
+  const chip = $("context-chip");
+  const scope = (state.config.namespaces || []).join(", ");
+  const { status, body } = await getJSON("/api/worker").catch(() => ({ status: 0, body: null }));
   chip.hidden = false;
   chip.classList.toggle("warn", status !== 200);
+  $("context-dot").classList.toggle("ok", status === 200);
   if (status !== 200) {
-    chip.textContent = "Sandbox worker unreachable";
+    $("context-text").textContent = `${scope} · worker unreachable`;
     chip.title = "The harness cannot reach its MXC sandbox worker; new turns fail until it is back.";
     return;
   }
-  chip.textContent = `${body.worker_id} · MXC ${body.containment} · ${plural(body.active_sessions, "session")}`;
-  chip.title = `The paired sandbox worker for ${body.domain}. Egress from its containers: ${body.egress}. MXC SDK ${body.mxc_sdk_version}.`;
+  $("context-text").textContent = [scope, state.config.model].filter(Boolean).join(" · ");
+  chip.title = `Reads ${scope} with the sandbox worker's read-only identity\nWorker ${body.worker_id} · MXC ${body.containment}`
+    + `\nContainers reach ${body.egress}\nModel ${state.config.model}`;
 }
 
 /* ---------- Menus and dialogs ---------- */
@@ -768,19 +696,6 @@ async function main() {
   const { body: config } = await getJSON("/api/config");
   state.config = { ...state.config, ...config };
   state.themeChoice = readStorage(key("theme")) || "system";
-  document.title = state.config.title || document.title;
-  $("brand-icon").replaceChildren(icon(state.config.icon));
-  $("brand-name").textContent = state.config.title || "Agent";
-  $("new-label").textContent = state.config.new_label || "New conversation";
-  $("model-name").textContent = state.config.model || "";
-  // The specific part first, so a narrow header cuts the cluster name rather than the scope.
-  $("scope").textContent = state.config.scope || "";
-  $("scope").title = $("scope").textContent;
-  $("scope").hidden = !$("scope").textContent;
-  if (state.config.stylesheet) document.head.append(el("link", { rel: "stylesheet", href: state.config.stylesheet }));
-  if (state.config.extension) {
-    try { state.extension = await import(state.config.extension); } catch (error) { console.warn("agent.js failed to load", error); }
-  }
 
   const setSettings = popover("settings-button", "settings-panel");
   const setMenu = popover("conversation-menu-button", "conversation-menu");
@@ -820,9 +735,7 @@ async function main() {
   const linked = new URLSearchParams(window.location.search).get("thread");
   const initial = linked && THREAD_ID.test(linked) ? linked : readStorage(key("thread"));
   state.threadId = initial && THREAD_ID.test(initial) ? initial : null;
-  const preference = panelPreference();
-  state.panelOpen = wide.matches && preference !== "closed"
-    && (preference === "open" || (!state.threadId && state.config.starting_files.length > 0));
+  state.panelOpen = wide.matches && panelPreference() === "open";
   setUrl();
   render();
   if (state.threadId) refreshThread({ followLatest: true, opening: true });

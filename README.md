@@ -103,8 +103,10 @@ team's runbooks seeded into every workspace, and proposes fixes for a person to
 run. It remembers across conversations through the SDK's `Memory` capability:
 the harness carries each conversation's distilled lessons into the same user's
 later conversations (everyone shares the guest's without sign-in), forgets
-them after 90 days, and the agent cannot write memory itself. The UI is the shared SRE UI of
-[openai-agent-substrate](https://github.com/SatyKrish/openai-agent-substrate), reused with its harness.
+them after 90 days, and the agent cannot write memory itself. The SRE UI is this
+repository's own page in `examples/sre/ui`, started from
+[openai-agent-substrate](https://github.com/SatyKrish/openai-agent-substrate)'s shared UI; the
+harness serves only its API.
 
 ## Use the provider in your own application
 
@@ -152,8 +154,8 @@ pyproject.toml              uv workspace root: dev tools and test settings, no p
 proto/mxc/sandbox/v1/       The harness/worker gRPC contract
 worker/                     MXC sandbox worker (Node 24, TypeScript), its unit tests and a host runner for tests
 sandbox/                    The provider (openai-agent-mxc): MXCSandboxClient, gRPC transport, tracing
-harness/                    The shared agent harness and SRE UI (openai-harness), adapted from openai-agent-substrate
-examples/sre/               The SRE agent: SandboxAgent, skill, runbooks, findings check, UI, verify and load test
+harness/                    The agent harness (openai-harness): ChatKit server, memory and HTTP API, adapted from openai-agent-substrate
+examples/sre/               The SRE agent: SandboxAgent, skill, runbooks, findings check, its UI, verify and load test
 deploy/docker/              Worker and harness images
 deploy/kubernetes/          Kustomize base (the pair, RBAC, NetworkPolicies) and kind and AKS overlays
 deploy/kind/, deploy/demo/  The Kind cluster and the broken payments workloads

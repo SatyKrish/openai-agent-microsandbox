@@ -1,17 +1,15 @@
 # Copyright 2026 openai-agent-substrate contributors
 # SPDX-License-Identifier: Apache-2.0
-"""The HTTP side of an agent UI: the shared page, the ChatKit endpoint, uploads and the panel's API.
+"""The HTTP API of the harness: the ChatKit endpoint, uploads, and what a UI shows beside the chat.
 
-Every agent's UI is the same page (``static/`` here), configured by the agent's ``ui/``
-folder: its title, prompts, labels and an optional ``agent.js`` that renders its own
-file types. The server runs a paid model, so it serves
-loopback only, refuses cross-site requests, and serves only files it recorded itself.
+A UI serves its own page and adds these routes (the SRE agent's is in ``examples/sre/ui``).
+The server runs a paid model, so it serves loopback only, refuses cross-site requests,
+and serves only files it recorded itself.
 """
 
 from __future__ import annotations
 
 import contextlib
-import html
 import logging
 import re
 import urllib.error
@@ -25,8 +23,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from starlette.routing import Mount, Route
-from starlette.staticfiles import StaticFiles
+from starlette.routing import Route
 
 from . import traces
 from .chat import HarnessChatServer, running_elsewhere
@@ -34,34 +31,33 @@ from .spec import MIB
 from .uploads import UploadRejected
 
 logger = logging.getLogger(__name__)
-SHELL = Path(__file__).resolve().parent / "static"
 _THREAD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 FILE_HEADERS = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox", "Cache-Control": "no-store"}
 
 
-class _Revalidated(StaticFiles):
-    """Static files the browser revalidates on every load, so an edited page is never served stale."""
-
-    async def get_response(self, path, scope):
-        response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache"
-        return response
-
-
-def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_url: str | None, index: Path = SHELL / "index.html",
-                state_fields: tuple[str, ...] = (), derived_file: Callable | None = None,
-                starting_files: dict[str, bytes] | None = None,
-                worker: Callable[[], Awaitable[dict]] | None = None,
-                health: Callable[[], Awaitable[dict]] | None = None,
-                user_header: str | None = None) -> list[Route]:
-    """Routes for one agent's UI. ``derived_file(thread, path)`` may serve files the agent derived from uploads;
-    ``starting_files`` are the workspace's initial files, shown before the first message.
+def api_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_url: str | None,
+               state_fields: tuple[str, ...] = (), derived_file: Callable | None = None,
+               starting_files: dict[str, bytes] | None = None,
+               worker: Callable[[], Awaitable[dict]] | None = None,
+               health: Callable[[], Awaitable[dict]] | None = None,
+               user_header: str | None = None) -> list[Route]:
+    """The API a UI page uses. ``config`` is the UI's own settings, served at ``/api/config`` with what the harness
+    knows (uploads, starting files, memory, which of worker and health are served). ``derived_file(thread, path)``
+    may serve files the agent derived from uploads; ``starting_files`` are the workspace's initial files.
 
     ``user_header`` names the header in which an authenticating proxy in front of the harness passes the
     signed-in user; it decides whose memory a conversation uses and which memory ``/api/memory`` shows and
     forgets. Without it, every user is the guest."""
     origins = {f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
-    max_upload = server.spec.uploads.max_bytes if server.spec.uploads else 0
+    uploads = server.spec.uploads
+    max_upload = uploads.max_bytes if uploads else 0
+    config = {"name": server.spec.name, **config,
+              "uploads": {"types": uploads.types, "hint": uploads.hint, "max_bytes": uploads.max_bytes,
+                          "max_count": uploads.max_count} if uploads else None,
+              "starting_files": [{"path": path, "bytes": len(data)} for path, data in (starting_files or {}).items()],
+              "worker": worker is not None, "health": health is not None, "memory": server.memory is not None,
+              "memory_max_age_days": _days(server.memory.for_user(None).max_age) if server.memory else None,
+              "preferred_output": server.preferred_output}
 
     def user(request: Request) -> str | None:
         return (request.headers.get(user_header, "").strip()[:256] or None) if user_header else None
@@ -70,14 +66,6 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
         origin = request.headers.get("origin")
         site = request.headers.get("sec-fetch-site")
         return (origin is None or origin in origins) and site in (None, "same-origin", "none")
-
-    async def page(request: Request):
-        title = html.escape(str(config.get("title") or "Agent"))
-        return Response(index.read_text(encoding="utf-8").replace("{{title}}", title), media_type="text/html",
-                        headers={"Cache-Control": "no-store"})
-
-    async def icon(request: Request):
-        return FileResponse(SHELL / "favicon.svg", media_type="image/svg+xml")
 
     async def chatkit(request: Request):
         if not same_origin(request):
@@ -240,9 +228,6 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
                             headers={"Cache-Control": "no-store"})
 
     return [
-        Route("/", page),
-        Route("/favicon.svg", icon),
-        Route("/favicon.ico", icon),
         Route("/api/starting-files/{path:path}", starting_file),
         Route("/api/worker", worker_info),
         Route("/api/health", health_summary),
@@ -255,33 +240,6 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
         Route("/api/threads/{thread_id}/turns/{turn:int}/files/{path:path}", file),
         Route("/api/threads/{thread_id}/turns/{turn:int}/trace", trace),
     ]
-
-
-def ui_application(server: HarnessChatServer, *, config: dict, port: int, jaeger_url: str | None,
-                   static: Path | None = None, starting_files: dict[str, bytes] | None = None, **routes) -> Starlette:
-    """An agent's UI: the shared page configured by ``config``, plus the agent's own ``static`` folder.
-
-    ``static/agent.js`` (an ES module) and ``static/agent.css`` load into the page when present.
-    """
-    uploads = server.spec.uploads
-    full = {"name": server.spec.name, "title": server.spec.name, **config,
-            "uploads": {"types": uploads.types, "hint": uploads.hint, "max_bytes": uploads.max_bytes,
-                        "max_count": uploads.max_count} if uploads else None,
-            "starting_files": [{"path": path, "bytes": len(data)} for path, data in (starting_files or {}).items()],
-            "worker": routes.get("worker") is not None, "health": routes.get("health") is not None,
-            "memory": server.memory is not None,
-            "memory_max_age_days": _days(server.memory.for_user(None).max_age) if server.memory else None,
-            "preferred_output": server.preferred_output}
-    mounts = [Mount("/harness", _Revalidated(directory=SHELL), name="harness")]
-    if static is not None:
-        mounts.append(Mount("/static", _Revalidated(directory=static), name="static"))
-        if (static / "agent.js").is_file():
-            full["extension"] = "/static/agent.js"
-        if (static / "agent.css").is_file():
-            full["stylesheet"] = "/static/agent.css"
-    return application([*chat_routes(server, config=full, port=port, jaeger_url=jaeger_url,
-                                      starting_files=starting_files, **routes), *mounts],
-                       on_shutdown=server.close_all)
 
 
 def _days(age) -> float | None:

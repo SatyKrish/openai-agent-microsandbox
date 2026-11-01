@@ -513,11 +513,7 @@ class HarnessChatServer(ChatKitServer[dict]):
         if buttons:
             children.append({"type": "Row", "gap": 2, "wrap": "wrap", "children": buttons})
         tools = len(turn["tools"])
-        in_harness = sum(1 for tool in turn["tools"] if tool.get("where") == "harness")
-        caption = (f"Turn {turn['number']} · {turn['duration_s']} s · {turn['lifecycle']} {conversation.metadata['workspace']} · "
-                   f"{tools} tool call{'s' if tools != 1 else ''}")
-        if in_harness:
-            caption += f", {in_harness} in the harness"
+        caption = f"Turn {turn['number']} · {turn['duration_s']} s · {tools} step{'s' if tools != 1 else ''}"
         children.append({"type": "Caption", "size": "sm", "value": caption})
         widget = DynamicWidgetRoot.model_validate({"type": "Card", "size": "full", "children": children})
         return ThreadItemDoneEvent(item=WidgetItem(

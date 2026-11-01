@@ -18,7 +18,3 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-# The shared agent UI page and its assets.
-openai_harness = ["static/*"]

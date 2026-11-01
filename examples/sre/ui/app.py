@@ -1,19 +1,23 @@
 # Copyright 2026 openai-agent-mxc contributors
 # SPDX-License-Identifier: Apache-2.0
-"""This agent's UI: the harness's shared page, configured here."""
+"""The SRE agent's UI: its own page (``static/``), served beside the harness's API."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from starlette.requests import Request
+from starlette.responses import FileResponse
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
+
 from openai_harness import http
 from openai_harness.chat import HarnessChatServer
 
-# What the shared page shows for this agent; __main__ adds the model, namespaces and prompts.
+STATIC = Path(__file__).resolve().parent / "static"
+
+# The page's words that are not code; served at /api/config with what __main__ and the harness add.
 UI = {
-    "title": "SRE agent",
-    "icon": "pulse",
-    "new_label": "New investigation",
     "greeting": "Investigate unhealthy workloads from an isolated, read-only sandbox",
     "intro": "Every command the agent runs starts in its own Microsoft eXecution Container on this application's "
              "sandbox worker. kubectl there uses the worker's read-only identity and reaches only the Kubernetes API; "
@@ -30,7 +34,21 @@ UI = {
 }
 
 
-STATIC = Path(__file__).resolve().parent / "static"
+class _Revalidated(StaticFiles):
+    """Static files the browser revalidates on every load, so an edited page is never served stale."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+async def _page(request: Request):
+    return FileResponse(STATIC / "index.html", media_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+async def _icon(request: Request):
+    return FileResponse(STATIC / "favicon.svg", media_type="image/svg+xml")
 
 
 def create_app(server: HarnessChatServer, *, config: dict, port: int, jaeger_url: str | None, worker=None,
@@ -38,5 +56,8 @@ def create_app(server: HarnessChatServer, *, config: dict, port: int, jaeger_url
     """``health`` is the worker's summary of its namespaces, shown on the start screen and never sent to the
     model. ``user_header`` carries the signed-in user from an authenticating proxy, whose memory the page
     shows; without it everyone is the guest."""
-    return http.ui_application(server, config={**UI, **config}, port=port, jaeger_url=jaeger_url, worker=worker,
-                               health=health, user_header=user_header, starting_files=starting_files, static=STATIC)
+    api = http.api_routes(server, config={**UI, **config}, port=port, jaeger_url=jaeger_url, worker=worker,
+                          health=health, user_header=user_header, starting_files=starting_files)
+    return http.application([Route("/", _page), Route("/favicon.svg", _icon), Route("/favicon.ico", _icon), *api,
+                             Mount("/static", _Revalidated(directory=STATIC), name="static")],
+                            on_shutdown=server.close_all)

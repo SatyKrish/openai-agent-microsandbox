@@ -133,7 +133,7 @@ async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(
         store.close()
 
 
-def test_the_ui_serves_its_own_views_and_the_health_summary(worker, tmp_path):
+def test_the_ui_serves_its_own_page_and_the_health_summary(worker, tmp_path):
     from starlette.testclient import TestClient
 
     from examples.sre.ui.app import create_app
@@ -145,9 +145,15 @@ def test_the_ui_serves_its_own_views_and_the_health_summary(worker, tmp_path):
                      health=client.health)
     try:
         with TestClient(app, base_url="http://localhost:8001") as browser:
+            # The page is the SRE UI's own, with its views imported directly; the harness serves only the API.
+            page = browser.get("/")
+            assert page.status_code == 200 and "<title>SRE agent</title>" in page.text and "/static/app.js" in page.text
+            assert 'from "./sre.js"' in browser.get("/static/app.js").text
+            assert "export async function renderHome" in browser.get("/static/sre.js").text
+            assert browser.get("/static/app.css").status_code == 200 and browser.get("/harness/app.js").status_code == 404
             config = browser.get("/api/config").json()
-            assert config["extension"] == "/static/agent.js" and config["stylesheet"] == "/static/agent.css"
-            assert "export async function renderHome" in browser.get("/static/agent.js").text
+            assert "extension" not in config and config["greeting"].startswith("Investigate unhealthy workloads")
+            assert config["health"] is True and config["worker"] is True and config["follow_ups"]
             health = browser.get("/api/health").json()
             processor = health["namespaces"][0]["workloads"][0]
             assert processor["name"] == "payments-processor" and processor["state"] == "failing"

@@ -11,8 +11,7 @@ def check_rows(conversation, turn: dict, changed: set[str]) -> list[dict]:
     rows = []
     if evidence:
         rows.append({"type": "Text", "size": "sm", "color": "secondary", "value":
-                     f"{evidence} read{'s' if evidence != 1 else ''} recorded as evidence by the sandbox worker "
-                     "(kubectl through its read-only proxy, logs only as policy excerpts; journal outside the containers)."})
+                     f"{evidence} read{'s' if evidence != 1 else ''} recorded as evidence by the sandbox worker."})
     fresh = "output/findings.json" in changed
     if check.get("status") == "evidence_passed" and fresh:
         count, quotes = check["findings"], check["quotes"]
@@ -24,9 +23,7 @@ def check_rows(conversation, turn: dict, changed: set[str]) -> list[dict]:
                  "label": f"{item['resource']} · {item['problem']}" if item["problem"] else item["resource"]}
                 for item in check["summary"]]})
         rows.append({"type": "Text", "size": "sm", "color": "secondary", "value":
-                     "Every quote in findings.json appears in the worker's journal copy of the evidence it cites. "
-                     "Causes and fixes are the agent's own reasoning, and fixes are proposals: "
-                     "this agent cannot change the cluster."})
+                     "Fixes are proposals; this agent cannot change the cluster."})
     elif check.get("status") == "evidence_passed":
         rows.append({"type": "Row", "children": [{"type": "Badge", "variant": "soft", "color": "secondary",
                      "label": "No new findings this turn"}]})

@@ -101,15 +101,8 @@ def main(argv=None):
                                preferred_output=REPORT, memory=memory, idle_close_s=args.idle_close,
                                max_turns=args.max_turns)
     scope = ", ".join(sorted(args.namespaces))
-    first = sorted(args.namespaces)[0]
     config = {"model": args.model, "tracing": tracing_enabled(), "namespaces": sorted(args.namespaces),
-              "idle_close_s": args.idle_close,
-              "scope": f"reads {scope} · {client.worker}", "placeholder": f"Ask about workloads in {scope}…",
-              "prompts": [
-                  {"label": f"What's unhealthy in {scope}?", "prompt": f"Which workloads in {scope} are unhealthy, and why?"},
-                  {"label": "Why is payments-processor crashing?",
-                   "prompt": f"Why is the payments-processor deployment in {first} crashing? Propose a fix."},
-              ]}
+              "idle_close_s": args.idle_close, "placeholder": f"Ask about workloads in {scope}…"}
     app = create_app(server, config=config, port=args.port, jaeger_url=args.jaeger_url if tracing_enabled() else None,
                      worker=client.info, health=client.health, starting_files=runbooks(),
                      user_header=args.user_header)

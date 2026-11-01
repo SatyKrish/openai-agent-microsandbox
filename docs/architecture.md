@@ -12,7 +12,7 @@ The following diagram shows one application domain's pair on Kubernetes:
 flowchart LR
     Browser -->|kubectl port-forward| UI
     subgraph Harness["sre-harness-payments-0: no Kubernetes token"]
-        UI["Shared SRE UI (ChatKit)"] --> Loop["Agents SDK Runner + SandboxAgent"]
+        UI["SRE UI (ChatKit) + harness API"] --> Loop["Agents SDK Runner + SandboxAgent"]
         Loop --> Client["MXCSandboxClient"]
         Check["Host check of findings"]
         Memory["/data/memory: each user's memory"]

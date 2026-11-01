@@ -40,8 +40,10 @@ def make_chat(worker, tmp_path, model, **options):
 
 
 def app_for(chat, worker=None, health=None, **config):
-    return http.ui_application(chat, config={"title": "<Test> agent", "model": "scripted", **config}, port=8009,
-                               jaeger_url=None, starting_files=STARTING, worker=worker, health=health)
+    """The harness's API alone, as a UI would mount it beside its own page."""
+    routes = http.api_routes(chat, config={"model": "scripted", **config}, port=8009, jaeger_url=None,
+                             starting_files=STARTING, worker=worker, health=health)
+    return http.application(routes, on_shutdown=chat.close_all)
 
 
 async def new_thread(chat, text="First question", user=None):
@@ -72,7 +74,7 @@ async def test_a_conversation_keeps_one_workspace_and_deleting_it_removes_the_wo
         assert [tool["where"] for tool in turn["tools"]] == ["sandbox"]
         card = json.dumps([event for event in stream if event["type"] == "thread.item.done"
                            and event["item"]["type"] == "widget"])
-        assert f"created test-worker/{workspace}" in card
+        assert "Turn 1 \\u00b7" in card and "1 step" in card  # the card says the turn and its steps, not the workspace
 
         stream = await events(chat, {"type": "threads.add_user_message", "params": {
             "thread_id": thread_id, "input": message("Still there?")}})
@@ -146,7 +148,7 @@ async def test_an_unreachable_worker_fails_the_turn_with_a_clear_message(tmp_pat
         chat.store.close()
 
 
-def test_the_shared_page_is_configured_by_the_agent_and_shows_its_worker(worker, tmp_path):
+def test_the_api_tells_a_ui_what_the_agent_has_and_shows_its_worker(worker, tmp_path):
     chat = make_chat(worker, tmp_path, Calls())
 
     async def broken():
@@ -154,11 +156,11 @@ def test_the_shared_page_is_configured_by_the_agent_and_shows_its_worker(worker,
 
     with TestClient(app_for(chat, worker=chat.client.info, follow_ups=[{"label": "Next", "prompt": "Go on."}]),
                     base_url="http://localhost:8009") as client:
-        page = client.get("/")
-        assert page.status_code == 200 and "<title>&lt;Test&gt; agent</title>" in page.text and "<Test>" not in page.text
-        assert client.get("/harness/app.js").status_code == 200 and client.get("/harness/trace.js").status_code == 200
+        # The harness serves no page of its own: a UI serves its page beside these routes.
+        assert client.get("/").status_code == 404
         config = client.get("/api/config").json()
         assert config["name"] == "test_agent" and config["uploads"] is None and config["worker"] is True
+        assert config["follow_ups"] == [{"label": "Next", "prompt": "Go on."}] and config["model"] == "scripted"
         assert config["starting_files"] == [{"path": "runbooks/notes.md", "bytes": len(STARTING["runbooks/notes.md"])}]
         assert client.get("/api/starting-files/runbooks/notes.md").content == STARTING["runbooks/notes.md"]
         for path in ("runbooks/other.md", "runbooks/../threads.sqlite3"):
@@ -166,7 +168,7 @@ def test_the_shared_page_is_configured_by_the_agent_and_shows_its_worker(worker,
         info = client.get("/api/worker").json()
         assert info["status"] == "ok" and info["domain"] == "payments" and "through the worker's proxy" in info["egress"]
         # Only loopback hosts may reach the server, and only same-origin requests reach ChatKit.
-        assert client.get("/", headers={"host": "evil.example"}).status_code == 400
+        assert client.get("/api/config", headers={"host": "evil.example"}).status_code == 400
         assert client.post("/chatkit", content=b"{}", headers={"origin": "http://evil.example"}).status_code == 403
     with TestClient(app_for(chat, worker=broken), base_url="http://localhost:8009") as client:
         assert client.get("/api/worker").status_code == 503
@@ -403,7 +405,7 @@ def test_the_signed_in_user_comes_only_from_the_configured_header(worker, tmp_pa
     chat = make_chat(worker, tmp_path, Calls([], answer="Hi."), memory=memory)
 
     def app(user_header):
-        return http.ui_application(chat, config={"title": "Agent"}, port=8009, jaeger_url=None, user_header=user_header)
+        return http.application(http.api_routes(chat, config={}, port=8009, jaeger_url=None, user_header=user_header))
 
     with TestClient(app("X-Forwarded-Email"), base_url="http://localhost:8009") as client:
         ana = client.get("/api/memory", headers={"X-Forwarded-Email": " ana@example.com "}).json()

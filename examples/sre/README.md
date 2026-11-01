@@ -54,19 +54,22 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
 
 ## Using the UI
 
+- **Top bar.** One chip says what the agent reads and with which model; hover
+  for the worker, and it turns amber when the worker is unreachable.
 - **Start screen.** "Cluster now" lists each workload in scope, failing first,
   with its readiness, restarts and why it is unhealthy (waiting reasons, the last
-  exit, recent warning events). **Investigate** starts a conversation about one
-  workload; **Investigate all** about every unhealthy one. The worker builds
-  this summary with its own identity; it is not sent to the model. Below it, a
-  line says how many conversations your memory holds, or the guest's when you
-  are not signed in.
+  exit, and when the latest warning event happened, its text on hover).
+  **Investigate** starts a conversation about one workload; **Investigate all**
+  about every unhealthy one. The worker builds this summary with its own
+  identity; it is not sent to the model. Below it, a line says how many
+  conversations your memory holds, with a link to the memory view. The side
+  panel stays closed until a conversation has output.
 - **Memory.** The book button beside the history button shows what the agent
   remembers the way history shows conversations: one entry per earlier
   conversation, grouped by day. Select one to open it, forget one, or forget
-  everything. While history itself is open, the start screen steps aside. **Correct it** starts a conversation to
-  tell the agent what is wrong; it is remembered when that conversation goes
-  idle.
+  everything. **Correct it** starts a conversation to tell the agent what is
+  wrong; it is remembered when that conversation goes idle. While history itself
+  is open, the start screen steps aside.
 - **Steps.** Each step is titled with what ran (`kubectl describe pod …`,
   `pod_logs payments-api -n payments match="timeout"`) and where: the sandbox or
   the harness.
@@ -74,9 +77,11 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   problem, the cause, the proposed fix (marked "not run", with a copy button)
   and each quote with **Show in source**, which opens the evidence file at that
   line. A banner says whether the host check passed.
-- **Evidence.** A log excerpt shows its counts (read, shown, withheld, masked),
-  errors and warnings highlighted, masked values and collapsed repeats marked.
-  A `kubectl get` read shows as a table with status coloured.
+- **Evidence.** The side panel names each evidence file by the read that
+  produced it (`kubectl get pods -n payments -o wide`, `pod_logs …`), with the
+  file name on hover. A log excerpt shows its counts (read, shown, withheld,
+  masked), errors and warnings highlighted, masked values and collapsed repeats
+  marked. A `kubectl get` read shows as a table with status coloured.
 
 ## Memory
 
@@ -129,8 +134,9 @@ agent/
   tools/logs.py             The pod_logs tool: logs only through the worker's log policy
   lib/findings.py           Host check of findings.json against the evidence
   spec.py                   AgentSpec for the harness
-ui/                         Settings for the shared page, the turn card and the launcher
-  static/                   The start screen, findings cards and evidence views
+ui/                         The UI: its page served beside the harness's API, the turn card and the launcher
+  static/                   The page: app.js (chat, panel, memory view), sre.js (health board, findings,
+                            log excerpts, kubectl tables), styles, and the trace and file views
 evals/                      Tests against the worker's real gRPC service
 verify.py                   In-cluster boundary probes and a scripted investigation
 loadtest.py                 Many conversations and users at once
