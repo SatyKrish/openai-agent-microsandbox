@@ -9,7 +9,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-LIFECYCLE = {"sandbox.create", "sandbox.resume", "sandbox.proxy", "sandbox.suspend", "sandbox.delete"}
+# The MXC provider's workspace lifecycle spans, and the operations that set a workspace up before the first model call.
+LIFECYCLE = {"sandbox.create", "sandbox.init", "sandbox.delete"}
+STAGING = {"sandbox.exec", "sandbox.write"}
 
 
 def fetch_trace(query_url: str, otel_trace_id: str, timeout: float = 3):
@@ -93,7 +95,7 @@ def summarize(payload: dict) -> dict:
             pass
         elif name.endswith((".check", ".verify")):
             row.update(kind="check")
-        elif name == "sandbox.exec" and span["startTime"] < first_model and not any(
+        elif name in STAGING and span["startTime"] < first_model and not any(
                 ancestor["operationName"].startswith("tool.") for ancestor in ancestors(span)):
             staging.append(span)
             continue
@@ -103,7 +105,7 @@ def summarize(payload: dict) -> dict:
     if staging:
         first = min(span["startTime"] for span in staging)
         last = max(span["startTime"] + span["duration"] for span in staging)
-        rows.append({"label": f"workspace setup · {len(staging)} × sandbox.exec", "start_ms": round((first - start) / 1000, 1),
+        rows.append({"label": f"workspace setup · {len(staging)} sandbox operations", "start_ms": round((first - start) / 1000, 1),
                      "duration_ms": round((last - first) / 1000, 1), "kind": "life", "badge": None, "error": False})
         rows.sort(key=lambda row: row["start_ms"])
     return {"trace_id": trace["traceID"], "span_count": len(spans), "duration_ms": round((end - start) / 1000, 1),

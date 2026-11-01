@@ -377,7 +377,8 @@ function renderStatus() {
     text.textContent = `Workspace in use by another window · ${thread.workspace}`;
   } else {
     const reopened = (thread.turns || []).filter((turn) => turn.lifecycle === "reopened").length;
-    text.textContent = `Workspace idle · ${thread.workspace} · kept on the worker's volume, reopened ${plural(reopened, "time")} · nothing runs between turns`;
+    const kept = reopened ? `kept on the worker's volume, reopened ${plural(reopened, "time")}` : "kept on the worker's volume";
+    text.textContent = `Workspace idle · ${thread.workspace} · ${kept} · nothing runs between turns`;
   }
 }
 
@@ -617,7 +618,7 @@ function popover(buttonId, panelId) {
 async function deleteConversation() {
   const threadId = state.threadId;
   const dialog = $("delete-dialog");
-  $("delete-actor").textContent = state.thread?.workspace ? `Session ${state.thread.workspace}` : "This conversation has no workspace yet.";
+  $("delete-workspace").textContent = state.thread?.workspace ? `Session ${state.thread.workspace}` : "This conversation has no workspace yet.";
   dialog.returnValue = "cancel";
   dialog.showModal();
   await new Promise((resolve) => dialog.addEventListener("close", resolve, { once: true }));
@@ -647,7 +648,7 @@ async function main() {
   $("new-label").textContent = state.config.new_label || "New conversation";
   $("model-name").textContent = state.config.model || "";
   // The specific part first, so a narrow header cuts the cluster name rather than the scope.
-  $("scope").textContent = state.config.scope || [state.config.atespace, state.config.context].filter(Boolean).join(" · ");
+  $("scope").textContent = state.config.scope || "";
   $("scope").title = $("scope").textContent;
   $("scope").hidden = !$("scope").textContent;
   if (state.config.stylesheet) document.head.append(el("link", { rel: "stylesheet", href: state.config.stylesheet }));

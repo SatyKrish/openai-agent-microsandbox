@@ -33,6 +33,11 @@ test('kubectl reads qualify as evidence only when plain', () => {
 test('evidence names are numbered and safe', () => {
   assert.equal(evidenceName(3, ['kubectl', 'get', 'pods', '-n', 'payments']), 'evidence/003-kubectl-get-pods-n-payments.txt');
   assert.match(evidenceName(12, ['kubectl', 'logs', 'deploy/a'.repeat(30)]), /^evidence\/012-kubectl-logs-deploy-[a-z0-9.-]+\.txt$/);
+  // Long names stop at a word boundary instead of halfway through the namespace.
+  assert.equal(evidenceName(6, ['kubectl', 'describe', 'pod', 'payments-processor-6957944846-7hfcv', '-n', 'payments-east-1']),
+    'evidence/006-kubectl-describe-pod-payments-processor-6957944846-7hfcv-n-payments-east-1.txt');
+  assert.equal(evidenceName(7, ['kubectl', 'logs', 'pod/payments-processor-6957944846-7hfcv', '--previous', '--tail=200', '-n',
+    'payments-east-1']), 'evidence/007-kubectl-logs-pod-payments-processor-6957944846-7hfcv-previous-tail-200-n.txt');
 });
 
 test('redaction removes credentials and keeps context', () => {

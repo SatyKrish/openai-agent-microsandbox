@@ -49,7 +49,12 @@ export function kubectlRead(argv: readonly string[]): string[] | null {
 
 /** A file name for the workspace copy: evidence/NNN-kubectl-get-pods-n-payments.txt */
 export function evidenceName(seq: number, words: readonly string[]): string {
-  const slug = words.join('-').toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
-    .replace(/[-.]+$/, '');
+  let slug = words.join('-').toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '');
+  if (slug.length > 80) {
+    // Cut at a word boundary, so a name never ends in half a namespace.
+    slug = slug.slice(0, 81);
+    slug = slug.slice(0, slug.lastIndexOf('-') > 40 ? slug.lastIndexOf('-') : 80);
+  }
+  slug = slug.replace(/[-.]+$/, '');
   return `evidence/${String(seq).padStart(3, '0')}-${slug || 'kubectl'}.txt`;
 }

@@ -134,8 +134,9 @@ export async function renderTrace({ threadId, turn, body, config, setHead, isCur
     setHead(`Turn ${turn.number} trace`, "tracing is off");
     body.replaceChildren(el("div", { class: "empty" },
       el("h3", {}, "Tracing is off"),
-      el("p", {}, "Run ./scripts/local-kubernetes.sh tracing-setup, then restart this UI. Each later turn then has a trace: " +
-        "what ran in the harness, what ran in the sandbox, and how long the workspace took to start.")));
+      el("p", {}, "Point the harness at an OTLP/HTTP collector such as Jaeger (OTEL_EXPORTER_OTLP_ENDPOINT, port 4318) " +
+        "and set JAEGER_URL to its query address, then restart the harness. Each later turn then has a trace: " +
+        "what ran in the harness, what ran in MXC containers, and how long the workspace took to open.")));
     return;
   }
   const shortId = `${turn.otel_trace_id.slice(0, 8)}…${turn.otel_trace_id.slice(-4)}`;
@@ -153,7 +154,7 @@ export async function renderTrace({ threadId, turn, body, config, setHead, isCur
   }
   if (status !== 200) {
     body.replaceChildren(el("div", { class: "notice warn" },
-      "Jaeger is not reachable from the UI server. The local-kubernetes.sh UI commands port-forward it.", " ", jaeger));
+      "Jaeger is not reachable from the harness at its JAEGER_URL.", " ", jaeger));
     return;
   }
   const running = turn.status === "running";
