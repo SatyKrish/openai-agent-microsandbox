@@ -15,8 +15,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from chatkit.types import ThreadMetadata, WidgetItem
-from chatkit.widgets import DynamicWidgetRoot
+from chatkit.types import ThreadMetadata
 
 from openai_harness.store import SHARED
 
@@ -50,6 +49,7 @@ class Issues:
     """Keeps one issue open per unhealthy workload, from the worker's health summary every ``every_s``."""
 
     def __init__(self, server, health, *, every_s: float = 30):
+        """``server`` is the harness's engine, or a server that reads through to it."""
         self.server = server
         self.store = server.store
         self.health = health
@@ -139,9 +139,7 @@ class Issues:
         return {"type": "Card", "size": "full", "children": rows}
 
     async def _post(self, thread: ThreadMetadata, card: dict) -> None:
-        await self.store.add_thread_item(thread.id, WidgetItem(
-            id=self.store.generate_item_id("message", thread, _INTERNAL), thread_id=thread.id,
-            created_at=datetime.now(), widget=DynamicWidgetRoot.model_validate(card)), _INTERNAL)
+        await self.server.post_card(thread.id, card)
 
     async def listing(self) -> list[dict]:
         """Issues for the page: which workload, its state, and the conversation to open."""

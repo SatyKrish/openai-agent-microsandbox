@@ -1,23 +1,30 @@
 # Copyright 2026 openai-agent-substrate contributors
 # SPDX-License-Identifier: Apache-2.0
-"""The HTTP API of the harness: the ChatKit endpoint, uploads, and what a UI shows beside the chat.
+"""The HTTP API of the harness: conversations, their transcripts and live events, the ChatKit endpoint,
+uploads, and what a UI shows beside the chat.
 
 A UI serves its own page and adds these routes (the SRE agent's is in ``examples/sre/ui``).
-The server runs a paid model, so it serves loopback only, refuses cross-site requests,
-and serves only files it recorded itself.
+The conversation routes are the harness's own: list, start, read, rename and delete conversations,
+send a message, stop a turn, and follow a conversation's events as server-sent events. ``/chatkit``
+serves the same conversations in ChatKit's protocol. The server runs a paid model, so it serves
+loopback only, refuses cross-site requests, and serves only files it recorded itself.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
 import logging
 import re
 import urllib.error
+from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable
 
 from chatkit.server import StreamingResult
 from chatkit.store import NotFoundError
+from chatkit.types import ThreadMetadata
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -28,10 +35,13 @@ from starlette.routing import Route
 from . import traces
 from .chat import HarnessChatServer, running_elsewhere
 from .spec import MIB
+from .store import SHARED
 from .uploads import UploadRejected
 
 logger = logging.getLogger(__name__)
 _THREAD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_MAX_TEXT = 20_000
+_PING_S = 15
 FILE_HEADERS = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox", "Cache-Control": "no-store"}
 
 
@@ -231,7 +241,121 @@ def api_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_url
         return JSONResponse({"status": "ok", "otel_trace_id": turn["otel_trace_id"], **traces.summarize(payload)},
                             headers={"Cache-Control": "no-store"})
 
+    engine = getattr(server, "engine", server)
+
+    def summary(thread: ThreadMetadata) -> dict:
+        meta = thread.metadata
+        state = ("running" if thread.id in engine.running
+                 else "elsewhere" if running_elsewhere(meta, engine.running, thread.id)
+                 else "idle" if meta.get("sandbox") else "not created")
+        return {"id": thread.id, "title": thread.title, "created_at": thread.created_at.isoformat(), "state": state,
+                "shared": meta.get("owner") == SHARED, "issue": meta.get("issue"),
+                "turns": len(meta.get("turns") or [])}
+
+    async def body_text(request: Request) -> str | JSONResponse:
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "send JSON"}, status_code=400)
+        text = str((body or {}).get("text") or "").strip()
+        if not text:
+            return JSONResponse({"error": "Type a question to send."}, status_code=400)
+        if len(text) > _MAX_TEXT:
+            return JSONResponse({"error": f"Messages are limited to {_MAX_TEXT} characters."}, status_code=413)
+        return text
+
+    async def conversations(request: Request):
+        """GET: the requesting user's conversations and the shared ones; POST {"text"}: start one with that message."""
+        who = user(request)
+        if request.method == "GET":
+            page = await engine.store.load_threads(200, None, "desc", {"user": who})
+            return JSONResponse({"conversations": [summary(thread) for thread in page.data]},
+                                headers={"Cache-Control": "no-store"})
+        if not same_origin(request):
+            return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
+        text = await body_text(request)
+        if isinstance(text, JSONResponse):
+            return text
+        thread = ThreadMetadata(id=engine.store.generate_thread_id({}), created_at=datetime.now(), metadata={})
+        await engine.store.save_thread(thread, {"user": who})
+        await engine.send(thread.id, text, requester=who)
+        return JSONResponse({"id": thread.id}, status_code=202)
+
+    async def conversation(request: Request):
+        """GET: the conversation and its transcript (``?after=SEQ``: only later entries); PATCH {"title"}; DELETE."""
+        thread = await load(request)
+        if thread is None:
+            return JSONResponse({"error": "conversation not found"}, status_code=404)
+        who = {"user": user(request)}
+        if request.method == "GET":
+            after = request.query_params.get("after", "0")
+            entries = await engine.store.load_entries(thread.id, who, after=int(after) if after.isdigit() else 0)
+            return JSONResponse({**summary(thread), "entries": entries}, headers={"Cache-Control": "no-store"})
+        if not same_origin(request):
+            return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
+        if request.method == "PATCH":
+            try:
+                title = str((await request.json() or {}).get("title") or "").strip()[:120]
+            except ValueError:
+                return JSONResponse({"error": "send JSON"}, status_code=400)
+            thread.title = title or thread.title
+            await engine.store.save_thread(thread, who)
+            return JSONResponse(summary(thread))
+        try:
+            await engine.store.delete_thread(thread.id, who)
+        except PermissionError as error:
+            return JSONResponse({"error": str(error)}, status_code=403)
+        return JSONResponse({"deleted": True})
+
+    async def send(request: Request):
+        """POST {"text"}: a message; it is answered in the conversation's next turn, in the background."""
+        if not same_origin(request):
+            return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
+        thread = await load(request)
+        if thread is None:
+            return JSONResponse({"error": "conversation not found"}, status_code=404)
+        text = await body_text(request)
+        if isinstance(text, JSONResponse):
+            return text
+        await engine.send(thread.id, text, requester=user(request))
+        return JSONResponse({"queued": True}, status_code=202)
+
+    async def stop(request: Request):
+        if not same_origin(request):
+            return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
+        thread = await load(request)
+        if thread is None:
+            return JSONResponse({"error": "conversation not found"}, status_code=404)
+        return JSONResponse({"stopped": engine.stop(thread.id)})
+
+    async def follow(request: Request):
+        """The conversation's events from now on, as server-sent events, with a comment line to keep it open."""
+        thread = await load(request)
+        if thread is None:
+            return JSONResponse({"error": "conversation not found"}, status_code=404)
+
+        async def stream():
+            with engine.listen(thread.id) as events:
+                yield ": following\n\n"
+                while True:
+                    try:
+                        event = await asyncio.wait_for(events.get(), timeout=_PING_S)
+                    except asyncio.TimeoutError:
+                        if await request.is_disconnected():
+                            return
+                        yield ": ping\n\n"
+                        continue
+                    yield f"data: {json.dumps(event)}\n\n"
+
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
     return [
+        Route("/api/conversations", conversations, methods=["GET", "POST"]),
+        Route("/api/conversations/{thread_id}", conversation, methods=["GET", "PATCH", "DELETE"]),
+        Route("/api/conversations/{thread_id}/messages", send, methods=["POST"]),
+        Route("/api/conversations/{thread_id}/stop", stop, methods=["POST"]),
+        Route("/api/conversations/{thread_id}/events", follow),
         Route("/api/starting-files/{path:path}", starting_file),
         Route("/api/worker", worker_info),
         Route("/api/health", health_summary),

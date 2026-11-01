@@ -154,7 +154,7 @@ pyproject.toml              uv workspace root: dev tools and test settings, no p
 proto/mxc/sandbox/v1/       The harness/worker gRPC contract
 worker/                     MXC sandbox worker (Node 24, TypeScript), its unit tests and a host runner for tests
 sandbox/                    The provider (openai-agent-mxc): MXCSandboxClient, gRPC transport, tracing
-harness/                    The agent harness (openai-harness): ChatKit server, memory and HTTP API, adapted from openai-agent-substrate
+harness/                    The agent harness (openai-harness): turn engine, memory, HTTP API and a ChatKit adapter, adapted from openai-agent-substrate
 examples/sre/               The SRE agent: SandboxAgent, skill, runbooks, findings check, its UI, verify and load test
 deploy/docker/              Worker and harness images
 deploy/kubernetes/          Kustomize base (the pair, RBAC, NetworkPolicies) and kind and AKS overlays

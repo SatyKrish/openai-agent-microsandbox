@@ -101,7 +101,7 @@ command and log read.
 
 ## Replicas follow the state backend
 
-The harness keeps four kinds of state: conversations (ChatKit threads),
+The harness keeps four kinds of state: conversations and their transcripts,
 each conversation's history (an SDK session), host copies of the agent's
 outputs and evidence, and each user's memory. Today all four are files on its
 volume, so the harness is a StatefulSet with one replica per domain.

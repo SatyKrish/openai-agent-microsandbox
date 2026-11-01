@@ -10,7 +10,8 @@ real kubectl reads and file writes in MXC containers without model API usage.
 
 - one user starts several conversations at once (like several tabs);
 - many users start one conversation each, more than the worker's parallel slots;
-- several users send to one shared conversation at the same moment.
+- several users send to one shared conversation at the same moment: the conversation's turns run one
+  at a time, and messages that arrive while one runs are answered together in the next.
 
 Live (``--live http://localhost:8001``): several users each ask the deployed UI
 a different question at once. This uses the model.
@@ -180,9 +181,10 @@ def scripted(port: int, conversations: int, users: int, shared: int) -> bool:
     turns = harness.get(f"/api/threads/{first['thread_id']}")["turns"]
     errors = [result["errors"] for result in results if result["errors"]]
     serialized = all(earlier["started_at"] < later["started_at"] for earlier, later in zip(turns, turns[1:]))
-    ok &= len(turns) == shared + 1 and not errors and serialized
-    print(f"  {len(turns)} turns recorded in order: {'yes' if serialized else 'NO'} · errors: {errors or 'none'}"
-          f"\n  {'PASS' if ok else 'FAIL'}", flush=True)
+    answered = sum(len(turn.get("messages") or []) for turn in turns)
+    ok &= answered == shared + 1 and not errors and serialized
+    print(f"  {answered} messages answered in {len(turns)} turns, in order: {'yes' if serialized else 'NO'} · "
+          f"errors: {errors or 'none'}\n  {'PASS' if ok else 'FAIL'}", flush=True)
     passed &= ok
 
     during = harness.get("/api/worker")["active_sessions"]

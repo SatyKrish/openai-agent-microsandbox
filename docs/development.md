@@ -7,7 +7,7 @@
 | `proto/` | The gRPC contract | Nothing |
 | `worker/` | `mxc-sandbox-worker` (Node 24, TypeScript) | `@microsoft/mxc-sdk`, `@grpc/grpc-js` |
 | `sandbox/` | `openai-agent-mxc`, imported as `agent_mxc` | `openai-agents==0.24.0`, `grpcio`; never the harness or ChatKit |
-| `harness/` | `openai-harness`, imported as `openai_harness` | The provider and ChatKit |
+| `harness/` | `openai-harness`, imported as `openai_harness` | The provider; ChatKit only in its adapter, store view and uploads |
 | `examples/sre/` | The SRE agent, its UI settings and its in-cluster checks | The harness |
 
 The repository is a uv workspace (`sandbox`, `harness`); the worker is a

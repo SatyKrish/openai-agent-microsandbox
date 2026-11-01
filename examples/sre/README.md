@@ -3,7 +3,7 @@
 Investigates unhealthy Kubernetes workloads and explains each cause with
 evidence. It reads the cluster with kubectl inside its MXC containers, using the
 sandbox worker's read-only identity, and cannot change anything. It runs on the
-[shared harness](../../harness/src/openai_harness/chat.py) and its UI.
+[shared harness](../../harness/src/openai_harness/engine.py) and its UI.
 
 | Where | What runs there |
 | --- | --- |

@@ -94,7 +94,7 @@ async def test_a_conversation_keeps_one_workspace_and_deleting_it_removes_the_wo
         chat.store.close()
 
 
-async def test_two_messages_sent_at_once_both_keep_their_turn_and_history(worker, tmp_path):
+async def test_messages_sent_at_once_are_answered_together_in_one_turn(worker, tmp_path):
     chat = make_chat(worker, tmp_path, Calls(delay=0.2))
     try:
         thread_id, _ = await new_thread(chat)
@@ -102,11 +102,19 @@ async def test_two_messages_sent_at_once_both_keep_their_turn_and_history(worker
                 for text in ("Second question", "Third question")]
         streams = await asyncio.gather(*(events(chat, payload) for payload in sent))
         assert not [event for stream in streams for event in stream if event["type"] == "error"]
+        # Both streams show the one turn that answered both messages.
+        assert all(any(event["type"] == "thread.item.done" and event["item"]["type"] == "widget" for event in stream)
+                   for stream in streams)
         thread = await chat.store.load_thread(thread_id, {})
-        assert [turn["number"] for turn in thread.metadata["turns"]] == [1, 2, 3]
-        assert all(turn["status"] == "completed" for turn in thread.metadata["turns"])
-        assert await user_messages(chat, thread_id) == ["First question", "Second question", "Third question"]
+        turns = thread.metadata["turns"]
+        assert [turn["number"] for turn in turns] == [1, 2] and all(turn["status"] == "completed" for turn in turns)
+        entries = await chat.store.load_entries(thread_id, {})
+        users = [entry for entry in entries if entry["kind"] == "user"]
+        assert [entry["text"] for entry in users] == ["First question", "Second question", "Third question"]
+        assert [entry["turn"] for entry in users] == [1, 2, 2] and turns[1]["messages"] == [users[1]["id"], users[2]["id"]]
+        assert await user_messages(chat, thread_id) == ["First question", "Second question\n\nThird question"]
     finally:
+        await chat.close_all()
         chat.store.close()
 
 
@@ -449,6 +457,119 @@ async def test_people_see_and_delete_only_their_own_conversations(worker, tmp_pa
     finally:
         await chat.close_all()
         chat.store.close()
+
+
+def test_the_harness_api_runs_conversations_without_chatkit(worker, tmp_path):
+    import time
+
+    chat = make_chat(worker, tmp_path, Calls([shell("mkdir -p output && echo 42 > output/answer.txt")], answer="It is 42."))
+    api = http.application(http.api_routes(chat, config={}, port=8009, jaeger_url=None, user_header="X-Forwarded-Email"),
+                           on_shutdown=chat.close_all)
+    ana, bo = {"X-Forwarded-Email": "ana@example.com"}, {"X-Forwarded-Email": "bo@example.com"}
+
+    def settled(client, thread_id, turns):
+        for _ in range(100):
+            body = client.get(f"/api/conversations/{thread_id}", headers=ana).json()
+            if body["turns"] == turns and body["state"] != "running" and body["entries"][-1]["kind"] == "card":
+                return body
+            time.sleep(0.1)
+        raise AssertionError(body)
+
+    with TestClient(api, base_url="http://localhost:8009") as client:
+        started = client.post("/api/conversations", json={"text": "What is 6 times 7?"}, headers=ana)
+        assert started.status_code == 202
+        thread_id = started.json()["id"]
+        first = settled(client, thread_id, 1)
+        assert [entry["kind"] for entry in first["entries"]] == ["user", "steps", "assistant", "card"]
+        assert first["entries"][0]["requested_by"] == "ana@example.com" and first["entries"][0]["turn"] == 1
+        assert first["entries"][2]["text"] == "It is 42." and first["title"] == "What is 6 times 7?"
+        assert [item["id"] for item in client.get("/api/conversations", headers=ana).json()["conversations"]] == [thread_id]
+        assert client.get(f"/api/conversations/{thread_id}", headers=bo).status_code == 404
+        assert client.post(f"/api/conversations/{thread_id}/messages", json={"text": "Hijack"}, headers=bo).status_code == 404
+        refused = client.post(f"/api/conversations/{thread_id}/messages", json={"text": "x"},
+                              headers={**ana, "Origin": "http://evil.example"})
+        assert refused.status_code == 403
+
+        # Follow the conversation while a second message is answered: the turn's events arrive as they happen.
+        seen = []
+        with client.stream("GET", f"/api/conversations/{thread_id}/events", headers=ana) as events:
+            assert client.post(f"/api/conversations/{thread_id}/messages", json={"text": "And 6 times 8?"},
+                               headers=ana).status_code == 202
+            for line in events.iter_lines():
+                if line.startswith("data: "):
+                    seen.append(json.loads(line[6:]))
+                    if seen[-1]["type"] == "turn" and seen[-1]["status"] == "shown":
+                        break
+        kinds = [(event["type"], event.get("status") or (event.get("entry") or {}).get("kind")) for event in seen]
+        assert kinds[0] == ("entry", "user") and ("turn", "running") in kinds and ("entry", "card") in kinds
+        assert kinds.index(("turn", "running")) < kinds.index(("entry", "steps")) < kinds.index(("entry", "card"))
+        second = settled(client, thread_id, 2)
+        assert [entry["turn"] for entry in second["entries"]] == [1, 1, 1, 1, 2, 2, 2, 2]
+        later = client.get(f"/api/conversations/{thread_id}?after={first['entries'][-1]['seq']}", headers=ana).json()
+        assert [entry["kind"] for entry in later["entries"]] == ["user", "steps", "assistant", "card"]
+
+        # ChatKit shows the same transcript.
+        page = asyncio.run(chat.store.load_thread_items(thread_id, None, 20, "asc", {"user": "ana@example.com"}))
+        assert [item.type for item in page.data] == ["user_message", "workflow", "assistant_message", "widget"] * 2
+
+        # A turn can be stopped from the API; the conversation says so.
+        chat.model = Calls([shell("sleep 5")], answer="Too late.")
+        client.post(f"/api/conversations/{thread_id}/messages", json={"text": "Take your time"}, headers=ana)
+        for _ in range(50):
+            if client.get(f"/api/conversations/{thread_id}", headers=ana).json()["state"] == "running":
+                break
+            time.sleep(0.1)
+        assert client.post(f"/api/conversations/{thread_id}/stop", headers=ana).json() == {"stopped": True}
+        for _ in range(50):
+            turns = asyncio.run(chat.store.load_thread(thread_id, {})).metadata["turns"]
+            if turns[-1]["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert turns[-1]["status"] == "stopped"
+
+        assert client.delete(f"/api/conversations/{thread_id}", headers=bo).status_code == 404
+        assert client.delete(f"/api/conversations/{thread_id}", headers=ana).json() == {"deleted": True}
+        assert client.get("/api/conversations", headers=ana).json()["conversations"] == []
+    chat.store.close()
+
+
+async def test_chatkit_items_from_before_the_engine_become_the_transcript(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "threads.sqlite3"
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE threads (id TEXT PRIMARY KEY, data TEXT NOT NULL, owner TEXT);
+        CREATE TABLE items (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, data TEXT NOT NULL);
+    """)
+    db.execute("INSERT INTO threads VALUES ('thr_old', ?, NULL)", (json.dumps(
+        {"id": "thr_old", "created_at": "2026-10-01T00:00:00", "status": {"type": "active"}, "metadata": {}}),))
+    old = [
+        {"id": "msg_u", "thread_id": "thr_old", "created_at": "2026-10-01T00:00:01", "type": "user_message",
+         "content": [{"type": "input_text", "text": "Why?"}], "attachments": [], "inference_options": {}},
+        {"id": "wf_1", "thread_id": "thr_old", "created_at": "2026-10-01T00:00:02", "type": "workflow",
+         "workflow": {"type": "custom", "tasks": [{"type": "custom", "title": "kubectl get pods", "status_indicator": "complete"}],
+                      "summary": {"duration": 3}, "expanded": False}},
+        {"id": "msg_a", "thread_id": "thr_old", "created_at": "2026-10-01T00:00:03", "type": "assistant_message",
+         "content": [{"type": "output_text", "text": "Because.", "annotations": []}]},
+        {"id": "msg_w", "thread_id": "thr_old", "created_at": "2026-10-01T00:00:04", "type": "widget",
+         "widget": {"type": "Card", "children": [{"type": "Text", "value": "Turn 1"}]}},
+    ]
+    for item in old:
+        db.execute("INSERT INTO items VALUES (?, 'thr_old', ?)", (item["id"], json.dumps(item)))
+    db.commit()
+    db.close()
+    store = SQLiteStore(path)
+    try:
+        entries = await store.load_entries("thr_old", {})
+        assert [(entry["kind"], entry["seq"]) for entry in entries] == [("user", 1), ("steps", 2), ("assistant", 3),
+                                                                        ("card", 4)]
+        assert entries[1]["steps"][0]["title"] == "kubectl get pods" and entries[1]["duration_s"] == 3
+        page = await store.load_thread_items("thr_old", None, 10, "asc", {})
+        assert [item.id for item in page.data] == ["msg_u", "wf_1", "msg_a", "msg_w"]
+        assert page.data[2].content[0].text == "Because."
+    finally:
+        store.close()
 
 
 def test_conversations_from_before_owners_keep_theirs(tmp_path):

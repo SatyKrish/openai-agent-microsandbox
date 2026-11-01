@@ -12,7 +12,7 @@ The following diagram shows one application domain's pair on Kubernetes:
 flowchart LR
     Browser -->|kubectl port-forward| UI
     subgraph Harness["sre-harness-payments-0: no Kubernetes token"]
-        UI["SRE UI (ChatKit) + harness API"] --> Loop["Agents SDK Runner + SandboxAgent"]
+        UI["SRE UI (ChatKit) + harness API"] --> Loop["Turn engine: Agents SDK Runner + SandboxAgent"]
         Loop --> Client["MXCSandboxClient"]
         Check["Host check of findings"]
         Memory["/data/memory: each user's memory"]
@@ -133,6 +133,51 @@ The harness keeps threads in SQLite and conversation history in an SDK
 restart. The worker's volume keeps workspaces and the journal across worker
 restarts; a workspace that is gone when a conversation reopens is recreated
 from the manifest.
+
+## The turn engine and its API
+
+The harness's turn engine ([`engine.py`](../harness/src/openai_harness/engine.py))
+runs conversations without any UI protocol. A message joins its conversation's
+queue, and the conversation's turns run one at a time in the background, so a
+turn does not depend on the request that asked for it. Messages that arrive
+while a turn runs are answered together in the next turn, and a turn can be
+stopped.
+
+What a turn shows is kept as the conversation's transcript, a list of entries:
+`user` (a message, with who sent it), `steps` (a group of tool calls), `assistant`
+(the agent's text) and `card` (a small declarative card). Listeners get events
+as they happen:
+
+| Event | What it carries |
+| --- | --- |
+| `entry` | An entry added or changed |
+| `delta` | Text of an assistant entry as it streams |
+| `turn` | A turn started, ended (`completed`, `failed`, `stopped`) or finished showing its card (`shown`) |
+| `effect` | A UI hint, such as the file to open |
+| `error` | A failure that is safe to show |
+
+Reasoning is not part of the transcript or the events: what the agent says is
+its messages.
+
+The harness serves this as its own API, for any UI:
+
+| Route | What it does |
+| --- | --- |
+| `GET /api/conversations` | The requesting user's conversations and the shared ones |
+| `POST /api/conversations` | Starts a conversation with a message |
+| `GET /api/conversations/ID` | The conversation and its transcript (`?after=SEQ` for later entries) |
+| `PATCH`, `DELETE /api/conversations/ID` | Renames or deletes it |
+| `POST /api/conversations/ID/messages` | Sends a message |
+| `POST /api/conversations/ID/stop` | Stops the running turn |
+| `GET /api/conversations/ID/events` | The conversation's events, as server-sent events |
+
+ChatKit is one adapter over the engine
+([`chat.py`](../harness/src/openai_harness/chat.py)): `/chatkit` hands a message
+to the engine and streams that turn's events as ChatKit events, and the store
+serves ChatKit's items from the transcript, so ChatKit and the harness's API
+show the same conversation. Stopping a ChatKit stream stops the turn, as
+ChatKit's stop button expects. A store from before the engine had its ChatKit
+items converted into the transcript once, at start.
 
 ## The agent loop
 

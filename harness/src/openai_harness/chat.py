@@ -1,659 +1,176 @@
 # Copyright 2026 openai-agent-substrate contributors
 # SPDX-License-Identifier: Apache-2.0
-"""ChatKit server for any agent: one thread is one conversation backed by one MXC sandbox session.
+"""ChatKit's protocol over the harness's engine: one ChatKit thread is one conversation.
 
-Each message takes the conversation's lock and reloads the thread, refuses to start
-while another process is running a turn of it, continues the conversation's open
-sandbox session or opens it (creating the workspace on its MXC sandbox worker the first
-time), copies uploads into it, runs the agent loop with the conversation's SDK session
-history (every command in a fresh MXC container), fetches the cluster reads the worker
-recorded as evidence, copies the agent's output folders to the host and runs the
-agent's host check.
-
-The session stays open between turns, as the SDK expects for a multi-turn
-conversation, and closes after ``idle_close_s`` without a message. Closing is when the
-SDK's Memory capability distils the conversation into memory; with a ``UserMemory``
-the harness seeds that memory from, and publishes it back to, the memory of the user
-who started the conversation. Deleting the thread deletes the workspace, the history
-and the host copies, and the conversation is not remembered; the worker keeps its
-audit journal.
+A message ChatKit sends goes to the engine's queue for its conversation (``engine.py``); this server
+then streams the events of the turn that answers it, as ChatKit events, until the turn has shown its
+card. The engine runs the turn and keeps the transcript, which the store serves to ChatKit as items.
+Stopping the stream stops the turn, as ChatKit's stop button expects.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
-import io
-import json
-import logging
-import re
-import shutil
-import time
-from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, NamedTuple
 
-from agents import Runner, SQLiteSession, trace
-from agents.extensions import ToolOutputTrimmer
-from agents.run import RunConfig
-from agents.run_error_handlers import RunErrorHandlerResult
-from agents.sandbox import SandboxRunConfig
-from agents.tracing import gen_trace_id
-from chatkit.agents import AgentContext, stream_agent_response
 from chatkit.errors import CustomStreamError
 from chatkit.server import ChatKitServer
 from chatkit.store import NotFoundError
 from chatkit.types import (
-    AssistantMessageContent, AssistantMessageItem, ClientEffectEvent, CustomTask, ThreadItemAddedEvent,
-    ThreadItemDoneEvent, ThreadItemUpdatedEvent, ThreadMetadata,
-    UserMessageItem, WidgetItem, Workflow, WorkflowItem, WorkflowTaskAdded, WorkflowTaskUpdated,
+    AssistantMessageContent, AssistantMessageContentPartAdded, AssistantMessageContentPartDone,
+    AssistantMessageContentPartTextDelta, AssistantMessageItem, ClientEffectEvent, ThreadItemAddedEvent,
+    ThreadItemDoneEvent, ThreadItemUpdatedEvent, ThreadMetadata, UserMessageItem, WorkflowTaskAdded,
+    WorkflowTaskUpdated,
 )
-from chatkit.widgets import DynamicWidgetRoot
 
-from agent_mxc import MXCSandboxOptions, WorkerError
-from agent_mxc.instrumentation import operation
-from agent_mxc.tracing import otel_trace_id, tracing_enabled
+from . import chatkit_view
+from .engine import Busy, Harness, TurnError, preferred_file, running_elsewhere, usage_of  # noqa: F401  (re-exported)
+from .spec import AgentSpec
+from .uploads import UploadStore
 
-from .memory import UserMemory, user_key
-from .spec import AgentSpec, Conversation, TurnContext
-from .steps import ToolSteps, fenced, user_text
-from .uploads import UploadRejected, UploadStore, upload_name
-
-logger = logging.getLogger(__name__)
-_MAX_FILES = 40
-_FILE_NAME = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
-# A turn another process started this recently and never finished is treated as still running there.
-_ELSEWHERE_S = 15 * 60
-
-
-def running_elsewhere(metadata: dict, running: set[str], thread_id: str) -> bool:
-    """Whether another process is running a turn of this conversation: the lock only covers one process."""
-    turns = metadata.get("turns") or []
-    if thread_id in running or not turns or turns[-1].get("status") != "running":
-        return False
-    try:
-        started = datetime.fromisoformat(turns[-1]["started_at"])
-    except (KeyError, ValueError):
-        return False
-    return (datetime.now(timezone.utc) - started).total_seconds() < _ELSEWHERE_S
-
-
-def preferred_file(turn: dict, preferred: str | None = None) -> str | None:
-    """The output a UI opens after a turn: a host-checked one first, then the agent's report."""
-    changed = [item["path"] for item in turn["files"]
-               if item.get("changed") and item["path"].startswith("output/") and not item.get("too_large")]
-    status = turn.get("file_status") or {}
-    checked = [path for path in changed if (status.get(path) or {}).get("state") == "checked"]
-    if checked:
-        return preferred if preferred in checked else checked[0]
-    if changed:
-        return preferred if preferred in changed else changed[0]
-    return None
-
-
-class _Open(NamedTuple):
-    """A conversation's sandbox session, open between turns."""
-    session: object
-    closer: asyncio.Task | None  # closes it once it has been idle
-    owner: str | None            # whose memory it draws on and adds to
-
-
-def usage_of(usage) -> dict:
-    """A run's token use, for the turn record: what each turn costs and how large its context grows."""
-    return {"requests": usage.requests, "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
-            "total_tokens": usage.total_tokens,
-            "cached_tokens": getattr(usage.input_tokens_details, "cached_tokens", 0) or 0,
-            "reasoning_tokens": getattr(usage.output_tokens_details, "reasoning_tokens", 0) or 0,
-            # The largest single request: how big the context got.
-            "max_input_tokens": max((entry.input_tokens for entry in usage.request_usage_entries), default=0)}
-
-
-def _requested_by(session, who: str) -> None:
-    """Name who the session's next commands are for, in the worker's journal (a person, or the harness itself)."""
-    inner = getattr(session, "_inner", session)
-    if hasattr(inner, "requester"):
-        inner.requester = who
-
-
-class TurnError(Exception):
-    """A turn failure whose message is safe to show."""
-
-    def __init__(self, message: str, *, retry: bool):
-        super().__init__(message)
-        self.retry = retry
+_ENDED = {"shown", "failed", "stopped"}
 
 
 class HarnessChatServer(ChatKitServer[dict]):
+    """ChatKit's server for an agent. Everything else the harness does is its engine's (``self.engine``)."""
+
     def __init__(self, spec: AgentSpec, store, client, *, model, output_dir: Path,
-                 base_url: str = "http://localhost:8000", model_label: str | None = None, max_turns: int = 25,
-                 card: Callable[[Conversation, dict, set[str]], list[dict]] | None = None,
-                 file_status: Callable[[Conversation, dict], dict[str, dict]] | None = None,
-                 preferred_output: str | None = None, memory: UserMemory | None = None, idle_close_s: float = 300):
-        self.spec = spec
-        self.output_dir = Path(output_dir)
-        self.uploads = UploadStore(store, self.output_dir / ".staged", base_url, spec.uploads)
-        super().__init__(store, attachment_store=self.uploads)
-        store.on_delete_thread = self.delete_workspace
-        self.client = client
-        self.model = model
-        self.model_label = model_label or str(model)
-        self.max_turns = max_turns
-        self.card = card
-        # path -> {"state": "checked" | "unchecked" | "source", "label": ...}: what the host check covered.
-        self.file_status = file_status
-        self.preferred_output = preferred_output
-        self.history_path = self.output_dir / "history.sqlite3"
-        self.running: set[str] = set()
-        self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-        self.memory = memory
-        self.idle_close_s = idle_close_s
-        # thread id -> its open sandbox session; a running turn takes its session out.
-        self._open: dict[str, _Open] = {}
-        # One consolidation at a time per user, so two never overwrite each other's lessons.
-        self._memory_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-        # What a user forgot while their memory may be consolidating: forgotten again once it publishes,
-        # since the consolidation started from the memory before.
-        self._forgotten: defaultdict[str, set[str]] = defaultdict(set)
-        self._cleared: set[str] = set()
+                 base_url: str = "http://localhost:8000", **options):
+        uploads = UploadStore(store, Path(output_dir) / ".staged", base_url, spec.uploads)
+        super().__init__(store, attachment_store=uploads)
+        self.engine = Harness(spec, store, client, model=model, output_dir=output_dir, uploads=uploads, **options)
+        store.on_delete_thread = self.engine.delete_workspace
 
-    def conversation(self, thread: ThreadMetadata) -> Conversation:
-        return Conversation(thread, self.output_dir / thread.id)
+    def __getattr__(self, name):
+        # The engine's state and operations (memory, sessions, close_all, ...) read through the server.
+        engine = self.__dict__.get("engine")
+        if engine is None:
+            raise AttributeError(name)
+        return getattr(engine, name)
 
-    def history(self, thread_id: str) -> SQLiteSession:
-        """The SDK session that holds this conversation's agent history."""
-        self.history_path.parent.mkdir(parents=True, exist_ok=True)
-        return SQLiteSession(thread_id, self.history_path)
+    @property
+    def model(self):
+        return self.engine.model
+
+    @model.setter
+    def model(self, value) -> None:
+        self.engine.model = value
 
     async def respond(self, thread: ThreadMetadata, input_user_message: UserMessageItem | None, context: dict):
         if input_user_message is None:
             return
-        text = user_text(input_user_message)
+        spec = self.engine.spec
+        text = chatkit_view.text_of(input_user_message)
         attachments = list(input_user_message.attachments)
-        limit = self.spec.uploads.max_count if self.spec.uploads else 0
+        limit = spec.uploads.max_count if spec.uploads else 0
         if len(attachments) > limit:
             message = f"Attach at most {limit} files per message." if limit else "This agent does not accept uploads."
             raise CustomStreamError(message, allow_retry=False)
         if not text and not attachments:
             raise CustomStreamError("Type a question to send.", allow_retry=False)
-        text = text or self.spec.default_question
-        async with self._locks[thread.id]:
-            # ChatKit loaded this thread before the lock: a turn that finished meanwhile must not be overwritten.
-            with contextlib.suppress(NotFoundError):
-                fresh = await self.store.load_thread(thread.id, context)
-                thread.metadata, thread.title = fresh.metadata, fresh.title
-            if running_elsewhere(thread.metadata, self.running, thread.id):
-                # ChatKit stored the message before calling us; a refused one must not stay without a reply.
+        with self.engine.listen(thread.id) as events:
+            done = await self.engine.send(thread.id, text or spec.default_question, requester=context.get("user"),
+                                          attachments=attachments, entry_id=input_user_message.id)
+            try:
+                async for event in self._turn_events(thread, events, input_user_message.id, done):
+                    yield event
+            except asyncio.CancelledError:
+                # ChatKit's stop button closes the stream: stop the turn too.
+                self.engine.stop(thread.id)
+                raise
+            finally:
+                # The engine owns the conversation's record; ChatKit's copy follows it.
                 with contextlib.suppress(NotFoundError):
-                    await self.store.delete_thread_item(thread.id, input_user_message.id, context)
-                raise CustomStreamError("A turn of this conversation is running in another window or terminal. "
-                                        "Wait for it to finish, then send again.", allow_retry=True)
-            self.running.add(thread.id)
-            try:
-                async for event in self._turn(thread, text, attachments, context):
-                    yield event
-            finally:
-                self.running.discard(thread.id)
-
-    async def _turn(self, thread: ThreadMetadata, text: str, attachments: list, context: dict):
-        conversation = self.conversation(thread)
-        meta = thread.metadata
-        if not thread.title:
-            thread.title = text if len(text) <= 60 else text[:57].rstrip() + "…"
-        turns = meta.setdefault("turns", [])
-        sdk_trace_id = gen_trace_id()
-        traced = tracing_enabled()
-        turn = {
-            "number": len(turns) + 1, "status": "running", "started_at": datetime.now(timezone.utc).isoformat(),
-            "sdk_trace_id": sdk_trace_id if traced else None,
-            "otel_trace_id": otel_trace_id(sdk_trace_id) if traced else None,
-            "lifecycle": "reopened" if meta.get("sandbox") else "created",
-            "model": self.model_label, "tools": [], "files": [], "uploads": [], "check": None,
-            "requested_by": context.get("user"),
-        }
-        turns.append(turn)
-        await self.store.save_thread(thread, context)
-        context_ = AgentContext(thread=thread, store=self.store, request_context=context)
-        started = time.monotonic()
-        turn_operation, _ = self.spec.trace_operations
-        try:
-            with trace(f"{self.spec.name} turn", trace_id=sdk_trace_id, group_id=thread.id, disabled=not traced):
-                with operation(turn_operation):
-                    async for event in self._run_turn(conversation, context_, turn, text, attachments):
-                        yield event
-            turn["status"] = "completed"
-        except asyncio.CancelledError:
-            turn["status"] = "stopped"
-            raise
-        except Exception as error:
-            turn["status"] = "failed"
-            turn["error"] = type(error).__name__
-            if context_.workflow_item is not None:
-                yield ThreadItemDoneEvent(item=context_.workflow_item)
-                context_.workflow_item = None
-            if isinstance(error, UploadRejected):
-                raise CustomStreamError(str(error), allow_retry=False) from error
-            if isinstance(error, TurnError):
-                logger.warning("Turn %s of %s failed: %s", turn["number"], thread.id, error)
-                raise CustomStreamError(str(error), allow_retry=error.retry) from error
-            logger.exception("Turn %s of %s failed", turn["number"], thread.id)
-            # Exception text can contain command output; the browser gets the type only.
-            raise CustomStreamError(f"The turn failed ({type(error).__name__}); the server log has the cause. "
-                                    "You can retry.", allow_retry=True) from error
-        finally:
-            turn["duration_s"] = round(time.monotonic() - started, 1)
-            await self.store.save_thread(thread, context)
-        yield self._turn_card(conversation, context, turn)
-        preferred = preferred_file(turn, self.preferred_output)
-        if preferred:
-            yield ClientEffectEvent(name="open_file", data={"thread_id": thread.id, "turn": turn["number"], "path": preferred})
-
-    async def _run_turn(self, conversation: Conversation, context_: AgentContext, turn: dict, text: str, attachments: list):
-        thread, meta = conversation.thread, conversation.metadata
-        requester = turn["requested_by"] or "guest"
-        opened = self._open.pop(thread.id, None)
-        if opened is not None:
-            session, closer, _ = opened
-            if closer is not None:
-                closer.cancel()
-            _requested_by(session, requester)
-            turn["lifecycle"] = "continued"
-            try:
-                async for event in self._continue_turn(conversation, context_, turn, text, attachments, session):
-                    yield event
-            finally:
-                self._park(thread.id, session, meta.get("owner"))
+                    fresh = await self.store.load_thread(thread.id, {})
+                    thread.title, thread.metadata = fresh.title, fresh.metadata
+        # The turn has shown its card or failed; its outcome settles a moment later.
+        await asyncio.wait({done})
+        if done.cancelled() or done.exception() is None:
             return
-        created = meta.get("sandbox") is None
-        step = CustomTask(title="Creating the workspace" if created else "Reopening the workspace", status_indicator="loading")
-        workflow = WorkflowItem(id=context_.generate_id("workflow"), created_at=datetime.now(), thread_id=thread.id,
-                                workflow=Workflow(type="custom", tasks=[step], expanded=True))
-        context_.workflow_item = workflow
-        yield ThreadItemAddedEvent(item=workflow)
+        error = done.exception()
+        if isinstance(error, Busy):
+            # The refused message must not stay without a reply.
+            with contextlib.suppress(NotFoundError):
+                await self.store.delete_thread_item(thread.id, input_user_message.id, context)
+        if isinstance(error, TurnError):
+            raise CustomStreamError(str(error), allow_retry=error.retry)
+        raise CustomStreamError(f"The turn failed ({type(error).__name__}); the server log has the cause. "
+                                "You can retry.", allow_retry=True)
 
-        began = time.monotonic()
-        if created:
-            workspace_id = self.client.new_workspace_id()
-            manifest = self.spec.start(conversation, bool(attachments), self.client.workspace_root(workspace_id))
-            session = await self.client.create(manifest=manifest, options=MXCSandboxOptions(workspace_id=workspace_id))
-            # Save immediately: a failed first turn must still be deletable.
-            meta["sandbox"] = self.client.serialize_session_state(session.state)
-            meta["workspace"] = f"{self.client.worker}/{workspace_id}"
-            # Whose memory the conversation draws on and adds to: the signed-in user who started it, or the guest.
-            # The store sets it when the conversation is created; this covers conversations from before.
-            meta.setdefault("owner", context_.request_context.get("user"))
-            await self.store.save_thread(thread, context_.request_context)
-        else:
-            session = await self.client.resume(self.client.deserialize_session_state(meta["sandbox"]))
-        _requested_by(session, requester)
-        workspace = meta["workspace"]
-        try:
-            await session.start()
-        except WorkerError as error:
-            raise TurnError(f"The sandbox worker {self.client.worker} is unavailable ({error.code.name}). "
-                            "Retry when it is back.", retry=True) from error
-        try:
-            if created:
-                boundary = await session.exec('test -z "${OPENAI_API_KEY:-}"')
-                if not boundary.ok():
-                    raise RuntimeError("The sandbox must not contain the harness API key")
-            remembered = await self.memory.for_user(meta.get("owner")).seed(session) if self.memory is not None else 0
-            seconds = time.monotonic() - began
-            turn["start_s"] = round(seconds, 1)
-            verb = "Created" if created else "Reopened"
-            detail = (f"Session `{workspace}`." if created
-                      else f"Session `{workspace}`, with the earlier turns' files.")
-            if remembered:
-                detail += f" Seeded with the agent's memory from earlier conversations ({remembered} files)."
-            step = CustomTask(title=f"{verb} the workspace · {seconds:.1f} s", content=detail, status_indicator="complete")
-            workflow.workflow.tasks[0] = step
-            yield ThreadItemUpdatedEvent(item_id=workflow.id, update=WorkflowTaskUpdated(task=step, task_index=0))
-            async for event in self._continue_turn(conversation, context_, turn, text, attachments, session, workflow):
-                yield event
-        finally:
-            self._park(thread.id, session, meta.get("owner"))
-
-    async def _continue_turn(self, conversation: Conversation, context_: AgentContext, turn: dict, text: str,
-                             attachments: list, session, workflow: WorkflowItem | None = None):
-        """The turn itself, in an open session: uploads, the agent loop, evidence, outputs and the check."""
-        thread, meta = conversation.thread, conversation.metadata
-        if workflow is None:
-            step = CustomTask(title="Continued in the open workspace", status_indicator="complete",
-                              content=f"Same session `{meta['workspace']}`, still open from the last turn.")
-            workflow = WorkflowItem(id=context_.generate_id("workflow"), created_at=datetime.now(), thread_id=thread.id,
-                                    workflow=Workflow(type="custom", tasks=[step], expanded=True))
-            context_.workflow_item = workflow
-            yield ThreadItemAddedEvent(item=workflow)
-            turn["start_s"] = 0.0
-        if attachments:
-            noun = "upload" if len(attachments) == 1 else "uploads"
-            copying = CustomTask(title=f"Copying {len(attachments)} {noun} into the workspace", status_indicator="loading")
-            workflow.workflow.tasks.append(copying)
-            index = len(workflow.workflow.tasks) - 1
-            yield ThreadItemUpdatedEvent(item_id=workflow.id, update=WorkflowTaskAdded(task=copying, task_index=index))
-            added = await self._store_uploads(session, conversation, turn, attachments, context_.request_context)
-            described = [(item, self._describe_upload(item)) for item in added]
-            listing = "\n".join(f"{item['path']}  {item['bytes']} bytes  sha256 {item['sha256'][:12]}…"
-                                + (f"  {summary}" if summary else "") for item, summary in described)
-            copied = CustomTask(title=f"Copied {len(added)} {noun} to inputs/uploads/", content=fenced(listing),
-                                status_indicator="complete")
-            workflow.workflow.tasks[index] = copied
-            yield ThreadItemUpdatedEvent(item_id=workflow.id, update=WorkflowTaskUpdated(task=copied, task_index=index))
-            # Show what the sandbox made of the first upload while the model reads it.
-            yield ClientEffectEvent(name="open_file", data={"thread_id": thread.id, "turn": turn["number"],
-                                                            "path": added[0]["path"]})
-            text += "\n\n[Uploaded to the workspace this turn: " + ", ".join(
-                f"{item['path']} ({item['bytes']} bytes" + (f"; {summary}" if summary else "") + ")"
-                for item, summary in described) + "]"
-
-        harness_tools = list(self.spec.tools(TurnContext(conversation, turn, session)))
-        agent = self.spec.build_agent(session.state.manifest, self.model)
-        extra = self.spec.instructions(conversation)
-        agent = agent.clone(instructions=agent.instructions + ("\n\n" + extra if extra else ""),
-                            tools=[*agent.tools, *harness_tools])
-        history = self.history(thread.id)
-        kept = len(await history.get_items())
-        out_of_turns: list[str] = []
-
-        def step_limit(data) -> RunErrorHandlerResult:
-            # Keep the turn and its evidence instead of failing it: the next message can pick up from here.
-            message = (f"I reached this turn's limit of {self.max_turns} model steps before finishing. The evidence "
-                       "I gathered is saved in the workspace; ask me to continue and I'll pick up from it.")
-            out_of_turns.append(message)
-            return RunErrorHandlerResult(final_output=message, include_in_history=True)
-
-        try:
-            result = Runner.run_streamed(
-                agent, text, session=history, max_turns=self.max_turns, error_handlers={"max_turns": step_limit},
-                run_config=RunConfig(sandbox=SandboxRunConfig(session=session), tracing_disabled=not tracing_enabled(),
-                                     trace_include_sensitive_data=False,
-                                     # Earlier turns' tool output is kept as a preview: the files it came from
-                                     # stay in the workspace, so the agent can reread what it needs.
-                                     call_model_input_filter=ToolOutputTrimmer(max_output_chars=1000,
-                                                                               preview_chars=300),
-                                     # A misspelled tool name is the model's mistake to correct, not a failed turn.
-                                     tool_not_found_behavior="return_error_to_model"))
-            steps = ToolSteps(result, context_, turn["tools"], frozenset(tool.name for tool in harness_tools))
-            try:
-                async for event in stream_agent_response(context_, steps):
-                    yield event
-            finally:
-                turn["usage"] = usage_of(result.context_wrapper.usage)
-            if out_of_turns:
-                turn["step_limit"] = True
-                yield ThreadItemDoneEvent(item=AssistantMessageItem(
-                    id=self.store.generate_item_id("message", thread, context_.request_context), thread_id=thread.id,
-                    created_at=datetime.now(), content=[AssistantMessageContent(text=out_of_turns[0])]))
-        except BaseException:
-            # The SDK saves items as the run goes; a failed turn must not leave half of itself in the history.
-            while len(await history.get_items()) > kept:
-                await history.pop_item()
-            raise
-        finally:
-            history.close()
-        await self._collect_evidence(session, conversation, turn)
-        files = await self._collect(session, conversation, turn)
-        _, check_operation = self.spec.trace_operations
-        with operation(check_operation):
-            turn["check"] = self.spec.check(conversation, turn, files)
-        if self.file_status is not None:
-            turn["file_status"] = self.file_status(conversation, turn)
-        meta["sandbox"] = self.client.serialize_session_state(session.state)
-
-    async def _collect_evidence(self, session, conversation: Conversation, turn: dict) -> None:
-        """Copy the cluster reads the worker recorded this turn from its journal, which no container can edit."""
-        evidence = conversation.metadata.setdefault("evidence", [])
-        after = max((entry.get("seq", 0) for entry in evidence), default=0)
-        destination = conversation.turn_dir(turn["number"])
-        for entry in await session._inner.evidence(after):
-            data = await session._inner.read_evidence(entry["seq"])
-            if hashlib.sha256(data).hexdigest() != entry["sha256"]:
-                raise RuntimeError(f"Evidence {entry['seq']} does not match the worker's journal")
-            path = entry["path"]
-            if not re.fullmatch(r"evidence/[0-9]{3,}-[a-z0-9.-]+\.txt", path):
-                raise RuntimeError(f"The worker named evidence {entry['seq']} {path!r}")
-            target = destination / path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            evidence.append({"seq": entry["seq"], "path": path, "label": entry["command"], "turn": turn["number"],
-                             "bytes": len(data), "sha256": entry["sha256"]})
-            turn["files"].append({"path": path, "bytes": len(data), "sha256": entry["sha256"], "new": True,
-                                  "changed": True, "evidence": True, "command": entry["command"]})
-
-    def _describe_upload(self, entry: dict) -> str:
-        processors = self.spec.uploads.processors if self.spec.uploads else {}
-        return "; ".join(processor.describe(entry[processor.key], entry)
-                         for processor in processors.values() if processor.key in entry)
-
-    async def _store_uploads(self, session, conversation: Conversation, turn: dict, attachments: list, context: dict) -> list[dict]:
-        """Stage new uploads once; retries restore the original bytes under the same name."""
-        policy = self.uploads.policy()
-        uploads = conversation.metadata.setdefault("uploads", [])
-        by_id = {item["attachment_id"]: item for item in uploads if item.get("attachment_id")}
-        taken = {item["name"] for item in uploads}
-        destination = conversation.turn_dir(turn["number"])
-        added = []
-        for attachment in attachments:
-            entry = by_id.get(attachment.id)
-            is_new = entry is None
-            if is_new:
-                data = self.uploads.read_file(attachment.id)
-                name = upload_name(attachment.name, policy)
-                stem, extension = Path(name).stem, Path(name).suffix
-                counter = 2
-                while name in taken:
-                    name, counter = f"{stem}-{counter}{extension}", counter + 1
-                taken.add(name)
-                entry = {"attachment_id": attachment.id, "name": name, "path": f"inputs/uploads/{name}",
-                         "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "turn": turn["number"]}
-            else:
-                try:
-                    data = conversation.host_copy(entry).read_bytes()
-                except FileNotFoundError:
-                    raise UploadRejected("The retained upload is unavailable; attach the file again.") from None
-                if len(data) != entry["bytes"] or hashlib.sha256(data).hexdigest() != entry["sha256"]:
-                    raise UploadRejected("The retained upload changed; attach the file again.")
-            await session.write(Path(entry["path"]), io.BytesIO(data))
-            target = destination / entry["path"]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            processor = policy.processors.get(Path(entry["name"]).suffix)
-            if processor is not None:
-                entry[processor.key] = await processor.run(session, conversation, entry)
-            if is_new:
-                uploads.append(entry)
-                by_id[attachment.id] = entry
-            added.append(entry)
-            turn["uploads"].append(entry["name"])
-            turn["files"].append({"path": entry["path"], "bytes": entry["bytes"], "sha256": entry["sha256"],
-                                  "new": is_new, "changed": is_new, "upload": True,
-                                  **({processor.key: entry[processor.key]} if processor else {})})
-        listing = {"files": []}
-        for item in uploads:
-            processor = policy.processors.get(Path(item["name"]).suffix)
-            info = {processor.key: processor.listing(item[processor.key], item)} if processor and processor.key in item else {}
-            listing["files"].append({**{key: item[key] for key in ("name", "bytes", "sha256")}, **info})
-        await session.write(Path("inputs/uploads/MANIFEST.json"), io.BytesIO(json.dumps(listing, indent=2).encode()))
-        # Persist the attachment-to-host-copy mapping before removing temporary bytes.
-        await self.store.save_thread(conversation.thread, context)
-        for attachment in attachments:
-            await self.uploads.delete_attachment(attachment.id, {})
-        return added
-
-    async def _collect(self, session, conversation: Conversation, turn: dict) -> dict[str, bytes]:
-        """Copy the agent's output folders to the host while the sandbox is still running."""
-        folders = self.spec.collect
-        listing = await session.exec("find", *folders, "-maxdepth", "1", "-type", "f", shell=False)
-        # Names come from the sandbox: accept only plain file names in the agent's folders.
-        pattern = re.compile(f"({'|'.join(map(re.escape, folders))})/{_FILE_NAME}")
-        names = sorted({line for line in listing.stdout.decode(errors="replace").splitlines() if pattern.fullmatch(line)})
-        previous = {item["path"]: item.get("sha256") for earlier in conversation.metadata["turns"][:-1]
-                    for item in earlier["files"]}
-        destination = conversation.turn_dir(turn["number"])
-        collected = {}
-        for name in names[:_MAX_FILES]:
-            try:
-                with await session.read(Path(name)) as handle:
-                    data = handle.read()
-            except ValueError:
-                turn["files"].append({"path": name, "too_large": True, "changed": True})
+    async def _turn_events(self, thread: ThreadMetadata, events: asyncio.Queue, message_id: str, done: asyncio.Future):
+        """The events of the turn that answers ``message_id``, as ChatKit events."""
+        turn = None
+        steps: dict[str, list[dict]] = {}   # steps entry id -> the steps ChatKit has been sent; None once done
+        speaking: set[str] = set()          # assistant entries whose text is streaming
+        while True:
+            getter = asyncio.ensure_future(events.get())
+            finished, _ = await asyncio.wait({getter, done}, return_when=asyncio.FIRST_COMPLETED)
+            if getter not in finished:
+                getter.cancel()
+                # The turn ended before its events were delivered (a refusal, say); deliver what is queued.
+                while not events.empty():
+                    async for item in self._convert(thread, events.get_nowait(), turn, steps, speaking):
+                        yield item
+                return
+            event = getter.result()
+            if turn is None:
+                if message_id in (event.get("messages") or []) and event["type"] == "turn":
+                    turn = event["turn"]
+                    if event.get("title"):
+                        thread.title = event["title"]
+                elif message_id in (event.get("messages") or []) and event["type"] == "error":
+                    return
                 continue
-            digest = hashlib.sha256(data).hexdigest()
-            target = destination / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            collected[name] = data
-            turn["files"].append({"path": name, "bytes": len(data), "sha256": digest,
-                                  "new": name not in previous, "changed": previous.get(name) != digest})
-        return collected
-
-    def _turn_card(self, conversation: Conversation, context: dict, turn: dict) -> ThreadItemDoneEvent:
-        thread = conversation.thread
-        changed = {item["path"] for item in turn["files"] if item.get("changed")}
-        children = []
-        if turn["uploads"]:
-            children.append({"type": "Text", "size": "sm", "value": "Uploaded to inputs/uploads/: " + ", ".join(turn["uploads"])})
-        rows = self.card(conversation, turn, changed) if self.card is not None else []
-        if (not any(_has_badge(row) for row in rows) and turn["status"] == "completed"
-                and any(path.startswith("output/") for path in changed)):
-            # Outputs the host did not check say so; a turn that only answered in chat needs no badge.
-            rows.append({"type": "Row", "children": [{"type": "Badge", "variant": "soft", "color": "warning",
-                         "label": "Not checked on the host"}]})
-        children += rows
-        buttons = [
-            {"type": "Button", "label": item["path"].removeprefix("output/"), "style": "secondary", "size": "sm",
-             "onClickAction": {"type": "open_file", "handler": "client",
-                               "payload": {"thread_id": thread.id, "turn": turn["number"], "path": item["path"]}}}
-            for item in turn["files"] if item.get("changed") and item["path"].startswith("output/") and not item.get("too_large")
-        ][:4]
-        if turn.get("otel_trace_id"):
-            buttons.append({"type": "Button", "label": "View trace", "style": "secondary", "size": "sm", "iconStart": "chart",
-                            "onClickAction": {"type": "open_trace", "handler": "client",
-                                              "payload": {"thread_id": thread.id, "turn": turn["number"]}}})
-        if buttons:
-            children.append({"type": "Row", "gap": 2, "wrap": "wrap", "children": buttons})
-        tools = len(turn["tools"])
-        caption = f"Turn {turn['number']} · {turn['duration_s']} s · {tools} step{'s' if tools != 1 else ''}"
-        tokens = (turn.get("usage") or {}).get("total_tokens", 0)
-        if tokens:
-            caption += f" · {tokens / 1000:.0f}k tokens" if tokens >= 1000 else f" · {tokens} tokens"
-        children.append({"type": "Caption", "size": "sm", "value": caption})
-        widget = DynamicWidgetRoot.model_validate({"type": "Card", "size": "full", "children": children})
-        return ThreadItemDoneEvent(item=WidgetItem(
-            id=self.store.generate_item_id("message", thread, context), thread_id=thread.id,
-            created_at=datetime.now(), widget=widget))
-
-    def _park(self, thread_id: str, session, owner: str | None) -> None:
-        """Keep a conversation's session open after its turn, and close it once it has been idle."""
-        closer = asyncio.get_running_loop().create_task(self._close_when_idle(thread_id))
-        self._open[thread_id] = _Open(session, closer, owner)
-
-    async def _close_when_idle(self, thread_id: str) -> None:
-        await asyncio.sleep(self.idle_close_s)
-        async with self._locks[thread_id]:
-            opened = self._open.get(thread_id)
-            if opened is None or opened.closer is not asyncio.current_task():
-                return  # a turn took the session meanwhile
-            del self._open[thread_id]
-            await self._close(thread_id, opened, f"after {self.idle_close_s:.0f} s idle")
-
-    async def _close(self, thread_id: str, opened: _Open, why: str) -> None:
-        """Close a session; with memory, the SDK's memory generation runs here and its result is published."""
-        session = opened.session
-        _requested_by(session, "harness")
-        if self.memory is None:
-            await _quietly(session.aclose(), f"closing {thread_id}")
-            return
-        key = user_key(opened.owner)
-        store = self.memory.for_user(opened.owner)
-        async with self._memory_locks[key]:
-            began = time.monotonic()
-            self._cleared.discard(key)  # this close starts from the memory as it is now
-            # Consolidate on top of what the user's other conversations published since this one opened. Without
-            # that, publishing could drop their lessons, so a failed seed closes the session without publishing.
-            if await _quietly(store.seed(session), f"seeding memory for {thread_id}") is False:
-                await _quietly(session.aclose(), f"closing {thread_id}")
+            if event.get("turn") != turn:
+                continue
+            async for item in self._convert(thread, event, turn, steps, speaking):
+                yield item
+            if event["type"] == "turn" and event["status"] in _ENDED or event["type"] == "error":
                 return
-            if await _quietly(session.aclose(), f"generating memory for {thread_id}") is False:
+
+    async def _convert(self, thread: ThreadMetadata, event: dict, turn, steps: dict, speaking: set):
+        kind = event["type"]
+        if kind == "delta":
+            if event["id"] not in speaking:
+                speaking.add(event["id"])
+                yield ThreadItemAddedEvent(item=AssistantMessageItem(id=event["id"], thread_id=thread.id,
+                                                                     created_at=datetime.now(), content=[]))
+                yield ThreadItemUpdatedEvent(item_id=event["id"], update=AssistantMessageContentPartAdded(
+                    content_index=0, content=AssistantMessageContent(text="", annotations=[])))
+            yield ThreadItemUpdatedEvent(item_id=event["id"], update=AssistantMessageContentPartTextDelta(
+                content_index=0, delta=event["delta"]))
+        elif kind == "entry":
+            entry = event["entry"]
+            if entry["kind"] == "user":
                 return
-            files = await _quietly(store.publish(session), f"publishing memory from {thread_id}")
-            if key in self._cleared:
-                self._cleared.discard(key)
-                store.clear()
-                files = 0
-            for conversation in self._forgotten.pop(key, ()):
-                store.forget(conversation)
-            logger.info("Closed %s %s; %s's memory has %s files (%.1f s)", thread_id, why, key, files,
-                        time.monotonic() - began)
-
-    async def close_all(self) -> None:
-        """Close every open session now, as an idle close would (tests and shutdown)."""
-        for thread_id in list(self._open):
-            async with self._locks[thread_id]:
-                opened = self._open.pop(thread_id, None)
-                if opened is None:
-                    continue
-                if opened.closer is not None:
-                    opened.closer.cancel()
-                await self._close(thread_id, opened, "on shutdown")
-
-    async def delete_workspace(self, thread_id: str) -> None:
-        """Delete the workspace on the worker, the history, then the host copies. The worker keeps its journal.
-
-        A deleted conversation is not remembered: its open session is deleted without closing, so the SDK
-        generates no memory from it, and what memory already holds from it is forgotten.
-        """
-        thread = await self.store.load_thread(thread_id, {})
-        state = thread.metadata.get("sandbox")
-        owner = thread.metadata.get("owner")
-        async with self._locks[thread_id]:
-            opened = self._open.pop(thread_id, None)
-            if opened is not None and opened.closer is not None:
-                opened.closer.cancel()
-            if opened is not None:
-                await self.client.delete(opened.session)
-            elif state is not None:
-                # A workspace that is already gone is not an error: the worker reports it and moves on.
-                session = await self.client.resume(self.client.deserialize_session_state(state))
-                await self.client.delete(session)
-            history = self.history(thread_id)
-            try:
-                await history.clear_session()
-            finally:
-                history.close()
-            shutil.rmtree(self.output_dir / thread_id, ignore_errors=True)
-            self.forget_memory(owner, thread_id)
-
-    def forget_memory(self, user: str | None, conversation: str | None = None) -> bool:
-        """Forget one conversation from a user's memory, or with none named, everything they remember;
-        returns whether there was anything to forget.
-
-        It is forgotten now, and again after a consolidation of the user's memory that is running, which
-        would otherwise publish the memory it started from.
-        """
-        if self.memory is None:
-            return False
-        key = user_key(user)
-        store = self.memory.for_user(user)
-        if conversation is None:
-            held = bool(store.files())
-            self._cleared.add(key)
-            store.clear()
-            return held
-        self._forgotten[key].add(conversation)
-        return store.forget(conversation)
-
-
-async def _quietly(awaitable, what: str):
-    """Memory is best effort: log a failure and carry on. Returns the result, or False on failure."""
-    try:
-        result = await awaitable
-        return True if result is None else result
-    except Exception:
-        logger.exception("Failed %s", what)
-        return False
-
-
-def _has_badge(node: dict) -> bool:
-    return node.get("type") == "Badge" or any(_has_badge(child) for child in node.get("children") or [])
+            if entry["kind"] == "steps":
+                if entry["id"] in steps and steps[entry["id"]] is None:
+                    # ChatKit has the group as done; a call that ends after it is in the transcript, as on reload.
+                    return
+                sent = steps.get(entry["id"])
+                if sent is None:
+                    yield ThreadItemAddedEvent(item=chatkit_view.workflow(thread.id, {**entry, "open": True}))
+                else:
+                    for index, step in enumerate(entry["steps"]):
+                        if index >= len(sent):
+                            yield ThreadItemUpdatedEvent(item_id=entry["id"], update=WorkflowTaskAdded(
+                                task=chatkit_view.task(step), task_index=index))
+                        elif step != sent[index]:
+                            yield ThreadItemUpdatedEvent(item_id=entry["id"], update=WorkflowTaskUpdated(
+                                task=chatkit_view.task(step), task_index=index))
+                steps[entry["id"]] = [dict(step) for step in entry["steps"]]
+                if not entry.get("open"):
+                    steps[entry["id"]] = None
+                    yield ThreadItemDoneEvent(item=chatkit_view.workflow(thread.id, entry))
+                return
+            if entry["kind"] == "assistant" and entry["id"] in speaking:
+                speaking.discard(entry["id"])
+                yield ThreadItemUpdatedEvent(item_id=entry["id"], update=AssistantMessageContentPartDone(
+                    content_index=0, content=AssistantMessageContent(text=entry["text"], annotations=[])))
+            item = chatkit_view.to_item(thread.id, entry)
+            if item is not None:
+                yield ThreadItemDoneEvent(item=item)
+        elif kind == "effect":
+            yield ClientEffectEvent(name=event["name"], data=event["data"])
