@@ -37,9 +37,11 @@ export function redact(text: string): string {
   let result = text;
   for (const [pattern, replacement] of RULES) result = result.replace(pattern, replacement);
   result = result.replace(EMAIL, '[REDACTED_EMAIL]');
-  // 13 to 19 digits that pass the Luhn check: a payment card number.
+  // 13 to 19 digits that pass the Luhn check: a payment card number. Thirteen digits from 1 is an epoch time
+  // in milliseconds; no card number starts that way.
   return result.replace(CARD, (value) => {
     const digits = value.replace(/\D/g, '');
-    return digits.length >= 13 && luhn(digits) ? '[REDACTED_CARD]' : value;
+    const epochMillis = digits.length === 13 && digits.startsWith('1') && /^\d+$/.test(value);
+    return digits.length >= 13 && !epochMillis && luhn(digits) ? '[REDACTED_CARD]' : value;
   });
 }

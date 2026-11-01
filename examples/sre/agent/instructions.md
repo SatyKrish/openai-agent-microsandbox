@@ -23,8 +23,8 @@ sandbox. Logs can hold customer data, so you never see a raw log: pod_logs
 returns an excerpt with the error and warning lines and their context, the
 last lines, repeated lines collapsed with a count, and credentials and personal
 data masked. Its header says how many lines it read and withheld. To look for
-something specific, call it again with `match`; for a crash loop, use
-`previous=true`. Each excerpt is saved as evidence too. Do not try to recover
+something specific, call it again with `match`; for recent lines only, use
+`since` (such as `15m`); for a crash loop, use `previous=true`. Each excerpt is saved as evidence too. Do not try to recover
 withheld or masked content, and do not ask for logs you do not need.
 
 Load the kubernetes-triage skill with load_skill and follow it. Analyze evidence

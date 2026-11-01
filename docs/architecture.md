@@ -295,17 +295,22 @@ Application logs can hold customer data, so raw logs never enter a container or
 the model's context. Containers cannot read them: the API proxy refuses
 `pods/log`. The agent reads logs only through the `pod_logs` tool, which calls
 the worker's `ReadLogs`. The worker fetches the log itself with its own token
-(a pod name, or `deploy/NAME` for its newest pod; up to `MXC_LOG_MAX_TAIL_LINES`
-lines and `MXC_LOG_MAX_BYTES` bytes) and applies its log policy before
-anything leaves it:
+(a pod name, or `deploy/NAME` for the deployment's pod most likely failing:
+not ready, then most restarted, then newest; up to `MXC_LOG_MAX_TAIL_LINES`
+lines and `MXC_LOG_MAX_BYTES` bytes, optionally only those from the last
+`since`) and applies its log policy before anything leaves it:
 
 - masks credentials, email addresses, Luhn-valid card numbers and numbers of
-  nine or more digits;
+  nine or more digits, except epoch timestamps (10 digits in seconds, or 13 in
+  milliseconds starting with 1, which no card number does);
 - keeps only error and warning lines, with two lines of context around each
-  error, the last three lines, and lines containing text the agent asked for
-  with `match`;
+  error and the stack trace after it (up to 15 lines), server errors in access
+  logs (a 5xx status after a request line, `status=` or `code=`), the last
+  three lines, and lines containing text the agent asked for with `match`;
 - collapses lines that differ only in numbers, timestamps and identifiers into
-  one line with a count (`[×5 more like this, last at line 1206]`);
+  one line with a count (`[×5 more like this, last at line 1206]`), keeping
+  status codes and network addresses apart, so a 502 and a 504, or two
+  backends, are counted separately;
 - caps the excerpt at 40 lines and 6,000 bytes, and 240 characters per line;
 - starts the excerpt with a header saying how many lines it read, showed and
   withheld, and how many values it masked.
@@ -318,8 +323,9 @@ The limits are worker settings (`MXC_LOG_*`, see [usage](usage.md)).
 ## Evidence and checks
 
 A command counts as evidence only when it is a plain kubectl read: `get`,
-`describe`, `events`, `top`, `explain`, `api-resources`, `api-versions` or
-`version`, with no pipes, redirections, quotes, globs or `$`,
+`describe`, `events`, `top`, `explain`, `api-resources`, `api-versions`,
+`version`, `rollout history` or `rollout status`, with no pipes, redirections,
+quotes, globs or `$`,
 and no flag that points kubectl elsewhere (`--kubeconfig`, `--server`,
 `--token`, `--as`, `--context`, `--raw`, `-f` and others). Its output then
 comes from the API server as the worker's own read-only identity.
@@ -330,9 +336,24 @@ container can see, and saves a copy in the workspace as
 is recorded the same way, as `evidence/NNN-pod-logs-....txt`. The output comes from
 the API server through the worker's own proxy, as the worker's identity. After each turn the
 harness fetches new entries with `ListEvidence` and `ReadEvidence`, checks each
-against its SHA-256, and keeps a host copy. The SRE agent's check then requires
-every quote in `output/findings.json` to appear in the copy of the file it
-cites, so editing `evidence/` inside the sandbox cannot make a quote pass.
+against its SHA-256, and keeps a host copy with the time the worker recorded
+it. The SRE agent's check then looks for every quote in `output/findings.json`
+in the copy of the file it cites, so editing `evidence/` inside the sandbox
+cannot make a quote pass. It checks every quote rather than stopping at the
+first that fails, and reports each one: a finding is verified only when all of
+its quotes are found. A found quote proves the evidence says it; the cause drawn
+from it is the agent's reasoning, and the page says so.
+
+When the check fails, the agent gets one corrective pass in the same turn: it is
+told which quotes were not found in which files, asked to re-read them and to
+correct or remove the claims, and the findings are checked again. The first
+check's result stays with the turn, and the card shows that the findings were
+corrected, so a correction is never presented as a first-time pass.
+
+The findings also carry what a person needs to act: a fix as commands to paste
+(a pre-check, the change, a way to verify it and a way to undo it, with its
+risk), left empty when the fix is not a command, and the other causes the agent
+ruled out with the evidence against each.
 
 ## Differences from the reference design
 

@@ -39,10 +39,12 @@ def prompt(issue: dict) -> str:
 
 
 def _time(iso: str) -> str:
+    """A time today, or a date and time before today."""
     try:
-        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%H:%M")
+        when = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
     except ValueError:
         return iso
+    return when.strftime("%H:%M" if when.date() == datetime.now().astimezone().date() else "%d %b %H:%M")
 
 
 class Issues:
@@ -126,6 +128,16 @@ class Issues:
         detail = ", ".join(issue["reasons"] + ([f"{workload['restarts']} restarts"] if workload.get("restarts") else []))
         if detail:
             rows.append({"type": "Text", "size": "sm", "value": detail})
+        if workload.get("waiting_message"):
+            rows.append({"type": "Text", "size": "sm", "value": f"Kubelet: {_plain(workload['waiting_message'], 300)}"})
+        rollout = workload.get("rollout")
+        if rollout and rollout.get("at"):
+            change = "; ".join(f"{_plain(item['container'])}: {_plain(item['from'], 120)} → {_plain(item['to'], 120)}"
+                               for item in rollout.get("changed") or [])
+            before = f", after revision {rollout['previous_revision']}" if rollout.get("previous_revision") else ""
+            rows.append({"type": "Text", "size": "sm", "color": "secondary",
+                         "value": f"Rolled out revision {rollout['revision']} at {_time(rollout['at'])}{before}"
+                                  + (f": {change}" if change else "")})
         if workload.get("last_warning"):
             when = f" at {_time(workload['last_warning_at'])}" if workload.get("last_warning_at") else ""
             rows.append({"type": "Text", "size": "sm", "color": "secondary",

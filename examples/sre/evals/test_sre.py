@@ -63,13 +63,23 @@ def findings_file(*evidence, resource="deployment/payments-processor"):
 def test_findings_quotes_are_checked_against_the_journal_copy(tmp_path):
     conversation = conversation_with(tmp_path, LOGS)
     quote = {"file": LOGS_FILE, "quote": "Missing required env var   DATABASE_URL"}
-    assert findings.check(conversation, findings_file(quote))["status"] == "evidence_passed"
-    invented = findings.check(conversation, findings_file({**quote, "quote": "OOMKilled"}))
-    assert invented["status"] == "failed" and f"Not found in {LOGS_FILE}" in invented["detail"]
-    unrecorded = findings.check(conversation, findings_file({**quote, "file": "evidence/999-made-up.txt"}))
-    assert unrecorded["status"] == "failed" and "the sandbox worker never recorded" in unrecorded["detail"]
+    passed = findings.check(conversation, findings_file(quote))
+    assert passed["status"] == "evidence_passed" and passed["results"][0]["verified"] is True
+    assert passed["results"][0]["quotes"][0]["found"] is True
+    # Every quote is checked: one found and two not, each with its reason; the finding is unverified.
+    checked = findings.check(conversation, findings_file(quote, {**quote, "quote": "OOMKilled"},
+                                                         {**quote, "file": "evidence/999-made-up.txt"}))
+    assert checked["status"] == "failed" and checked["detail"] == "2 of 3 quotes not found"
+    assert [item["found"] for item in checked["results"][0]["quotes"]] == [True, False, False]
+    assert [failure["reason"] for failure in checked["failures"]] == [
+        "not in the file", "the sandbox worker never recorded this file"]
+    assert checked["summary"][0]["verified"] is False and checked["quotes"] == 1 and checked["quotes_total"] == 3
     assert findings.check(conversation, findings_file())["status"] == "failed"
     assert findings.check(conversation, {"output/findings.md": b"x"})["status"] == "no_findings"
+    # A failed check asks the agent once to re-read the file it cited.
+    prompt = findings.retry_prompt(checked)
+    assert '"OOMKilled" in ' + LOGS_FILE + ": not in the file" in prompt and "Re-read each file" in prompt
+    assert findings.retry_prompt(passed) is None
 
 
 async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(worker, tmp_path):
@@ -122,7 +132,9 @@ async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(
                   if (event.get("update") or {}).get("type") == "workflow.task.updated"]
         assert any(title.startswith("pod_logs ") and title.endswith(" · harness") for title in titles)
         assert "kubectl get pods -n payments -o wide" in titles
-        assert turn["check"]["summary"] == [{"resource": "deployment/payments-processor", "problem": "CrashLoopBackOff"}]
+        assert turn["check"]["summary"] == [{"resource": "deployment/payments-processor", "problem": "CrashLoopBackOff",
+                                             "verified": True}]
+        assert "the causes are the agent's reasoning" in card
         assert [tool["where"] for tool in turn["tools"]] == ["sandbox", "harness", "harness", "sandbox", "sandbox",
                                                             "sandbox", "sandbox"]
         # A second turn picks up only the new reads.
@@ -162,6 +174,9 @@ def test_the_ui_serves_its_own_page_and_the_health_summary(worker, tmp_path):
             processor = health["namespaces"][0]["workloads"][0]
             assert processor["name"] == "payments-processor" and processor["state"] == "failing"
             assert processor["reasons"] == ["CrashLoopBackOff", "last exit: Error (code 1)"]
+            # What the worker adds for people, through the gRPC contract: events of any type, and the rollout.
+            assert processor["events"][0]["reason"] == "BackOff" and processor["rollout"] is None
+            assert processor["waiting_message"] == ""
     finally:
         store.close()
 
@@ -269,3 +284,44 @@ async def test_the_health_board_opens_one_shared_issue_per_unhealthy_workload(wo
     finally:
         await chat.close_all()
         store.close()
+
+
+async def test_a_failed_check_gets_one_corrective_pass_and_the_card_says_so(worker, tmp_path):
+    def findings_json(quote):
+        return json.dumps({"findings": [{"resource": "deployment/payments-processor", "problem": "CrashLoopBackOff",
+                                         "cause": "It crashes.", "evidence": [{"file": PODS_FILE, "quote": quote}]}]})
+    # The first pass cites a quote the evidence does not hold; asked to correct it, the agent copies the real text.
+    write = (f"mkdir -p output work && if [ -f work/attempt ]; then printf '%s' '{findings_json('CrashLoopBackOff')}' "
+             f"> output/findings.json; else printf '%s' '{findings_json('OOMKilled')}' > output/findings.json; "
+             "touch work/attempt; fi")
+    store = SQLiteStore(tmp_path / "threads.sqlite3")
+    chat = HarnessChatServer(make_spec({"payments"}), store, worker.client(), card=check_rows, file_status=file_status,
+                             model=Calls([shell("kubectl get pods -n payments -o wide"), shell(write)], answer="Done."),
+                             output_dir=tmp_path / "threads")
+    try:
+        stream = await events(chat, {"type": "threads.create", "params": {"input": message("Why is it crashing?")}})
+        assert not [event for event in stream if event["type"] == "error"], stream
+        thread_id = next(event["thread"]["id"] for event in stream if event["type"] == "thread.created")
+        turn = (await store.load_thread(thread_id, {})).metadata["turns"][0]
+        assert turn["check_first"]["status"] == "failed" and turn["check_first"]["detail"] == "1 of 1 quotes not found"
+        assert turn["check"]["status"] == "evidence_passed" and turn["check"]["results"][0]["verified"] is True
+        assert turn["file_status"]["output/findings.json"]["state"] == "checked"
+        assert turn["usage"]["requests"] >= 4  # both passes count
+        shown = json.dumps(stream)
+        assert "The host check failed: 1 of 1 quotes not found" in shown
+        assert "First check: 1 of 1 quotes not found" in shown and "found in the evidence" in shown
+    finally:
+        await chat.close_all()
+        store.close()
+
+
+def test_pod_logs_since_takes_a_duration():
+    from examples.sre.agent.tools.logs import since_seconds
+
+    assert [since_seconds(value) for value in (None, "", "45s", "10m", "1h30m", "30d")] == [0, 0, 45, 600, 5400, 604800]
+    for value in ("ten minutes", "10", "5x"):
+        try:
+            since_seconds(value)
+        except ValueError:
+            continue
+        raise AssertionError(value)

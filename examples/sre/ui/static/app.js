@@ -459,10 +459,22 @@ function renderFiles(turn, body, isCurrent) {
   renderFile(turn, file, body, isCurrent);
 }
 
+// Each evidence file the conversation recorded: the read that produced it and when.
+function evidenceSources() {
+  const sources = new Map();
+  for (const turn of state.thread?.turns || []) {
+    for (const file of turn.files || []) {
+      if (file.evidence) sources.set(file.path, { command: file.command, recorded_at: file.recorded_at });
+    }
+  }
+  return sources;
+}
+
 async function renderFile(turn, file, body, isCurrent) {
   const name = file.path.split("/").pop();
   const status = file.status?.label || (file.start ? "starting file" : "");
-  setHead(name, [file.path, file.too_large ? "over the transfer limit" : formatBytes(file.bytes),
+  const read = file.recorded_at ? `read ${new Date(file.recorded_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
+  setHead(name, [file.path, file.too_large ? "over the transfer limit" : formatBytes(file.bytes), read,
     file.start ? "" : turn && file.turn === turn.number ? `turn ${file.turn}` : `from turn ${file.turn}`, status].filter(Boolean).join(" · "));
   if (file.too_large) {
     body.replaceChildren(el("p", { class: "note" }, "Over the transfer limit, so it was not copied."));
@@ -475,7 +487,8 @@ async function renderFile(turn, file, body, isCurrent) {
   const highlight = state.view?.path === file.path ? state.view.highlight : null;
   const page = state.view?.path === file.path ? state.view.page : null;
   const open = (path, quote = null) => apply({ tab: "files", view: { path, highlight: quote } });
-  if (await renderSreFile({ file, body, url, highlight, open, check: turn?.check || null })) return;
+  if (await renderSreFile({ file, body, url, highlight, open, check: turn?.check || null,
+    first: turn?.check_first || null, sources: evidenceSources() })) return;
   body.replaceChildren(el("div", { class: "empty" }, el("p", {}, "Loading…")));
   const response = await fetch(url);
   const text = response.ok ? await response.text() : "";

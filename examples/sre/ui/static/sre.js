@@ -64,8 +64,20 @@ function prompt(workload, namespace) {
 // lasts, so the count only grows; when the latest one happened says more.
 function reasons(workload) {
   const warned = workload.warnings && workload.last_warning_at ? `last warning ${ago(workload.last_warning_at)}` : "";
-  return [...workload.reasons, workload.restarts ? plural(workload.restarts, "restart") : "", warned]
+  return [...workload.reasons, workload.restarts ? plural(workload.restarts, "restart") : "", warned, changed(workload)]
     .filter(Boolean).join(", ");
+}
+
+const tag = (image) => String(image).split(/[:@]/).slice(1).join(":") || String(image);
+
+// What changed last: a rollout in the last day, or one that changed an image.
+function changed(workload) {
+  const rollout = workload.rollout;
+  if (!rollout || !rollout.at) return "";
+  const recent = Date.now() - new Date(rollout.at).getTime() < 86_400_000;
+  if (!recent && !rollout.changed?.length) return "";
+  const images = (rollout.changed || []).map((item) => `${tag(item.from)} → ${tag(item.to)}`).join(", ");
+  return `rolled out ${ago(rollout.at)} (rev ${rollout.revision}${images ? `, ${images}` : ""})`;
 }
 
 // An unhealthy workload with an open issue opens that issue, shared by the team; without one, a new conversation.
@@ -79,7 +91,7 @@ function workloadRow(suggest, openIssue, workload, namespace, issue) {
     el("span", { class: "sre-dot", title: STATE_LABEL[workload.state] }),
     el("span", { class: "sre-name", title: workload.kind }, workload.name),
     el("span", { class: "sre-ready", title: "ready / desired" }, `${workload.ready}/${workload.desired}`),
-    el("span", { class: "sre-reasons", title: workload.last_warning || "" }, reasons(workload)),
+    el("span", { class: "sre-reasons", title: workload.waiting_message || workload.last_warning || "" }, reasons(workload)),
     action);
 }
 
@@ -127,7 +139,33 @@ export async function renderHome({ container, suggest, openIssue, config, thread
 
 /* ---------- Findings ---------- */
 
-function renderFindings({ body, open, check, text }) {
+function clock(iso) {
+  const when = iso ? new Date(iso) : null;
+  return when && !Number.isNaN(when.getTime()) ? when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+}
+
+const FIX_STEPS = [["precheck", "Check first"], ["commands", "Run"], ["verify", "Verify"], ["rollback", "Undo"]];
+
+// A fix is commands for a person to run: what to check first, the change, how to verify it and how to undo it.
+// Copy takes the change's commands only. A fix written as prose (older findings) shows as it was written.
+function renderFix(fix) {
+  if (!fix) return null;
+  if (typeof fix !== "object") {
+    return el("div", { class: "sre-fix" }, el("div", { class: "sre-label" }, "Proposed fix", copyButton(String(fix))),
+      el("pre", {}, String(fix)));
+  }
+  const lines = (key) => (Array.isArray(fix[key]) ? fix[key] : fix[key] ? [fix[key]] : []).map(String);
+  return el("div", { class: "sre-fix" },
+    el("div", { class: "sre-label" }, "Proposed fix"),
+    fix.summary ? el("p", { class: "sre-fix-summary" }, String(fix.summary)) : null,
+    FIX_STEPS.filter(([key]) => lines(key).length).map(([key, label]) => el("div", { class: "sre-fix-step" },
+      el("div", { class: "sre-step-label" }, label, key === "commands" ? copyButton(lines(key).join("\n")) : null),
+      el("pre", {}, lines(key).join("\n")))),
+    !lines("commands").length ? el("p", { class: "note" }, "No command to run: see the summary.") : null,
+    fix.risk ? el("p", { class: "sre-risk" }, `Risk: ${fix.risk}`) : null);
+}
+
+function renderFindings({ body, open, check, first, sources, text }) {
   let findings;
   try {
     findings = JSON.parse(text).findings;
@@ -135,34 +173,59 @@ function renderFindings({ body, open, check, text }) {
   } catch {
     return false;
   }
-  const checked = check?.status === "evidence_passed" ? `${plural(findings.length, "finding")}, `
-    + (check.quotes === 1 ? "1 quote, found in the evidence" : `${check.quotes} quotes, all found in the evidence`) : null;
-  const failed = check?.status === "failed" ? el("p", { class: "note err" }, `Evidence check failed: ${check.detail || ""}`)
-    : !checked ? el("p", { class: "note" }, "Not checked against the evidence.") : null;
+  // The check's result for each finding and quote: what was found, and what was not.
+  const results = new Map((check?.results || []).map((result) => [result.resource, result]));
+  const passed = check?.status === "evidence_passed";
+  const headline = passed ? `${plural(findings.length, "finding")}, ${plural(check.quotes, "quote")} found in the evidence`
+    : plural(findings.length, "finding");
+  const notes = [
+    first ? el("p", { class: "note" }, `First check: ${first.detail || "failed"}. The agent re-read its sources and `
+      + "corrected the findings; this is the second check.") : null,
+    passed ? el("p", { class: "note" }, "The check finds each quote in the read it cites; the causes are the agent's "
+      + "reasoning.") : null,
+    check?.status === "failed" ? el("p", { class: "note err" }, `Evidence check failed: ${check.detail || ""}`)
+      : !check || check.status === "no_findings" ? el("p", { class: "note" }, "Not checked against the evidence.") : null,
+  ];
   const raw = el("pre", { class: "sre-json", hidden: true }, JSON.stringify(findings, null, 2));
   const toggle = el("button", { type: "button", class: "sre-link" }, "View JSON");
   toggle.addEventListener("click", () => {
     raw.hidden = !raw.hidden;
     toggle.textContent = raw.hidden ? "View JSON" : "Hide JSON";
   });
-  // The problem is the finding's title: a short label, as the triage skill asks for.
-  const cards = findings.map((finding) => el("article", { class: "sre-finding" },
-    el("h3", {}, String(finding.problem || "Finding")),
-    el("p", { class: "sre-resource" }, finding.resource || "resource",
-      finding.namespace ? el("span", { class: "muted" }, ` in ${finding.namespace}`) : null),
-    finding.cause ? el("p", { class: "sre-cause" }, finding.cause) : null,
-    finding.fix ? el("div", { class: "sre-fix" },
-      el("div", { class: "sre-label" }, "Proposed fix", copyButton(String(finding.fix))),
-      el("pre", {}, String(finding.fix))) : null,
-    Array.isArray(finding.evidence) && finding.evidence.length ? el("div", { class: "sre-evidence" },
-      el("div", { class: "sre-label" }, "Evidence"),
-      el("ul", { class: "sre-quotes" }, finding.evidence.map((item) => el("li", {},
-        el("blockquote", {}, item.quote),
-        item.file ? el("button", { type: "button", class: "sre-link", title: item.file,
-          onclick: () => open(item.file, item.quote) }, String(item.file).replace(/^evidence\//, "")) : null)))) : null));
+  const cards = findings.map((finding) => {
+    const result = results.get(String(finding.resource || "a finding").slice(0, 80));
+    const outcome = (item) => result?.quotes?.find((quote) => quote.file === item.file
+      && String(item.quote || "").startsWith(String(quote.quote || "").replace(/…$/, "")));
+    const ruledOut = Array.isArray(finding.ruled_out) ? finding.ruled_out : [];
+    return el("article", { class: "sre-finding" },
+      // The problem is the finding's title: a short label, as the triage skill asks for.
+      el("h3", {}, String(finding.problem || "Finding"),
+        result && !result.verified ? el("span", { class: "sre-unverified" }, "Unverified") : null),
+      el("p", { class: "sre-resource" }, finding.resource || "resource",
+        finding.namespace ? el("span", { class: "muted" }, ` in ${finding.namespace}`) : null),
+      finding.cause ? el("p", { class: "sre-cause" }, finding.cause) : null,
+      ruledOut.length ? el("div", { class: "sre-ruled" }, el("div", { class: "sre-label" }, "Ruled out"),
+        el("ul", {}, ruledOut.map((item) => el("li", {}, String(item))))) : null,
+      renderFix(finding.fix),
+      Array.isArray(finding.evidence) && finding.evidence.length ? el("div", { class: "sre-evidence" },
+        el("div", { class: "sre-label" }, "Evidence"),
+        el("ul", { class: "sre-quotes" }, finding.evidence.map((item) => {
+          const found = outcome(item);
+          const source = sources?.get(item.file);
+          const read = clock(found?.recorded_at || source?.recorded_at);
+          return el("li", { class: found && !found.found ? "missing" : "" },
+            el("blockquote", {}, item.quote),
+            el("div", { class: "sre-source" },
+              found && !found.found ? el("span", { class: "sre-missing" }, found.reason === "not in the file"
+                ? "Not in this read:" : `Not checked: ${found.reason}.`) : null,
+              item.file ? el("button", { type: "button", class: "sre-link", title: item.file,
+                onclick: () => open(item.file, item.quote) }, source?.command || String(item.file).replace(/^evidence\//, ""))
+                : null,
+              read ? el("span", { class: "muted" }, `read ${read}`) : null));
+        }))) : null);
+  });
   body.replaceChildren(el("div", { class: "sre-findings" },
-    el("div", { class: "sre-findings-head" }, el("span", {}, checked || plural(findings.length, "finding")), toggle),
-    failed, raw, cards));
+    el("div", { class: "sre-findings-head" }, el("span", {}, headline), toggle), ...notes, raw, cards));
   return true;
 }
 
@@ -213,7 +276,7 @@ function renderKubectlTable({ body, text }) {
 }
 
 // Renders the file types this agent knows; returns false to leave a file to the page's own views.
-export async function renderFile({ file, body, url, highlight, open, check }) {
+export async function renderFile({ file, body, url, highlight, open, check, first, sources }) {
   const path = file.path || "";
   const kind = path === "output/findings.json" ? "findings"
     : /^evidence\/\d+-pod-logs-/.test(path) ? "logs"
@@ -223,7 +286,7 @@ export async function renderFile({ file, body, url, highlight, open, check }) {
   const response = await fetch(url);
   if (!response.ok) return false;
   const text = await response.text();
-  if (kind === "findings") return renderFindings({ body, open, check, text });
+  if (kind === "findings") return renderFindings({ body, open, check, first, sources, text });
   if (kind === "logs") return renderLogExcerpt({ body, text });
   return renderKubectlTable({ body, text });
 }

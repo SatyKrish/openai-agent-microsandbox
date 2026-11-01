@@ -8,7 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { evidenceName, kubectlRead } from '../src/evidence.js';
-import { apiLogSource, LogError } from '../src/logs.js';
+import { apiLogSource, failingFirst, LogError } from '../src/logs.js';
 import { redact } from '../src/redact.js';
 import { buildRequest, quote } from '../src/runner.js';
 import { Workspaces, WorkspaceError } from '../src/workspace.js';
@@ -123,4 +123,19 @@ test("a log the kubelet no longer has is an error, not the container's output", 
   body.text = 'unable to retrieve container logs for containerd://10d63f5c38de';
   await assert.rejects(source(query), (error: unknown) =>
     error instanceof LogError && error.status === 404 && /no longer has the previous container's log/.test(error.message));
+});
+
+test('deploy/NAME reads the pod that is failing, not just the newest', () => {
+  const pod = (name: string, at: string, ready: boolean, restarts: number) => ({ metadata: { name, creationTimestamp: at },
+    status: { containerStatuses: [{ ready, restartCount: restarts }] } });
+  const pods = [pod('new-healthy', '2026-11-01T06:00:00Z', true, 0), pod('old-crashing', '2026-11-01T01:00:00Z', false, 40),
+    pod('old-restarting', '2026-11-01T02:00:00Z', true, 3)];
+  assert.deepEqual(pods.sort(failingFirst).map((item) => item.metadata.name), ['old-crashing', 'old-restarting', 'new-healthy']);
+});
+
+test('rollout history and status are reads; other rollout commands are not', () => {
+  assert.ok(kubectlRead(['kubectl', 'rollout', 'history', 'deployment/payments-ledger', '-n', 'payments']));
+  assert.ok(kubectlRead(['sh', '-lc', 'kubectl -n payments rollout status deployment/payments-ledger']));
+  assert.equal(kubectlRead(['kubectl', 'rollout', 'undo', 'deployment/payments-ledger', '-n', 'payments']), null);
+  assert.equal(kubectlRead(['kubectl', 'rollout', 'restart', 'deployment/payments-ledger']), null);
 });

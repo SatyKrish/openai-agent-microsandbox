@@ -11,11 +11,25 @@ records the excerpt as evidence and saves it under evidence/ in the workspace.
 
 from __future__ import annotations
 
+import re
+
 from agents import function_tool
 
 from agent_mxc import WorkerError
 
 TOOL_NAMES = ("pod_logs",)
+_SINCE = re.compile(r"(\d+)\s*([smhd])")
+_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def since_seconds(since: str | None) -> int:
+    """``10m``, ``1h30m`` or ``45s`` as seconds; 0 for none. At most a week."""
+    if not since:
+        return 0
+    parts = _SINCE.findall(since.lower())
+    if not parts or _SINCE.sub("", since.lower()).strip():
+        raise ValueError(f"since={since!r}: use a duration such as 10m, 1h or 1h30m")
+    return min(sum(int(amount) * _SECONDS[unit] for amount, unit in parts), 7 * 86400)
 
 
 def tools(turn) -> list:
@@ -23,21 +37,28 @@ def tools(turn) -> list:
 
     @function_tool
     async def pod_logs(pod: str, namespace: str, container: str | None = None, previous: bool = False,
-                       tail: int = 500, match: str | None = None) -> str:
+                       tail: int = 500, match: str | None = None, since: str | None = None) -> str:
         """Read a pod's log as an excerpt: errors and warnings with context, the last lines, repeats collapsed,
         credentials and personal data masked. You never see the raw log.
 
         Args:
-            pod: A pod name, or deploy/NAME for the deployment's newest pod.
+            pod: A pod name, or deploy/NAME for the deployment's pod most likely failing (not ready, then most
+                restarted, then newest).
             namespace: A namespace in this agent's scope.
             container: The container, when the pod has more than one.
             previous: Read the last terminated container instead; use this for crash loops.
             tail: How many lines to read from the end before filtering, up to 5000.
             match: Literal text to look for; matching lines are always shown.
+            since: Only lines from this long ago, such as 10m, 1h or 1h30m.
         """
         try:
+            seconds = since_seconds(since)
+        except ValueError as error:
+            return f"Refused: {error}"
+        try:
             reply = await turn.session._inner.read_logs(namespace, pod, container=container, previous=previous,
-                                                        tail_lines=max(1, min(int(tail), 5000)), match=match)
+                                                        tail_lines=max(1, min(int(tail), 5000)), match=match,
+                                                        since_seconds=seconds)
         except WorkerError as error:
             return f"Refused: {error.details}"
         return f"{reply['excerpt']}\nSaved as {reply['evidence_path']}."

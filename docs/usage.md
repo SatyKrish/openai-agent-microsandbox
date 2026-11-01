@@ -142,7 +142,12 @@ agent's check.
 `await client.health()` returns the worker's summary of the workloads in its
 namespaces: each deployment and stateful set, and any pod outside them, with its readiness,
 restarts, a state (`failing`, `degraded` or `healthy`) and the reasons (waiting
-reasons, the last exit, unschedulable pods, recent warning events, redacted).
+reasons, the last exit, unschedulable pods, a stuck rollout or failed replica
+creation). It adds the kubelet's own words for a waiting container (such as the
+registry's reply to a pull), the latest events of any type, a ReplicaSet's
+events counted under its deployment, and a deployment's latest rollout: its
+revision, when, its images and what it changed from the revision before. Text
+is redacted.
 The worker reads it with its own identity and caches it for 5 s. It is for
 people: the SRE UI's start screen shows it, and it is never sent to the model.
 

@@ -10,9 +10,9 @@ sandbox worker's read-only identity, and cannot change anything. It runs on the
 | Harness | The agent loop, the model calls and the host check. No Kubernetes token. |
 | MXC containers on the worker | kubectl, the shell, Python and the `kubernetes-triage` skill, over the conversation's workspace. No credentials; network to the worker's read-only API proxy only. |
 | The worker's API proxy | Adds the worker's token to kubectl's reads and refuses writes, `exec`, pod logs and anything that is not the Kubernetes API. |
-| `pod_logs` tool | Gets a pod's log from the worker as an excerpt: errors and warnings with context, the last lines, repeats collapsed, credentials and personal data masked, at most 40 lines. The raw log never leaves the worker. |
+| `pod_logs` tool | Gets a pod's log from the worker as an excerpt: errors, server errors and warnings with context and stack traces, the last lines, repeats collapsed with status codes and addresses kept apart, credentials and personal data masked, at most 40 lines; `since` limits it to recent lines. The raw log never leaves the worker. |
 | Worker journal | Every command, and the output of every plain kubectl read as evidence. No container can see it. |
-| Host check | Every quote in `output/findings.json` must appear in the worker's copy of the evidence file it cites. |
+| Host check | Every quote in `output/findings.json` must appear in the worker's copy of the evidence file it cites. Each quote's result is reported; when one is missing, the agent gets one pass to correct the findings, and the card says so. |
 | Memory | What a user's earlier investigations of this application learned, distilled by the SDK when a conversation's session closes and carried by the harness into that user's later conversations. Without sign-in, everyone shares the guest's. |
 
 ## Access
@@ -69,7 +69,9 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
 - **Start screen.** Under the composer, each namespace lists its workloads,
   failing first, with readiness and why each is unhealthy (waiting reasons, the
   last exit, restarts, when the latest warning happened). Only each workload's
-  dot is coloured. **Open issue** opens a workload's issue with the question
+  dot is coloured. Each row also says what changed: the latest rollout, its
+  revision and any image it changed, and the kubelet's own message on hover.
+  **Open issue** opens a workload's issue with the question
   in the composer (**Investigate** starts a conversation when there is none);
   **Investigate all** asks about every unhealthy one. The worker builds this summary
   with its own identity; it is not sent to the model. The side panel stays
@@ -85,10 +87,13 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   ran. The title adds only what is unusual: a non-zero exit, or `harness` for a
   harness tool.
 - **Findings.** `output/findings.json` opens as one section per finding, titled
-  by its short problem label: the workload, the cause, the proposed fix as a code
-  block with a copy button, and each quote with its evidence file, which opens
-  the file at that line. A line above says how many quotes the host check found;
-  a failed check is red.
+  by its short problem label: the workload, the cause, the causes ruled out, and
+  the proposed fix as steps (check first, run, verify, undo, and its risk), where
+  Copy takes the commands to run. Each quote shows the read it came from and when,
+  and opens the file at that line. A line above says how many quotes the host
+  check found and that the causes are the agent's reasoning; a finding whose
+  quote was not found is marked Unverified, with that quote in red, and a
+  correction after a failed first check is said.
 - **Evidence.** The side panel names each evidence file by the read that
   produced it (`kubectl get pods -n payments -o wide`, `pod_logs …`), with the
   file name on hover; files from earlier turns are muted. A log excerpt says how

@@ -58,5 +58,6 @@ def make_spec(namespaces, *, memory_models: tuple[str, str] | None = None) -> Ag
             line for line in (f"Namespaces you may read: {scope}.", issue_context(conversation)) if line),
         tools=logs.tools,
         check=lambda conversation, turn, files: findings.check(conversation, files),
+        retry_check=findings.retry_prompt,
         default_question=f"Find unhealthy workloads in {scope} and explain why.",
     )

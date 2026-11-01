@@ -112,6 +112,14 @@ def usage_of(usage) -> dict:
             "max_input_tokens": max((entry.input_tokens for entry in usage.request_usage_entries), default=0)}
 
 
+def _added(earlier: dict | None, usage: dict) -> dict:
+    """Two runs of a turn's agent loop count together; its largest request is the larger of the two."""
+    if not earlier:
+        return usage
+    return {key: max(earlier[key], usage[key]) if key == "max_input_tokens" else earlier[key] + usage[key]
+            for key in usage}
+
+
 def _requested_by(session, who: str) -> None:
     """Name who the session's next commands are for, in the worker's journal (a person, or the harness itself)."""
     inner = getattr(session, "_inner", session)
@@ -485,7 +493,33 @@ class Harness:
         extra = self.spec.instructions(conversation)
         agent = agent.clone(instructions=agent.instructions + ("\n\n" + extra if extra else ""),
                             tools=[*agent.tools, *harness_tools])
-        history = self.history(thread.id)
+        await self._run_agent(thread.id, turn, agent, text, session, steps, harness_tools)
+        await steps.close()
+        await self._collect_evidence(session, conversation, turn)
+        files = await self._collect(session, conversation, turn)
+        _, check_operation = self.spec.trace_operations
+        with operation(check_operation):
+            turn["check"] = self.spec.check(conversation, turn, files)
+        correction = self.spec.retry_check(turn["check"]) if turn["check"] and not turn.get("step_limit") else None
+        if correction:
+            # Once: the agent re-reads its sources and corrects what the check could not find.
+            turn["check_first"] = turn["check"]
+            await steps.add("The host check failed: " + str(turn["check"].get("detail") or "see the findings"),
+                            status="failed", detail=fenced(correction))
+            await self._run_agent(thread.id, turn, agent, correction, session, steps, harness_tools)
+            await steps.close()
+            await self._collect_evidence(session, conversation, turn)
+            files = await self._collect(session, conversation, turn, again=True)
+            with operation(check_operation):
+                turn["check"] = self.spec.check(conversation, turn, files)
+        if self.file_status is not None:
+            turn["file_status"] = self.file_status(conversation, turn)
+        meta["sandbox"] = self.client.serialize_session_state(session.state)
+
+    async def _run_agent(self, thread_id: str, turn: dict, agent, text: str, session, steps: _Steps,
+                         harness_tools: list) -> None:
+        """One run of the agent loop in the turn, with the conversation's history; a failed run leaves none of itself."""
+        history = self.history(thread_id)
         kept = len(await history.get_items())
         out_of_turns: list[str] = []
 
@@ -508,13 +542,13 @@ class Harness:
                                      # A misspelled tool name is the model's mistake to correct, not a failed turn.
                                      tool_not_found_behavior="return_error_to_model"))
             try:
-                await self._stream(thread.id, turn, result, steps, frozenset(tool.name for tool in harness_tools))
+                await self._stream(thread_id, turn, result, steps, frozenset(tool.name for tool in harness_tools))
             finally:
-                turn["usage"] = usage_of(result.context_wrapper.usage)
+                turn["usage"] = _added(turn.get("usage"), usage_of(result.context_wrapper.usage))
             if out_of_turns:
                 turn["step_limit"] = True
                 await steps.close()
-                await self.save_entry(thread.id, {"id": new_id("msg"), "kind": "assistant", "turn": turn["number"],
+                await self.save_entry(thread_id, {"id": new_id("msg"), "kind": "assistant", "turn": turn["number"],
                                                   "at": _now(), "text": out_of_turns[0]})
         except BaseException:
             # The SDK saves items as the run goes; a failed turn must not leave half of itself in the history.
@@ -523,15 +557,6 @@ class Harness:
             raise
         finally:
             history.close()
-        await steps.close()
-        await self._collect_evidence(session, conversation, turn)
-        files = await self._collect(session, conversation, turn)
-        _, check_operation = self.spec.trace_operations
-        with operation(check_operation):
-            turn["check"] = self.spec.check(conversation, turn, files)
-        if self.file_status is not None:
-            turn["file_status"] = self.file_status(conversation, turn)
-        meta["sandbox"] = self.client.serialize_session_state(session.state)
 
     async def _stream(self, thread_id: str, turn: dict, result, steps: _Steps, harness_tools: frozenset[str]) -> None:
         """Turn the run's stream into steps, streamed text and the agent's messages.
@@ -661,8 +686,9 @@ class Harness:
             await self.uploads.delete_attachment(attachment.id, {})
         return added
 
-    async def _collect(self, session, conversation: Conversation, turn: dict) -> dict[str, bytes]:
-        """Copy the agent's output folders to the host while the sandbox is still running."""
+    async def _collect(self, session, conversation: Conversation, turn: dict, *, again: bool = False) -> dict[str, bytes]:
+        """Copy the agent's output folders to the host while the sandbox is still running; ``again`` replaces the
+        turn's earlier copies, after a corrective pass."""
         folders = self.spec.collect
         listing = await session.exec("find", *folders, "-maxdepth", "1", "-type", "f", shell=False)
         # Names come from the sandbox: accept only plain file names in the agent's folders.
@@ -671,6 +697,8 @@ class Harness:
         previous = {item["path"]: item.get("sha256") for earlier in conversation.metadata["turns"][:-1]
                     for item in earlier["files"]}
         destination = conversation.turn_dir(turn["number"])
+        if again:
+            turn["files"] = [item for item in turn["files"] if item.get("evidence") or item.get("upload")]
         collected = {}
         for name in names[:_MAX_FILES]:
             try:

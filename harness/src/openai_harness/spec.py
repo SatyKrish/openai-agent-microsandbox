@@ -110,6 +110,9 @@ class AgentSpec:
     tools: Callable[[TurnContext], list] = lambda turn: []
     uploads: Uploads | None = None
     check: Callable[[Conversation, dict, dict[str, bytes]], dict | None] = lambda conversation, turn, files: None
+    # A failed check -> what the agent is asked, once in the same turn, to correct it; None: no second pass.
+    # The first check's result is kept with the turn, so a correction is never shown as a first-time pass.
+    retry_check: Callable[[dict], str | None] = lambda check: None
     collect: tuple[str, ...] = ("output", "work")
     # The workspace directory of the SDK Memory capability, when the agent has one; the launcher
     # then gives the harness a UserMemory so each user's memory carries across their conversations.

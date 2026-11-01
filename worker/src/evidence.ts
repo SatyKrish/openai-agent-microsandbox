@@ -10,6 +10,8 @@
 
 // Not logs: containers cannot read them, and the worker records log excerpts itself (ReadLogs).
 const READ_VERBS = new Set(['get', 'describe', 'events', 'top', 'explain', 'api-resources', 'api-versions', 'version']);
+// `kubectl rollout` reads only with these: what changed, and whether a rollout finished.
+const ROLLOUT_READS = new Set(['history', 'status']);
 // Flags that would read from somewhere other than the in-cluster API as the worker's identity.
 const FORBIDDEN = new Set(['--kubeconfig', '--server', '-s', '--token', '--as', '--as-group', '--as-uid', '--user',
   '--cluster', '--context', '--certificate-authority', '--client-certificate', '--client-key',
@@ -34,13 +36,14 @@ export function kubectlRead(argv: readonly string[]): string[] | null {
     return null;
   }
   if (words[0] !== 'kubectl' || words.length < 2 || !words.every((word) => PLAIN.test(word))) return null;
-  let verb: string | undefined;
-  for (let index = 1; index < words.length && verb === undefined; index += 1) {
+  const positional: string[] = [];
+  for (let index = 1; index < words.length && positional.length < 2; index += 1) {
     const word = words[index]!;
     if (VALUED.has(word)) index += 1;
-    else if (!word.startsWith('-')) verb = word;
+    else if (!word.startsWith('-')) positional.push(word);
   }
-  if (!verb || !READ_VERBS.has(verb)) return null;
+  const [verb, subcommand] = positional;
+  if (!verb || !(READ_VERBS.has(verb) || (verb === 'rollout' && ROLLOUT_READS.has(subcommand ?? '')))) return null;
   for (const word of words) {
     if (FORBIDDEN.has(word.split('=')[0] ?? '')) return null;
   }

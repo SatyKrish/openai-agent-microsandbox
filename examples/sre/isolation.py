@@ -233,8 +233,9 @@ async def harness_check(client, namespaces) -> list[str]:
     chat_a1, thread_a1 = await conversation("A1", model_a1)
     thread, check = await last_check(chat_a1, thread_a1)
     workspaces.append(thread.metadata["workspace"].split("/", 1)[1])
-    report(check.get("status") == "failed" and "never recorded" in check.get("detail", ""),
-           "A citing B's evidence file name fails the check", check.get("detail", "")[:120])
+    reasons = [failure["reason"] for failure in check.get("failures") or []]
+    report(check.get("status") == "failed" and any("never recorded" in reason for reason in reasons),
+           "A citing B's evidence file name fails the check", "; ".join(reasons)[:120])
 
     planted = base64.b64encode(quote.encode()).decode()
     model_a2 = Calls([shell("kubectl get pods -n payments -o wide"),
@@ -244,9 +245,10 @@ async def harness_check(client, namespaces) -> list[str]:
     workspace = thread.metadata["workspace"].split("/", 1)[1]
     workspaces.append(workspace)
     tampered = (await client.transport.read_file(workspace, f"{client.workspace_root(workspace)}/{PODS}")).content
-    report(quote.encode() in tampered and check.get("status") == "failed" and "Not found" in check.get("detail", ""),
+    reasons = [failure["reason"] for failure in check.get("failures") or []]
+    report(quote.encode() in tampered and check.get("status") == "failed" and "not in the file" in reasons,
            "A quoting B's text from its own tampered copy fails the check",
-           f"workspace copy tampered: {quote.encode() in tampered}; {check.get('detail', '')[:80]}")
+           f"workspace copy tampered: {quote.encode() in tampered}; {'; '.join(reasons)[:80]}")
 
     for chat, thread_id in ((chat_b, thread_b), (chat_a1, thread_a1), (chat_a2, thread_a2)):
         await chat.store.delete_thread(thread_id, {})

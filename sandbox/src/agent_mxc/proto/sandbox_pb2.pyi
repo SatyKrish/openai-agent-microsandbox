@@ -202,8 +202,43 @@ class HealthRequest(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
+class ImageChange(_message.Message):
+    __slots__ = ("container", "to")
+    CONTAINER_FIELD_NUMBER: _ClassVar[int]
+    FROM_FIELD_NUMBER: _ClassVar[int]
+    TO_FIELD_NUMBER: _ClassVar[int]
+    container: str
+    to: str
+    def __init__(self, container: _Optional[str] = ..., to: _Optional[str] = ..., **kwargs) -> None: ...
+
+class Rollout(_message.Message):
+    __slots__ = ("revision", "at", "images", "previous_revision", "changed")
+    REVISION_FIELD_NUMBER: _ClassVar[int]
+    AT_FIELD_NUMBER: _ClassVar[int]
+    IMAGES_FIELD_NUMBER: _ClassVar[int]
+    PREVIOUS_REVISION_FIELD_NUMBER: _ClassVar[int]
+    CHANGED_FIELD_NUMBER: _ClassVar[int]
+    revision: int
+    at: str
+    images: _containers.RepeatedScalarFieldContainer[str]
+    previous_revision: int
+    changed: _containers.RepeatedCompositeFieldContainer[ImageChange]
+    def __init__(self, revision: _Optional[int] = ..., at: _Optional[str] = ..., images: _Optional[_Iterable[str]] = ..., previous_revision: _Optional[int] = ..., changed: _Optional[_Iterable[_Union[ImageChange, _Mapping]]] = ...) -> None: ...
+
+class WorkloadEvent(_message.Message):
+    __slots__ = ("type", "reason", "message", "at")
+    TYPE_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    AT_FIELD_NUMBER: _ClassVar[int]
+    type: str
+    reason: str
+    message: str
+    at: str
+    def __init__(self, type: _Optional[str] = ..., reason: _Optional[str] = ..., message: _Optional[str] = ..., at: _Optional[str] = ...) -> None: ...
+
 class Workload(_message.Message):
-    __slots__ = ("namespace", "kind", "name", "desired", "ready", "restarts", "state", "reasons", "warnings", "last_warning", "last_warning_at")
+    __slots__ = ("namespace", "kind", "name", "desired", "ready", "restarts", "state", "reasons", "warnings", "last_warning", "last_warning_at", "waiting_message", "events", "rollout")
     NAMESPACE_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
@@ -215,6 +250,9 @@ class Workload(_message.Message):
     WARNINGS_FIELD_NUMBER: _ClassVar[int]
     LAST_WARNING_FIELD_NUMBER: _ClassVar[int]
     LAST_WARNING_AT_FIELD_NUMBER: _ClassVar[int]
+    WAITING_MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    EVENTS_FIELD_NUMBER: _ClassVar[int]
+    ROLLOUT_FIELD_NUMBER: _ClassVar[int]
     namespace: str
     kind: str
     name: str
@@ -226,7 +264,10 @@ class Workload(_message.Message):
     warnings: int
     last_warning: str
     last_warning_at: str
-    def __init__(self, namespace: _Optional[str] = ..., kind: _Optional[str] = ..., name: _Optional[str] = ..., desired: _Optional[int] = ..., ready: _Optional[int] = ..., restarts: _Optional[int] = ..., state: _Optional[str] = ..., reasons: _Optional[_Iterable[str]] = ..., warnings: _Optional[int] = ..., last_warning: _Optional[str] = ..., last_warning_at: _Optional[str] = ...) -> None: ...
+    waiting_message: str
+    events: _containers.RepeatedCompositeFieldContainer[WorkloadEvent]
+    rollout: Rollout
+    def __init__(self, namespace: _Optional[str] = ..., kind: _Optional[str] = ..., name: _Optional[str] = ..., desired: _Optional[int] = ..., ready: _Optional[int] = ..., restarts: _Optional[int] = ..., state: _Optional[str] = ..., reasons: _Optional[_Iterable[str]] = ..., warnings: _Optional[int] = ..., last_warning: _Optional[str] = ..., last_warning_at: _Optional[str] = ..., waiting_message: _Optional[str] = ..., events: _Optional[_Iterable[_Union[WorkloadEvent, _Mapping]]] = ..., rollout: _Optional[_Union[Rollout, _Mapping]] = ...) -> None: ...
 
 class NamespaceHealth(_message.Message):
     __slots__ = ("namespace", "workloads", "error")

@@ -45,13 +45,14 @@ export const fakeLogSource: LogSource = async (query) => {
 
 /** The payments demo's health, as the worker summarizes it from the API. */
 export const fakeHealthSource: HealthSource = async (namespaces) => namespaces.map((namespace) => ({
-  namespace, error: '', workloads: summarize(namespace,
-    [{ metadata: { name: 'payments-processor' }, spec: { replicas: 1 }, status: {} },
+  namespace, error: '', workloads: summarize(namespace, {
+    deployments: [{ metadata: { name: 'payments-processor' }, spec: { replicas: 1 }, status: {} },
       { metadata: { name: 'payments-gateway' }, spec: { replicas: 2 }, status: { readyReplicas: 2 } }],
-    [],
-    [{ metadata: { name: 'payments-processor-7d9f8c6b5d-x2k4p', ownerReferences: [{ kind: 'ReplicaSet', name: 'payments-processor-7d9f8c6b5d' }] },
+    pods: [{ metadata: { name: 'payments-processor-7d9f8c6b5d-x2k4p', ownerReferences: [{ kind: 'ReplicaSet', name: 'payments-processor-7d9f8c6b5d' }] },
       status: { phase: 'Running', containerStatuses: [{ restartCount: 12, ready: false,
         state: { waiting: { reason: 'CrashLoopBackOff' } }, lastState: { terminated: { reason: 'Error', exitCode: 1 } } }] } }],
-    [{ involvedObject: { kind: 'Pod', name: 'payments-processor-7d9f8c6b5d-x2k4p' }, count: 40,
-      message: 'Back-off restarting failed container processor', lastTimestamp: new Date().toISOString(), metadata: { name: 'e1' } }]),
+    events: [{ type: 'Warning', reason: 'BackOff', involvedObject: { kind: 'Pod', name: 'payments-processor-7d9f8c6b5d-x2k4p' },
+      count: 40, message: 'Back-off restarting failed container processor', lastTimestamp: new Date().toISOString(),
+      metadata: { name: 'e1' } }],
+  }),
 }));

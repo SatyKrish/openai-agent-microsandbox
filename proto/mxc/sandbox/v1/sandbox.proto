@@ -158,6 +158,27 @@ message ReadLogsResponse {
 
 message HealthRequest {}
 
+message ImageChange {
+  string container = 1;
+  string from = 2;
+  string to = 3;
+}
+
+message Rollout {
+  uint32 revision = 1;           // the deployment's newest revision
+  string at = 2;                 // when its ReplicaSet was created
+  repeated string images = 3;
+  uint32 previous_revision = 4;  // 0: no earlier revision is kept
+  repeated ImageChange changed = 5;
+}
+
+message WorkloadEvent {
+  string type = 1;               // Normal or Warning
+  string reason = 2;
+  string message = 3;            // redacted
+  string at = 4;
+}
+
 message Workload {
   string namespace = 1;
   string kind = 2;               // Deployment, StatefulSet or Pod
@@ -170,6 +191,9 @@ message Workload {
   uint32 warnings = 9;           // warning events in the last hour
   string last_warning = 10;      // redacted
   string last_warning_at = 11;
+  string waiting_message = 12;   // the kubelet's own words, redacted, e.g. the registry's reply to a pull
+  repeated WorkloadEvent events = 13; // the latest few in the last hour, of any type
+  Rollout rollout = 14;          // a Deployment's latest rollout; unset for others
 }
 
 message NamespaceHealth {

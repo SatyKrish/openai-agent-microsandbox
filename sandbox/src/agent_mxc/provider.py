@@ -88,6 +88,12 @@ def validate_manifest(manifest: Manifest) -> None:
         validate(entry)
 
 
+def _rollout(message) -> dict:
+    return {"revision": message.revision, "at": message.at, "images": list(message.images),
+            "previous_revision": message.previous_revision or None,
+            "changed": [{"container": item.container, "from": getattr(item, "from"), "to": item.to} for item in message.changed]}
+
+
 class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
     """Bound to one worker. ``worker`` names it in saved session state, so a session
     resumes only on the worker that holds its workspace.
@@ -130,7 +136,10 @@ class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
                 {"kind": workload.kind, "name": workload.name, "desired": workload.desired, "ready": workload.ready,
                  "restarts": workload.restarts, "state": workload.state, "reasons": list(workload.reasons),
                  "warnings": workload.warnings, "last_warning": workload.last_warning,
-                 "last_warning_at": workload.last_warning_at}
+                 "last_warning_at": workload.last_warning_at, "waiting_message": workload.waiting_message,
+                 "events": [{"type": event.type, "reason": event.reason, "message": event.message, "at": event.at}
+                            for event in workload.events],
+                 "rollout": _rollout(workload.rollout) if workload.HasField("rollout") else None}
                 for workload in item.workloads]}
             for item in reply.namespaces]}
 
