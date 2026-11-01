@@ -22,7 +22,7 @@ export DOCKER_HOST := unix://$(HOME)/.colima/$(COLIMA_PROFILE)/docker.sock
 endif
 KUBECTL := kubectl --context $(KUBE_CONTEXT)
 
-.PHONY: all cluster images load secrets deploy demo ui verify loadtest journal logs status test test-worker test-python proto clean teardown
+.PHONY: all cluster images load secrets deploy demo ui verify loadtest isolation journal logs status test test-worker test-python proto clean teardown
 
 all: cluster images load secrets deploy demo
 
@@ -74,6 +74,15 @@ verify: ## Boundary probes and a scripted investigation, in the cluster, without
 
 loadtest: ## Many conversations and users at once, in the cluster, without a model
 	$(KUBECTL) -n sre-system exec sre-harness-payments-0 -c harness -- python -m examples.sre.loadtest
+
+isolation: ## One session's logs and evidence out of every other's reach, in the cluster and from the host
+	@mkdir -p artifacts; status=0; \
+	  $(KUBECTL) -n sre-system exec sre-harness-payments-0 -c harness -- python -m examples.sre.isolation \
+	    > artifacts/isolation.out 2>&1 || status=1; \
+	  grep -v '^STATE ' artifacts/isolation.out; \
+	  uv run --locked python -m examples.sre.isolation --host-check artifacts/isolation.out --context $(KUBE_CONTEXT) \
+	    || status=1; \
+	  rm -f artifacts/isolation.out; exit $$status
 
 journal: ## The worker's audit journal of every command
 	$(KUBECTL) -n sre-system exec sre-sandbox-payments-0 -c worker -- \
