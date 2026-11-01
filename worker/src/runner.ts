@@ -6,9 +6,12 @@
 // read-only system baseline, a private /tmp, a cleared environment and a socket
 // filter. The session's workspace is the only writable host path; the worker's
 // journal and other sessions are not mounted. Egress is closed, or open only to
-// the Kubernetes API service. Inside, prlimit caps address space, CPU time and
-// open files, and choom makes the command the first thing the kernel kills
-// under memory pressure, ahead of the worker itself.
+// the worker's read-only Kubernetes API proxy (kube-proxy.ts), through MXC's
+// proxy-only mode; the container holds no Kubernetes credentials. Inside, prlimit
+// caps address space, CPU time and open files, and choom makes the command the
+// first thing the kernel kills under memory pressure, ahead of the worker itself.
+
+import path from 'node:path';
 
 import { run, type ContainerRequest, type ExecutionResult, type NetworkPolicy } from '@microsoft/mxc-sdk/v1';
 
@@ -20,29 +23,32 @@ export interface RunResult {
   exitCode: number;
   timedOut: boolean;
   durationMs: number;
+  warnings?: string[];  // MXC's own warnings about the run, for the journal and the worker's log
 }
 
 export function quote(word: string): string {
   return /^[A-Za-z0-9_./:=,@+%-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Where the worker writes the containers' kubeconfig; mounted read-only into each. */
+export function kubeDir(config: Config): string {
+  return path.join(config.dataDir, 'kube');
+}
+
+function kubeAccess(config: Config): boolean {
+  return config.egress === 'kube-api' && config.kubeApi !== null;
+}
+
 export function network(config: Config): NetworkPolicy {
-  const ingress = { default: 'deny', hostLoopback: 'deny' } as const;
-  if (config.egress === 'kube-api' && config.kubeApi) {
-    return {
-      egress: {
-        default: 'deny',
-        allow: [{ to: [{ cidr: `${config.kubeApi.host}/32` }], ports: [{ protocol: 'tcp', port: config.kubeApi.port }] }],
-      },
-      ingress,
-    } as NetworkPolicy;
-  }
-  return { egress: { default: 'deny' }, ingress } as NetworkPolicy;
+  const policy: NetworkPolicy = { egress: { default: 'deny' }, ingress: { default: 'deny', hostLoopback: 'deny' } };
+  // Proxy-only: the proxy's loopback port, seen as 10.0.2.2 inside, is the one reachable address.
+  if (kubeAccess(config)) policy.runtimeConfig = { networkProxy: `http://127.0.0.1:${config.kubeProxyPort}` };
+  return policy;
 }
 
 export function describeEgress(config: Config): string {
-  return config.egress === 'kube-api' && config.kubeApi
-    ? `Kubernetes API only (${config.kubeApi.host}:${config.kubeApi.port})` : 'none';
+  return kubeAccess(config)
+    ? `Kubernetes API, read-only, through the worker's proxy (to ${config.kubeApi!.host}:${config.kubeApi!.port})` : 'none';
 }
 
 export function buildRequest(config: Config, root: string, argv: readonly string[], cwd: string, timeoutMs: number):
@@ -54,15 +60,16 @@ export function buildRequest(config: Config, root: string, argv: readonly string
     HOME: '/tmp', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', NO_COLOR: '1', PYTHONDONTWRITEBYTECODE: '1',
     KUBECACHEDIR: '/tmp/.kube/cache',
   };
-  if (config.kubeApi) {
-    environment.KUBERNETES_SERVICE_HOST = config.kubeApi.host;
-    environment.KUBERNETES_SERVICE_PORT = String(config.kubeApi.port);
+  const readonlyPaths = [...config.readonlyPaths];
+  if (kubeAccess(config)) {
+    environment.KUBECONFIG = path.join(kubeDir(config), 'config');
+    readonlyPaths.push(kubeDir(config));
   }
   const request: ContainerRequest = {
     command: `exec ${limits}${argv.map(quote).join(' ')}`,
     workingDirectory: cwd,
     timeoutMs,
-    filesystem: { readwritePaths: [root], readonlyPaths: config.readonlyPaths },
+    filesystem: { readwritePaths: [root], readonlyPaths },
     network: network(config),
     environment,
     inheritDefaultEnvironment: true,
@@ -71,6 +78,11 @@ export function buildRequest(config: Config, root: string, argv: readonly string
   return request;
 }
 
+/**
+ * One workload in a transient container: MXC's create-and-run operation with
+ * captured output. Bubblewrap has no persistent container lifecycle, so the
+ * session's state lives in its workspace directory, not in a container.
+ */
 export async function runInContainer(config: Config, root: string, argv: readonly string[], cwd: string,
   timeoutMs: number): Promise<RunResult> {
   const started = performance.now();
@@ -81,5 +93,6 @@ export async function runInContainer(config: Config, root: string, argv: readonl
     exitCode: result.timedOut ? 124 : result.exitCode,
     timedOut: result.timedOut,
     durationMs: Math.round(performance.now() - started),
+    warnings: result.warnings,
   };
 }

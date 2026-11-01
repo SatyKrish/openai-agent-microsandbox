@@ -9,9 +9,9 @@ spec:
   podSelector: {}
   policyTypes: [Ingress, Egress]
 ---
-# The worker accepts gRPC from its own harness only. Its containers reach the
-# Kubernetes API (MXC's egress rules allow only the API service address), so the
-# pod may connect to the API server's ports and nowhere else, not even DNS.
+# The worker accepts gRPC from its own harness only. Its read-only API proxy is the
+# pod's one outbound client (containers reach only the proxy), so the pod may
+# connect to the API server's ports and nowhere else, not even DNS.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

@@ -159,7 +159,7 @@ def test_the_shared_page_is_configured_by_the_agent_and_shows_its_worker(worker,
         for path in ("runbooks/other.md", "runbooks/../threads.sqlite3"):
             assert client.get(f"/api/starting-files/{path}").status_code == 404
         info = client.get("/api/worker").json()
-        assert info["status"] == "ok" and info["domain"] == "payments" and "Kubernetes API only" in info["egress"]
+        assert info["status"] == "ok" and info["domain"] == "payments" and "through the worker's proxy" in info["egress"]
         # Only loopback hosts may reach the server, and only same-origin requests reach ChatKit.
         assert client.get("/", headers={"host": "evil.example"}).status_code == 400
         assert client.post("/chatkit", content=b"{}", headers={"origin": "http://evil.example"}).status_code == 403

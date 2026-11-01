@@ -4,7 +4,7 @@
 // Worker settings, all from the environment. Limits are ceilings: a request can
 // ask for less, never more.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
 
@@ -22,6 +22,9 @@ export interface Config {
   containment: 'bubblewrap' | 'seatbelt' | 'auto';
   egress: Egress;
   kubeApi: { host: string; port: number } | null;
+  kubeProxyPort: number;
+  kubeTokenFile: string;
+  kubeCaFile: string;
   readonlyPaths: string[];
   timeoutMs: number;
   maxOutputBytes: number;
@@ -56,13 +59,12 @@ export function loadConfig(): Config {
   const host = process.env.KUBERNETES_SERVICE_HOST;
   const kubeApi = host ? { host, port: Number(process.env.KUBERNETES_SERVICE_PORT || 443) } : null;
   if (kubeApi && !/^[0-9.]+$/.test(kubeApi.host)) {
-    // MXC egress rules take IP literals only; a name would need DNS the sandbox does not have.
+    // The API proxy dials it by address: the worker pod's NetworkPolicy allows no DNS.
     throw new Error('KUBERNETES_SERVICE_HOST must be an IPv4 address');
   }
-  // The pod's own service-account token, mounted read-only into every container so
-  // kubectl's in-cluster configuration works. /var/run is a link to /run in the image.
-  const serviceAccount = '/run/secrets/kubernetes.io/serviceaccount';
-  const readonlyPaths = list('MXC_READONLY_PATHS', existsSync(serviceAccount) ? [serviceAccount] : []);
+  // Containers never get the service-account token: the worker's API proxy holds it.
+  const serviceAccount = '/var/run/secrets/kubernetes.io/serviceaccount';
+  const readonlyPaths = list('MXC_READONLY_PATHS', []);
   const tokenFile = process.env.MXC_WORKER_TOKEN_FILE;
   const token = tokenFile ? readFileSync(tokenFile, 'utf8').trim() : null;
   if (tokenFile && !token) throw new Error('MXC_WORKER_TOKEN_FILE is empty');
@@ -77,6 +79,9 @@ export function loadConfig(): Config {
     containment,
     egress: egress === 'kube-api' && !kubeApi ? 'none' : egress,
     kubeApi,
+    kubeProxyPort: integer('MXC_KUBE_PROXY_PORT', 18080),
+    kubeTokenFile: process.env.MXC_KUBE_TOKEN_FILE ?? `${serviceAccount}/token`,
+    kubeCaFile: process.env.MXC_KUBE_CA_FILE ?? `${serviceAccount}/ca.crt`,
     readonlyPaths,
     timeoutMs,
     maxOutputBytes: integer('MXC_MAX_OUTPUT_BYTES', 1 * MIB),

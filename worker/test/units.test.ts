@@ -66,10 +66,16 @@ test('container requests confine the command', () => {
   assert.deepEqual(request.filesystem?.readwritePaths, ['/sandboxes/active/s-1']);
   assert.deepEqual(request.containment, { type: 'bubblewrap' });
   assert.equal(request.environment?.HOME, '/tmp');
-  assert.deepEqual(request.network, { egress: { default: 'deny', allow: [{ to: [{ cidr: '10.96.0.1/32' }],
-    ports: [{ protocol: 'tcp', port: 443 }] }] }, ingress: { default: 'deny', hostLoopback: 'deny' } });
+  // Kubernetes only through the worker's proxy: no token or API address in the container.
+  assert.deepEqual(request.network, { egress: { default: 'deny' }, ingress: { default: 'deny', hostLoopback: 'deny' },
+    runtimeConfig: { networkProxy: 'http://127.0.0.1:18080' } });
+  assert.deepEqual(request.filesystem?.readonlyPaths, ['/sandboxes/kube']);
+  assert.equal(request.environment?.KUBECONFIG, '/sandboxes/kube/config');
+  assert.ok(!Object.keys(request.environment ?? {}).some((name) => name.startsWith('KUBERNETES_')));
   const closed = buildRequest(config('/sandboxes', { egress: 'none' }), '/w', ['true'], '/w', 1000);
-  assert.deepEqual(closed.network?.egress, { default: 'deny' });
+  assert.deepEqual(closed.network, { egress: { default: 'deny' }, ingress: { default: 'deny', hostLoopback: 'deny' } });
+  assert.deepEqual(closed.filesystem?.readonlyPaths, []);
+  assert.equal(closed.environment?.KUBECONFIG, undefined);
 });
 
 test('workspace paths stay inside the session', async () => {

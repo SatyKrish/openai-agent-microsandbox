@@ -1,7 +1,7 @@
 # The MXC sandbox worker for payments. Every command the agent runs starts in its
 # own Microsoft eXecution Container (Bubblewrap backend) inside this pod, over the
 # conversation's workspace on the PVC. The pod holds the read-only payments
-# identity and never the model's API key.
+# identity and never the model's API key; the containers hold neither.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -18,7 +18,8 @@ spec:
       labels: {app.kubernetes.io/name: sre-sandbox, sre.example.com/domain: payments}
     spec:
       serviceAccountName: payments-sre-sa
-      # kubectl in the containers uses this token (bound, rotated by the kubelet).
+      # The worker's read-only API proxy uses this token (bound, rotated by the kubelet);
+      # it is never mounted into an MXC container.
       automountServiceAccountToken: true
       enableServiceLinks: false
       securityContext:
@@ -37,7 +38,7 @@ spec:
             - {name: SRE_DOMAIN, value: payments}
             - {name: SRE_NAMESPACES, value: payments}
             - {name: DATA_DIR, value: /sandboxes}
-            # Containers may reach the Kubernetes API service and nothing else.
+            # Containers reach only the worker's read-only Kubernetes API proxy.
             - {name: MXC_EGRESS, value: kube-api}
             - {name: MXC_TIMEOUT_MS, value: "60000"}
             - {name: MXC_MAX_CONCURRENT, value: "8"}

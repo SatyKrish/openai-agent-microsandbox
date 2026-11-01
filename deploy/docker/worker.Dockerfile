@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # The MXC sandbox worker. Build with the repository root as the context.
-# Everything a sandboxed command can use is baked in here, read-only: MXC's
-# Bubblewrap backend mounts /usr, /bin, /lib and /etc into each container and
-# nothing else from the image. kubectl goes in /usr/bin for that reason.
+# Everything a workload can use is baked in here, read-only: MXC's Bubblewrap
+# backend mounts a deny-by-default baseline into each container (/bin, /sbin,
+# /lib*, /usr/bin, /usr/sbin, /usr/lib*, /usr/libexec, /usr/share and /etc) and
+# nothing else from the image; /usr/local is not in it. kubectl goes in /usr/bin
+# for that reason.
 
 FROM node:24-trixie-slim AS build
 # node-pty, a dependency of the MXC SDK, has no prebuilt Linux binary.
@@ -21,9 +23,10 @@ RUN npx tsc -p tsconfig.build.json && npm prune --omit=dev
 FROM node:24-trixie-slim
 ARG TARGETARCH
 ARG KUBECTL_VERSION=v1.35.0
-# bubblewrap: MXC's Linux backend. slirp4netns, iptables, iproute2 and util-linux
-# (unshare, nsenter, prlimit, choom): MXC's private-network mode, which lets a
-# container reach the Kubernetes API and nothing else. python3 and jq: analysis.
+# bubblewrap (0.5 or later): MXC's Linux backend. slirp4netns, iptables (nf_tables),
+# iproute2 and util-linux (unshare, nsenter, prlimit, choom): the host tools MXC's
+# proxy-only network mode needs, which lets a container reach the worker's
+# read-only API proxy and nothing else. python3 and jq: analysis.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bubblewrap slirp4netns iptables iproute2 util-linux ca-certificates python3 jq curl \
     && curl -fsSLo /usr/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \

@@ -65,7 +65,7 @@ test('requests without the pair token are refused', async () => {
   await assert.rejects(call('Info', {}), (error: grpc.ServiceError) => error.code === grpc.status.UNAUTHENTICATED);
   const info = await call<{ domain: string; egress: string }>('Info', {}, auth());
   assert.equal(info.domain, 'payments');
-  assert.match(info.egress, /Kubernetes API only/);
+  assert.match(info.egress, /read-only, through the worker's proxy/);
 });
 
 test('a session runs commands, records kubectl reads as evidence, and keeps files', async () => {
@@ -116,4 +116,40 @@ test('a session runs commands, records kubectl reads as evidence, and keeps file
   await fs.access(path.join(data, 'history', 'conv-a', 'journal.jsonl'));
   await call('DestroySession', { session_id: 'conv-a', purge_history: true }, auth());
   await assert.rejects(fs.access(path.join(data, 'history', 'conv-a')));
+});
+
+test("MXC's structured errors and warnings are handled as its docs describe", async () => {
+  const { MxcError } = await import('@microsoft/mxc-sdk/v1');
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mxc-errors-'));
+  let next: 'backend_error' | 'policy_validation' | 'warn' = 'backend_error';
+  const runner: Runner = async () => {
+    if (next === 'warn') {
+      return { stdout: 'ok\n', stderr: '', exitCode: 0, timedOut: false, durationMs: 1,
+        warnings: ['Bubblewrap: IPv6 destination is unreachable'] };
+    }
+    throw new MxcError(next, `${next} from the backend`);
+  };
+  const other = createServer(config(dataDir, { maxConcurrent: 1 }), runner);
+  const port = await new Promise<number>((resolve, reject) =>
+    other.bindAsync('127.0.0.1:0', grpc.ServerCredentials.createInsecure(), (error, bound) =>
+      (error ? reject(error) : resolve(bound))));
+  const Client = grpc.makeGenericClientConstructor(loadService(), 'Sandbox');
+  const direct = new Client(`127.0.0.1:${port}`, grpc.credentials.createInsecure()) as grpc.Client & Record<string, Function>;
+  const invoke = <T>(method: string, request: object) => new Promise<T>((resolve, reject) =>
+    direct[method]!(request, (error: grpc.ServiceError | null, response: T) => (error ? reject(error) : resolve(response))));
+  try {
+    await invoke('InitSession', { session_id: 'conv-e' });
+    await assert.rejects(invoke('Exec', { session_id: 'conv-e', argv: ['true'] }),
+      (error: grpc.ServiceError) => error.code === grpc.status.UNAVAILABLE && /backend_error/.test(error.details));
+    next = 'policy_validation';
+    await assert.rejects(invoke('Exec', { session_id: 'conv-e', argv: ['true'] }),
+      (error: grpc.ServiceError) => error.code === grpc.status.FAILED_PRECONDITION);
+    next = 'warn';
+    await invoke('Exec', { session_id: 'conv-e', argv: ['true'] });
+    const journal = await fs.readFile(path.join(dataDir, 'history', 'conv-e', 'journal.jsonl'), 'utf8');
+    assert.match(journal, /"mxc_warnings":\["Bubblewrap: IPv6 destination is unreachable"\]/);
+  } finally {
+    direct.close();
+    other.forceShutdown();
+  }
 });

@@ -18,7 +18,9 @@ import time
 from pathlib import Path
 
 PROBES = [
-    ("container has no capabilities", "grep -Eq '^CapEff:[[:space:]]+0+$' /proc/self/status", 0, None),
+    # MXC's own proxy-mode tests require all three sets to be zero.
+    ("container has no capabilities (bounding, effective, permitted)",
+     "test \"$(grep -cE '^Cap(Bnd|Eff|Prm):[[:space:]]+0+$' /proc/self/status)\" = 3", 0, None),
     ("container sees only its own processes", "test \"$(ls /proc | grep -cE '^[0-9]+$')\" -lt 10", 0, None),
     ("worker journal is not mounted", "test ! -e /sandboxes/history", 0, None),
     ("other workspaces are not mounted", 'test "$(ls /sandboxes/active)" = "$(basename "$PWD")"', 0, None),
@@ -26,11 +28,19 @@ PROBES = [
     ("no model API key in the environment", 'test -z "${OPENAI_API_KEY:-}" && ! env | grep -qi openai', 0, None),
     ("no route to the public internet",
      "python3 -c \"import socket; socket.create_connection(('1.1.1.1', 443), 3)\"", "nonzero", None),
-    ("Kubernetes API reachable", "kubectl version --output=yaml", 0, "serverVersion"),
+    ("no Kubernetes token in the container",
+     "test ! -e /var/run/secrets/kubernetes.io/serviceaccount && test ! -e /run/secrets/kubernetes.io && "
+     "! env | grep -q '^KUBERNETES_'", 0, None),
+    ("no direct route to the Kubernetes API",
+     f"python3 -c \"import socket; socket.create_connection(('{os.environ.get('KUBERNETES_SERVICE_HOST', '10.96.0.1')}', "
+     f"{os.environ.get('KUBERNETES_SERVICE_PORT', '443')}), 3)\"", "nonzero", None),
+    ("Kubernetes API reachable through the worker's proxy", "kubectl version --output=yaml", 0, "serverVersion"),
     ("reads pods in payments", "kubectl get pods -n payments", 0, "payments-"),
     ("cannot read Secrets", "kubectl get secrets -n payments", "nonzero", "Forbidden"),
     ("cannot read other namespaces", "kubectl get pods -n kube-system", "nonzero", "Forbidden"),
-    ("cannot delete pods", "kubectl auth can-i delete pods -n payments", "nonzero", "no"),
+    ("writes are refused before they reach the API",
+     "kubectl delete pod payments-probe -n payments --dry-run=server", "nonzero", "read-only"),
+    ("exec into pods is refused", "kubectl exec -n payments deploy/payments-gateway -- true", "nonzero", None),
     ("credentials in output are redacted", "echo DATABASE_URL=postgres://app:hunter2@db/orders password=hunter2hunter2",
      0, "postgres://app:[REDACTED]@db/orders password=[REDACTED]"),
 ]

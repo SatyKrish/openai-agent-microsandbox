@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
+import { MxcError } from '@microsoft/mxc-sdk/v1';
 
 import type { Config } from './config.js';
 import { evidenceName, kubectlRead } from './evidence.js';
@@ -101,6 +102,7 @@ export function createServer(config: Config, runner: Runner = runInContainer): g
   const sessions = new KeyedQueue();
   const slots = new Semaphore(config.maxConcurrent);
   const expected = config.token ? Buffer.from(`Bearer ${config.token}`) : null;
+  const warned = new Set<string>();
 
   function authorize(metadata: grpc.Metadata): void {
     if (!expected) return;
@@ -125,13 +127,14 @@ export function createServer(config: Config, runner: Runner = runInContainer): g
           code = { invalid: grpc.status.INVALID_ARGUMENT, not_found: grpc.status.NOT_FOUND,
             too_large: grpc.status.RESOURCE_EXHAUSTED }[error.kind];
           message = error.message;
+        } else if (error instanceof MxcError) {
+          // MXC's structured errors: the host or backend failed, or this worker built a request MXC refused.
+          code = ['backend_unavailable', 'backend_error'].includes(error.code)
+            ? grpc.status.UNAVAILABLE : grpc.status.FAILED_PRECONDITION;
+          message = `MXC could not launch the container (${error.code})`;
+          log('error', `${name} failed in MXC`, { code: error.code, error: error.message.slice(0, 2000) });
         } else {
-          const detail = error as { code?: string; message?: string };
-          if (detail.code && typeof detail.code === 'string' && /backend|unsupported|policy/.test(detail.code)) {
-            code = grpc.status.UNAVAILABLE;
-            message = `MXC could not launch the container (${detail.code})`;
-          }
-          log('error', `${name} failed`, { error: String(detail.message ?? error).slice(0, 2000) });
+          log('error', `${name} failed`, { error: String((error as Error)?.message ?? error).slice(0, 2000) });
         }
         callback({ code, details: message });
       }
@@ -145,6 +148,11 @@ export function createServer(config: Config, runner: Runner = runInContainer): g
     const cwd = request.cwd ? workspaces.lexical(id, request.cwd) : root;
     const timeoutMs = Math.min(request.timeout_ms || config.timeoutMs, config.timeoutMs);
     const result = await slots.use(() => runner(config, root, request.argv, cwd, timeoutMs));
+    for (const warning of result.warnings ?? []) {
+      // Host-level notes (a resolver it could not pin, an IPv6 rule with no route); log each once.
+      if (!warned.has(warning)) log('warn', 'MXC warning', { warning: warning.slice(0, 1000) });
+      warned.add(warning);
+    }
     const stdoutText = redact(result.stdout);
     let stderrText = redact(result.stderr);
     let evidence: EvidenceEntry | undefined;
@@ -167,7 +175,8 @@ export function createServer(config: Config, runner: Runner = runInContainer): g
     const stdout = cap(stdoutText, config.maxOutputBytes);
     const stderr = cap(stderrText, config.maxOutputBytes);
     await journal.command(id, { argv: request.argv, cwd, exitCode: result.exitCode, timedOut: result.timedOut,
-      durationMs: result.durationMs, stdout: stdout.data, stderr: stderr.data, evidenceSeq: evidence?.seq });
+      durationMs: result.durationMs, stdout: stdout.data, stderr: stderr.data, evidenceSeq: evidence?.seq,
+      warnings: result.warnings });
     return { stdout: stdout.data, stderr: stderr.data, exit_code: result.exitCode, timed_out: result.timedOut,
       duration_ms: result.durationMs, truncated: stdout.truncated || stderr.truncated,
       evidence_path: evidence?.path ?? '' };
