@@ -22,7 +22,7 @@ export DOCKER_HOST := unix://$(HOME)/.colima/$(COLIMA_PROFILE)/docker.sock
 endif
 KUBECTL := kubectl --context $(KUBE_CONTEXT)
 
-.PHONY: all cluster images load secrets deploy demo ui verify journal logs status test test-worker test-python proto clean teardown
+.PHONY: all cluster images load secrets deploy demo ui verify loadtest journal logs status test test-worker test-python proto clean teardown
 
 all: cluster images load secrets deploy demo
 
@@ -72,6 +72,9 @@ ui: ## Port-forward the harness UI to http://localhost:$(UI_PORT)
 verify: ## Boundary probes and a scripted investigation, in the cluster, without a model
 	$(KUBECTL) -n sre-system exec sre-harness-payments-0 -c harness -- python -m examples.sre.verify
 
+loadtest: ## Many conversations and users at once, in the cluster, without a model
+	$(KUBECTL) -n sre-system exec sre-harness-payments-0 -c harness -- python -m examples.sre.loadtest
+
 journal: ## The worker's audit journal of every command
 	$(KUBECTL) -n sre-system exec sre-sandbox-payments-0 -c worker -- \
 	  sh -c 'for f in /sandboxes/history/*/journal.jsonl; do echo "== $$f"; cat "$$f"; done'
@@ -93,10 +96,10 @@ test-python: ## Needs the worker built (test-worker)
 
 proto: ## Regenerate the Python stubs from proto/
 	uvx --from grpcio-tools==1.85.1 python -m grpc_tools.protoc -Iproto/mxc/sandbox/v1 \
-	  --python_out=provider/src/agent_mxc/proto --pyi_out=provider/src/agent_mxc/proto \
-	  --grpc_python_out=provider/src/agent_mxc/proto proto/mxc/sandbox/v1/sandbox.proto
+	  --python_out=sandbox/src/agent_mxc/proto --pyi_out=sandbox/src/agent_mxc/proto \
+	  --grpc_python_out=sandbox/src/agent_mxc/proto proto/mxc/sandbox/v1/sandbox.proto
 	sed -i.bak 's/^import sandbox_pb2 as sandbox__pb2/from . import sandbox_pb2 as sandbox__pb2/' \
-	  provider/src/agent_mxc/proto/sandbox_pb2_grpc.py && rm provider/src/agent_mxc/proto/sandbox_pb2_grpc.py.bak
+	  sandbox/src/agent_mxc/proto/sandbox_pb2_grpc.py && rm sandbox/src/agent_mxc/proto/sandbox_pb2_grpc.py.bak
 
 clean: ## Remove the pair and the demo; keeps the cluster
 	-$(KUBECTL) delete -f deploy/demo/payments.yaml --ignore-not-found

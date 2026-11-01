@@ -1,7 +1,7 @@
-# Workspace root: no package of its own. The SDK provider is provider/, the shared
+# Workspace root: no package of its own. The SDK provider is sandbox/, the shared
 # agent harness (with its UI) is harness/, and the SRE agent in examples/ runs from here.
 [tool.uv.workspace]
-members = ["provider", "harness"]
+members = ["sandbox", "harness"]
 
 [tool.uv.sources]
 openai-agent-mxc = { workspace = true }
@@ -17,13 +17,13 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["provider/tests", "harness/tests", "examples/sre/evals"]
+testpaths = ["sandbox/tests", "harness/tests", "examples/sre/evals"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 target-version = "py311"
-extend-exclude = ["provider/src/agent_mxc/proto"]
+extend-exclude = ["sandbox/src/agent_mxc/proto"]
 
 [tool.ruff.lint]
 select = ["E9", "F"]

@@ -11,7 +11,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT=/app/.venv
 WORKDIR /app
 COPY pyproject.toml uv.lock .python-version ./
-COPY provider ./provider
+COPY sandbox ./sandbox
 COPY harness/pyproject.toml ./harness/
 COPY harness/src ./harness/src
 RUN uv sync --locked --no-dev --all-packages

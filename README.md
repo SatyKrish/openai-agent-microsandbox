@@ -83,6 +83,10 @@ make verify             # boundary probes and a scripted investigation in the cl
 ```
 
 ```bash
+make loadtest           # many conversations and users at once in the cluster, no model usage
+```
+
+```bash
 make ui                 # http://localhost:8001
 ```
 
@@ -104,7 +108,7 @@ VM, with `@microsoft/mxc-sdk` 1.0.1 and `openai-agents` 0.24.0:
 
 - **Unit and integration tests** (`make test`): 7 worker tests (evidence
   rules, redaction, path guards against planted symlinks, the gRPC service with
-  its token) and 18 Python tests, which drive the provider, the harness and its
+  its token) and 19 Python tests, which drive the provider, the harness and its
   UI routes, and the SRE agent end to end against the worker's real gRPC
   service. These run commands on the test host, not in MXC.
 - **In the cluster** (`make verify`): all 13 container probes pass, each in its
@@ -118,11 +122,22 @@ VM, with `@microsoft/mxc-sdk` 1.0.1 and `openai-agents` 0.24.0:
 - **Live** through the UI with `gpt-6.1-terra`: one question, 57 s, 19 tool
   calls all in MXC containers, 9 kubectl reads recorded as evidence, 2 findings
   (`payments-processor`, `payments-ledger`) whose 10 quotes all matched.
+- **Concurrency** (`make loadtest`, a scripted model through the harness's
+  HTTP API, each user its own connection): one user starting 6 conversations
+  at once finished in 5.0 s; 12 users at once, more than the worker's 8
+  parallel command slots, finished in 8.8 s with every turn under 8.7 s; 3
+  users sending to one shared conversation at the same moment got 3 turns, run
+  one after another in order, with no errors. Every conversation had its own
+  workspace, its containers could see only that one, every findings check
+  passed, and deleting the 19 conversations removed their 19 workspaces.
+  Live, 3 users asking different questions at once finished in 55 s, about
+  one investigation's time; each check passed (7, 9 and 9 quotes).
 - **Cost of isolation:** about 11 ms per container without network and about
   110 ms per command round trip with the API-only network (slirp4netns and its
   rules are set up per command).
 
-Not verified here: AKS or any Kata runtime, multi-node clusters, and load.
+Not verified here: AKS or any Kata runtime, multi-node clusters, or load
+beyond a few dozen conversations.
 
 ## Differences from the reference design
 
@@ -164,7 +179,7 @@ Not verified here: AKS or any Kata runtime, multi-node clusters, and load.
 ```text
 proto/mxc/sandbox/v1/     The harness/worker gRPC contract
 worker/                   MXC sandbox worker (Node 24, TypeScript): MXC runner, workspaces, journal, evidence, redaction
-provider/                 openai-agent-mxc: MXCSandboxClient for the Agents SDK, gRPC transport, tracing
+sandbox/                  openai-agent-mxc: MXCSandboxClient for the Agents SDK, gRPC transport, tracing
 harness/                  openai-harness: the shared harness and UI, from openai-agent-substrate, adapted to MXC
 examples/sre/             The SRE agent: SandboxAgent, triage skill, runbooks, findings check, UI settings, verify
 deploy/docker/            Worker and harness images

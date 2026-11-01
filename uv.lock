@@ -16,7 +16,7 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
-    { name = "openai-agent-mxc", extras = ["tracing"], editable = "provider" },
+    { name = "openai-agent-mxc", extras = ["tracing"], editable = "sandbox" },
     { name = "openai-harness", editable = "harness" },
     { name = "pytest", specifier = ">=9.2,<10" },
     { name = "pytest-asyncio", specifier = ">=1.4,<2" },
@@ -881,7 +881,7 @@ wheels = [
 [[package]]
 name = "openai-agent-mxc"
 version = "0.1.0"
-source = { editable = "provider" }
+source = { editable = "sandbox" }
 dependencies = [
     { name = "grpcio" },
     { name = "openai-agents" },
@@ -957,7 +957,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "openai-agent-mxc", extras = ["tracing"], editable = "provider" },
+    { name = "openai-agent-mxc", extras = ["tracing"], editable = "sandbox" },
     { name = "openai-chatkit", specifier = "==1.6.5" },
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "starlette", specifier = ">=1,<2" },
