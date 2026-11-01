@@ -66,17 +66,49 @@ Role and RoleBinding, the ServiceAccount, both StatefulSets and Services, the
 `sre.example.com/domain` labels, the pair token Secret, and the harness's
 `MXC_WORKER_TARGET`, `MXC_WORKER_NAME` and `SRE_NAMESPACES`. Each domain gets
 its own pair, identity and token; a harness can reach only its own worker.
-Each domain's agent also has its own memory, on its harness's volume.
+Each domain's agent keeps its users' memory on its own harness's volume.
 
 The harness's pod keeps `terminationGracePeriodSeconds: 180`: when it stops, it
 closes its open conversations, and the SDK generates each one's memory (about
-a minute each). Lower `SRE_SESSION_IDLE_S` if many conversations are usually
-open at a rollout, or raise the grace period.
+about 65 s each with the default memory models, so two fit). Lower
+`SRE_SESSION_IDLE_S` if more conversations are usually open at a rollout, or
+raise the grace period.
 
 ## Reaching the UI
 
 The harness binds 127.0.0.1 and has no Service, so access is
 `kubectl port-forward` under Kubernetes RBAC. Anyone who can port-forward to
-the harness pod can use the agent and its model key. Before exposing it more
-widely, add sign-in in front of it and move its conversations from SQLite to a
-shared database; the harness serves one replica per domain today.
+the harness pod can use the agent and its model key, as the guest.
+
+## Signing users in
+
+Each signed-in user has their own memory; without sign-in, everyone is the
+guest and shares the guest's. To sign users in, put an authenticating proxy in
+front of the UI, such as oauth2-proxy as a sidecar in the harness pod, and set
+the harness's `SRE_USER_HEADER` to the header in which it passes the user, for
+example `X-Forwarded-Email`. The harness trusts that header, so the proxy must
+be the only way users reach the UI, and must set the header on every request,
+replacing any the browser sent. `kubectl port-forward` to the harness pod
+bypasses the proxy, so anyone allowed to use it can claim any user; keep that
+permission to operators. Conversations themselves stay visible to every user
+of the harness; only memory is per user.
+
+## Replicas follow the state backend
+
+The harness keeps four kinds of state: conversations (ChatKit threads),
+each conversation's history (an SDK session), host copies of the agent's
+outputs and evidence, and each user's memory. Today all four are files on its
+volume, so the harness is a StatefulSet with one replica per domain.
+
+| State backend | Harness | Replicas |
+| --- | --- | --- |
+| Files on a volume (today) | StatefulSet with a volume | One per domain |
+| Postgres or object storage (not built yet) | Deployment, no volume | Several per domain |
+
+A stateless harness needs all four kinds of state in the backend, not memory
+alone: threads and history in Postgres (the SDK has a SQLAlchemy session),
+host copies and memory in object storage or Postgres, and the per-conversation
+and per-user locks as database or conditional-write locks. A conversation's
+open sandbox session also lives in one replica's process between turns, so a
+stateless harness must route a conversation's messages to that replica or hand
+the session over. The workspace itself stays on the sandbox worker either way.

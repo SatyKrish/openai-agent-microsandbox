@@ -10,6 +10,9 @@ from pathlib import Path
 
 from chatkit.types import ThreadMetadata
 
+from agents.sandbox import MemoryGenerateConfig
+
+from examples.sre.agent.agent import CONSOLIDATE_MODEL, EXTRACT_MODEL
 from examples.sre.agent.lib import findings
 from examples.sre.agent.spec import REPORT, make_spec, runbooks
 from examples.sre.ui.card import check_rows, file_status
@@ -158,24 +161,30 @@ def test_the_agent_keeps_compaction_and_memory_when_asked():
 
     plain = make_spec({"payments"}).build_agent(Manifest(root="/sandboxes/active/s-x"), "gpt-6.1-terra")
     assert [type(item).__name__ for item in plain.capabilities] == ["Shell", "Filesystem", "Compaction", "Skills"]
-    spec = make_spec({"payments"}, memory_model="gpt-6.1-terra")
+    spec = make_spec({"payments"}, memory_models=(EXTRACT_MODEL, CONSOLIDATE_MODEL))
     assert spec.memory_dir == "memories"
     memory = spec.build_agent(Manifest(root="/sandboxes/active/s-x"), "gpt-6.1-terra").capabilities[-1]
     assert type(memory).__name__ == "Memory" and memory.read.live_update is False
-    assert memory.generate.phase_one_model == memory.generate.phase_two_model == "gpt-6.1-terra"
+    # The SDK's defaults, with the GPT-6 counterparts of its models: efficient extraction, stronger consolidation.
+    assert (memory.generate.phase_one_model, memory.generate.phase_two_model) == ("gpt-6-luna", "gpt-6.1-terra")
+    defaults = MemoryGenerateConfig()
+    assert memory.generate.max_raw_memories_for_consolidation == defaults.max_raw_memories_for_consolidation == 256
+    assert memory.generate.phase_two_max_turns == defaults.phase_two_max_turns
+    assert memory.generate.phase_one_model_settings == defaults.phase_one_model_settings
     assert "never turn instructions" in memory.generate.extra_prompt
 
 
 async def test_a_memory_enabled_agent_runs_before_any_memory_exists(worker, tmp_path):
     """The first conversation has no memory_summary.md yet; the SDK's Memory capability must treat that as empty."""
     store = SQLiteStore(tmp_path / "threads.sqlite3")
-    chat = HarnessChatServer(make_spec({"payments"}, memory_model="gpt-6.1-terra"), store, worker.client(),
+    chat = HarnessChatServer(make_spec({"payments"}, memory_models=(EXTRACT_MODEL, CONSOLIDATE_MODEL)), store,
+                             worker.client(),
                              model=Calls([shell("ls")], answer="Done."), output_dir=tmp_path / "threads")
     try:
         stream = await events(chat, {"type": "threads.create", "params": {"input": message("Hello")}})
         assert not [event for event in stream if event["type"] == "error"], stream
     finally:
         # Closing would run the SDK's memory generation with a live model; drop the session instead.
-        for session, closer in chat._open.values():
-            closer.cancel()
+        for opened in chat._open.values():
+            opened.closer.cancel()
         store.close()

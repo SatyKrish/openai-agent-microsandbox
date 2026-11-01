@@ -47,6 +47,12 @@ spec:
             # its memory then, and the harness shares it with later conversations (/data/memory).
             - {name: SRE_SESSION_IDLE_S, value: "300"}
             - {name: SRE_MAX_TURNS, value: "25"}
+            # Each user's memory forgets conversations this long after their last message. Without
+            # SRE_USER_HEADER (set by an authenticating proxy in front of the UI), every user is the
+            # guest and shares the guest's memory.
+            - {name: SRE_MEMORY_MAX_AGE_DAYS, value: "90"}
+            - {name: MEMORY_EXTRACT_MODEL, value: gpt-6-luna}
+            - {name: MEMORY_CONSOLIDATE_MODEL, value: gpt-6.1-terra}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -77,15 +77,22 @@ async function loadMemory(getJSON) {
 function memorySection(el, config, remembered) {
   if (!config.memory) return null;
   const minutes = Math.round((config.idle_close_s || 300) / 60);
+  // Memory is per signed-in user; without sign-in everyone shares the guest's.
+  const whose = !remembered || remembered.shared ? "the guest memory, shared by everyone not signed in"
+    : `${remembered.user}'s memory`;
+  const kept = config.memory_max_age_days ? ` Conversations are forgotten ${config.memory_max_age_days} days after `
+    + "their last message." : "";
   if (!remembered?.text) {
-    return el("p", { class: "sre-board-note sre-memory-empty" }, "No memory yet. After a conversation has been idle for "
-      + `${minutes} minute${minutes === 1 ? "" : "s"}, the agent distils what it learned; later investigations start from it.`);
+    return el("p", { class: "sre-board-note sre-memory-empty" }, `Nothing in ${whose} yet. After a conversation has been `
+      + `idle for ${minutes} minute${minutes === 1 ? "" : "s"}, the agent distils what it learned; later investigations `
+      + `start from it.${kept}`);
   }
   const updated = remembered.updated_at ? new Date(remembered.updated_at).toLocaleString() : "";
   return el("details", { class: "sre-memory" },
     el("summary", {}, "What the agent remembers",
-      el("span", { class: "sre-board-note" }, ` · from ${plural(remembered.conversations, "earlier conversation")}`
+      el("span", { class: "sre-board-note" }, ` · ${whose} · from ${plural(remembered.conversations, "conversation")}`
         + (updated ? ` · updated ${updated}` : ""))),
+    kept ? el("p", { class: "sre-board-note" }, kept.trim()) : null,
     el("pre", {}, remembered.text));
 }
 

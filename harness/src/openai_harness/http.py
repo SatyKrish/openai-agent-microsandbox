@@ -53,11 +53,18 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
                 starting_files: dict[str, bytes] | None = None,
                 worker: Callable[[], Awaitable[dict]] | None = None,
                 health: Callable[[], Awaitable[dict]] | None = None,
-                memory: Callable[[], Awaitable[dict]] | None = None) -> list[Route]:
+                memory: Callable[[str | None], Awaitable[dict]] | None = None,
+                user_header: str | None = None) -> list[Route]:
     """Routes for one agent's UI. ``derived_file(thread, path)`` may serve files the agent derived from uploads;
-    ``starting_files`` are the workspace's initial files, shown before the first message."""
+    ``starting_files`` are the workspace's initial files, shown before the first message.
+
+    ``user_header`` names the header in which an authenticating proxy in front of the harness passes the
+    signed-in user; it decides whose memory a conversation uses. Without it, every user is the guest."""
     origins = {f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
     max_upload = server.spec.uploads.max_bytes if server.spec.uploads else 0
+
+    def user(request: Request) -> str | None:
+        return (request.headers.get(user_header, "").strip()[:256] or None) if user_header else None
 
     def same_origin(request: Request) -> bool:
         origin = request.headers.get("origin")
@@ -76,7 +83,7 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
         if not same_origin(request):
             return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
         try:
-            result = await server.process(await request.body(), {})
+            result = await server.process(await request.body(), {"user": user(request)})
         except UploadRejected as error:
             return JSONResponse({"error": str(error)}, status_code=400)
         if isinstance(result, StreamingResult):
@@ -188,7 +195,7 @@ def chat_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_ur
     async def memory_summary(request: Request):
         if memory is None:
             return JSONResponse({"status": "disabled"}, status_code=404)
-        return JSONResponse({"status": "ok", **await memory()}, headers={"Cache-Control": "no-store"})
+        return JSONResponse({"status": "ok", **await memory(user(request))}, headers={"Cache-Control": "no-store"})
 
     async def trace(request: Request):
         thread = await load(request)

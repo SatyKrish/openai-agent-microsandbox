@@ -34,8 +34,11 @@ STATIC = Path(__file__).resolve().parent / "static"
 
 
 def create_app(server: HarnessChatServer, *, config: dict, port: int, jaeger_url: str | None, worker=None,
-               health=None, memory=None, starting_files: dict[str, bytes] | None = None):
-    """``health`` is the worker's summary of its namespaces and ``memory`` what the agent remembers,
-    both shown on the start screen; the health summary is never sent to the model."""
+               health=None, memory=None, user_header: str | None = None,
+               starting_files: dict[str, bytes] | None = None):
+    """``health`` is the worker's summary of its namespaces and ``memory(user)`` what the agent remembers for
+    that user, both shown on the start screen; the health summary is never sent to the model. ``user_header``
+    carries the signed-in user from an authenticating proxy; without it everyone is the guest."""
     return http.ui_application(server, config={**UI, **config}, port=port, jaeger_url=jaeger_url, worker=worker,
-                               health=health, memory=memory, starting_files=starting_files, static=STATIC)
+                               health=health, memory=memory, user_header=user_header, starting_files=starting_files,
+                               static=STATIC)

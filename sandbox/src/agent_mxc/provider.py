@@ -172,11 +172,10 @@ class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
         if not inner.deleted:
             await self.transport.destroy(inner.state.workspace_id, purge_history=purge_history)
             inner.deleted = True
-            # A deleted workspace is not remembered: skip the pre-stop hooks, where the SDK's memory
-            # generation runs, and close.
-            session._pre_stop_hooks_ran = True
-            inner._pre_stop_hooks_ran = True
-            await session.aclose()
+            # Deleting is not closing: as the SDK separates the two, a caller that wants the session's
+            # pre-stop hooks (memory generation among them) calls aclose() first. Without it, the
+            # session is only shut down, and a deleted conversation is not remembered.
+            await session.shutdown()
         return session
 
     async def aclose(self) -> None:

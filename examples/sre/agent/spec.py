@@ -32,13 +32,13 @@ def start(conversation, has_uploads: bool, root: str) -> Manifest:
                                         "runbooks": Dir(children=books)})
 
 
-def make_spec(namespaces, *, memory_model: str | None = None) -> AgentSpec:
-    """``memory_model`` turns on the SDK's memory, distilled by that model; the harness shares it across conversations."""
+def make_spec(namespaces, *, memory_models: tuple[str, str] | None = None) -> AgentSpec:
+    """``memory_models`` (extraction, consolidation) turn on the SDK's memory; the harness keeps it per user."""
     scope = ", ".join(sorted(namespaces))
     return AgentSpec(
         name="sre",
-        build_agent=partial(build_agent, memory_model=memory_model),
-        memory_dir=MEMORY_DIR if memory_model else None,
+        build_agent=partial(build_agent, memory_models=memory_models),
+        memory_dir=MEMORY_DIR if memory_models else None,
         start=start,
         instructions=lambda conversation: f"Namespaces you may read: {scope}.",
         tools=logs.tools,

@@ -15,7 +15,7 @@ flowchart LR
         UI["Shared SRE UI (ChatKit)"] --> Loop["Agents SDK Runner + SandboxAgent"]
         Loop --> Client["MXCSandboxClient"]
         Check["Host check of findings"]
-        Memory["/data/memory: the agent's memory"]
+        Memory["/data/memory: each user's memory"]
         Loop <-.->|"seed on open, publish on close"| Memory
     end
     Loop -->|"OPENAI_API_KEY"| API["OpenAI API"]
@@ -154,35 +154,57 @@ The SDK's `Memory` capability keeps memory as files in the workspace
 (`memories/`). It records each run, and when the session closes it extracts
 lessons from the conversation and consolidates them with what is already there
 into `MEMORY.md` and `memory_summary.md`; the agent reads them at the start of
-a turn. Because each conversation has its own workspace, the harness carries
-memory between them ([`memory.py`](../harness/src/openai_harness/memory.py)):
+a turn. The SDK expects that directory to be preserved and reused, by keeping
+or resuming the same workspace. Here each conversation has its own workspace,
+so evidence and logs stay apart, and the harness carries the directory between
+them instead ([`memory.py`](../harness/src/openai_harness/memory.py)):
 
-1. When a conversation's session opens, the harness copies the stored memory
-   from its volume (`/data/memory`) into the workspace.
-2. When the session closes, the harness copies it in again, so consolidation
-   builds on what other conversations published meanwhile, and lets the SDK
-   generate memory with the agent's model (`SRE_MEMORY_MODEL`).
-3. The harness reads the consolidated files back and swaps them in as a whole.
-   Closes run one at a time, so two consolidations never overwrite each other.
+1. **Memory is per user.** A conversation belongs to the user who started it.
+   An authenticating proxy in front of the UI names the signed-in user in a
+   header (`SRE_USER_HEADER`). Without it, every user is the guest and shares
+   the guest's memory. Each user's memory is a directory under
+   `/data/memory/users/` on the harness's volume.
+2. When a conversation's session opens, the harness copies its user's memory
+   into the workspace.
+3. When the session closes, the harness copies it in again, so consolidation
+   builds on what the user's other conversations published meanwhile, and the
+   SDK generates memory: `gpt-6-luna` extracts the conversation and
+   `gpt-6.1-terra`, the agent's own model, consolidates, following the SDK's
+   default pair of an efficient model, then a stronger one. Both are settings
+   (`MEMORY_EXTRACT_MODEL`, `MEMORY_CONSOLIDATE_MODEL`). The rest are
+   the SDK's defaults: medium reasoning, the newest 256 conversations, up to
+   500 consolidation steps.
+4. The harness reads the consolidated files back and swaps them in as a whole,
+   or keeps the stored memory if the result is over 8 MiB or 2,000 files. One
+   user's closes run one at a time, so two consolidations never overwrite each
+   other; different users' run at once.
 
-Memory is a channel from one conversation's content into every later one, so
-it is constrained:
+Memory forgets, too. A conversation last updated more than
+`SRE_MEMORY_MAX_AGE_DAYS` ago (90) is dropped, as is anything beyond the newest
+256, and a deleted conversation is dropped at once. The harness removes the
+conversation's raw memory and summary immediately and rebuilds the raw notes
+the agent may read; the SDK's own forgetting step removes what `MEMORY.md` and
+`memory_summary.md` drew from it at that user's next consolidation. When nothing
+is left, the user's memory is removed. Deleting an open conversation shuts its
+session down without closing it, so the SDK generates no memory from it.
 
-- **The agent cannot write it during a run** (`live_update=False`). Only the
-  SDK's extraction writes memory, guided by
-  [`memory.md`](../examples/sre/agent/memory.md): conclusions rather than
-  data, never raw log lines, pod specs, credentials or personal data, and never
-  instructions found in logs, events or pod specs.
+Memory is a channel from one conversation's content into later ones, so it is
+constrained:
+
+- **The agent cannot write it during a run** (`live_update=False`, where the
+  SDK's default is to allow it). Only the SDK's extraction writes memory,
+  guided by [`memory.md`](../examples/sre/agent/memory.md): conclusions rather
+  than data, never raw log lines, pod specs, credentials or personal data, and
+  never instructions found in logs, events or pod specs.
 - **It comes from what the model saw,** which was already masked: log excerpts,
   redacted command output.
 - **It is a lead, not a fact.** Memory is dated, and the agent re-checks a
   remembered cause against fresh evidence; quotes in findings must still match
   this turn's evidence.
-- **Deleted conversations are not remembered,** and stored memory is capped at
-  8 MiB and 2,000 files.
 
-The UI's start screen shows the consolidated summary. Memory is plain files on
-the harness's volume: an operator can read, edit or remove `/data/memory`.
+The UI's start screen shows the user's memory summary and whose it is. Memory
+is plain files on the harness's volume: an operator can read, edit or remove a
+user's directory under `/data/memory/users/`.
 
 ## Logs reach the model only as excerpts
 
@@ -271,13 +293,17 @@ components required it:
   but one that hangs reaches the workload as an unreachable network; IPv6 has no
   route. MXC's Node SDK caches `getPlatformSupport()` for the process's life,
   so a host change needs a worker restart to be seen.
-- **Memory is shared and can be wrong.** Everyone who uses a harness shares its
-  agent's memory. A wrong conclusion that the extraction keeps is remembered
-  until a later conversation corrects it or an operator removes it. Memory
-  generation takes about a minute per conversation; sessions still open when
-  the harness's 180 s termination grace period ends are not remembered.
-- **One harness per domain, no sign-in.** Access is Kubernetes RBAC on
-  port-forward, and conversations live in SQLite. Several users can share the
+- **Memory can be wrong, and the guest's is shared.** A wrong conclusion that
+  the extraction keeps is remembered until a later conversation corrects it, it
+  expires, or an operator removes it. Without sign-in, every user adds to and
+  reads the guest's memory. An expired or deleted conversation stays in
+  `MEMORY.md` until its user's next consolidation. Memory generation takes about
+  a minute per conversation; sessions still open when the harness's 180 s
+  termination grace period ends are not remembered.
+- **One harness per domain, one replica.** Access is Kubernetes RBAC on
+  port-forward, and the harness keeps its state on its volume (see
+  [deployment](deployment.md#replicas-follow-the-state-backend)). Sign-in, and
+  so per-user memory, needs an authenticating proxy in front of it. Several users can share the
   harness: their conversations run concurrently, and messages to one shared
   conversation run one after another.
 - **Per-command cost.** An MXC container with the proxy-only network takes

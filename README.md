@@ -87,8 +87,8 @@ writes `output/findings.md` and `output/findings.json`; the side panel shows the
 findings as cards with their proposed fixes, the kubectl reads and log excerpts
 the worker recorded as evidence, the quotes the harness checked, and the turn's
 trace when tracing is on. Later messages continue in the same workspace. When a
-conversation goes idle, the SDK distils what it learned into the agent's
-memory, which the next conversation starts with. `make loadtest` runs many conversations and users at once;
+conversation goes idle, the SDK distils what it learned into your memory,
+which your next conversation starts with. `make loadtest` runs many conversations and users at once;
 `make journal` prints the worker's audit journal; `make teardown` deletes the
 cluster and stops the VM.
 
@@ -100,8 +100,9 @@ logs, events and workload objects in `payments`, and cannot read Secrets or
 change anything. It loads a `kubernetes-triage` skill, reads the application
 team's runbooks seeded into every workspace, and proposes fixes for a person to
 run. It remembers across conversations through the SDK's `Memory` capability:
-the harness shares each conversation's distilled lessons with the next, and the
-agent cannot write memory itself. The UI is the shared SRE UI of
+the harness carries each conversation's distilled lessons into the same user's
+later conversations (everyone shares the guest's without sign-in), forgets
+them after 90 days, and the agent cannot write memory itself. The UI is the shared SRE UI of
 [openai-agent-substrate](https://github.com/SatyKrish/openai-agent-substrate), reused with its harness.
 
 ## Use the provider in your own application
@@ -128,7 +129,9 @@ another's workspace, evidence, logs or the worker's journal; and a pod outside
 the pair could not reach the worker. With memory on, a second conversation
 started from the first's lessons and confirmed them against fresh evidence;
 memory held no email address, card number or credential, and a harness restart
-closed an open conversation and kept its memory. An MXC command costs about
+closed an open conversation and kept its memory. Memory generated with
+`gpt-6-luna` and `gpt-6.1-terra`, and a signed-in user's memory was kept apart
+from the guest's. An MXC command costs about
 110 ms with the proxy-only network. AKS and Kata remain unverified. See the
 [verification record](docs/verification.md).
 

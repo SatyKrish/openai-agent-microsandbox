@@ -56,10 +56,12 @@ await client.aclose()         # closes the gRPC channel
 
 No process runs between commands, so there is nothing to suspend between
 turns. Keep a session open across a conversation's turns, as the SDK expects,
-and close it when the conversation goes idle: closing runs the SDK's pre-stop
-hooks, such as the `Memory` capability's memory generation, which makes model
-calls. `client.delete` skips those hooks, so a deleted conversation is not
-remembered. Run one turn of a conversation at a time; the worker runs one
+and close it when the conversation goes idle: closing (`aclose()`) runs the
+SDK's pre-stop hooks, such as the `Memory` capability's memory generation, which
+makes model calls. `client.delete` removes the workspace and shuts the session
+down without closing it, as the SDK separates the two, so a conversation
+deleted without closing is not remembered; call `aclose()` first to keep its
+memory. Run one turn of a conversation at a time; the worker runs one
 session's commands in order, but two harnesses resuming the same workspace
 would interleave their turns. Different conversations run concurrently.
 
@@ -68,11 +70,11 @@ would interleave their turns. Different conversations run concurrently.
 The SDK's `Memory` capability works on this provider unchanged: its files live
 in the workspace under `memories/`. Each workspace has its own, so to carry
 memory between conversations, copy it in and out around each session, as the
-shared harness's `MemoryStore` does
+shared harness does for each user
 ([`memory.py`](../harness/src/openai_harness/memory.py)):
 
 ```python
-store = MemoryStore(Path("/data/memory"))
+store = UserMemory(Path("/data/memory")).for_user("ana@example.com")  # None: the guest
 await session.start()
 await store.seed(session)     # earlier conversations' memory into memories/
 ...                           # the conversation's turns
@@ -81,8 +83,11 @@ await session.aclose()        # the SDK generates and consolidates memory here
 await store.publish(session)  # the consolidated memories/ back to the store
 ```
 
-Serialize the close-and-publish step across conversations, or two
-consolidations can overwrite each other's lessons. See
+Serialize the close-and-publish step across one user's conversations, or two
+consolidations can overwrite each other's lessons. The store also forgets:
+`store.prune()` drops conversations past `max_age` (90 days by default) and
+beyond the newest `max_conversations` (the SDK's 256), and `store.forget(id)`
+drops one, such as a deleted conversation. See
 [architecture](architecture.md#memory-across-conversations) for how the SRE
 agent constrains what memory may hold.
 

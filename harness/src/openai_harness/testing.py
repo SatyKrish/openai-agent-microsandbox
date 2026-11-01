@@ -71,9 +71,9 @@ def message(text: str, attachments=()) -> dict:
     return {"content": [{"type": "input_text", "text": text}], "attachments": list(attachments), "inference_options": {}}
 
 
-async def events(chat, payload: dict) -> list[dict]:
-    """Send one ChatKit request to a harness server and collect its streamed events."""
-    result = await chat.process(json.dumps(payload), {})
+async def events(chat, payload: dict, user: str | None = None) -> list[dict]:
+    """Send one ChatKit request to a harness server, as ``user`` (the guest by default), and collect its events."""
+    result = await chat.process(json.dumps(payload), {"user": user})
     collected = []
     async for chunk in result:
         collected += [json.loads(line[6:]) for line in chunk.decode().splitlines() if line.startswith("data: ")]

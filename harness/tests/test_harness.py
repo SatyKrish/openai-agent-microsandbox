@@ -3,8 +3,11 @@
 """The harness and its shared UI page against the worker's real gRPC service (see the root conftest)."""
 
 import asyncio
+import io
 import json
+import re
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from agents import Runner
 from agents.sandbox import Manifest, SandboxAgent
@@ -14,7 +17,7 @@ from starlette.testclient import TestClient
 
 from openai_harness import http
 from openai_harness.chat import HarnessChatServer, preferred_file, running_elsewhere
-from openai_harness.memory import MemoryStore
+from openai_harness.memory import MemoryStore, UserMemory, user_key
 from openai_harness.spec import AgentSpec
 from openai_harness.store import SQLiteStore
 from openai_harness.testing import Calls, events, message, shell
@@ -40,8 +43,8 @@ def app_for(chat, worker=None, health=None, **config):
                                jaeger_url=None, starting_files=STARTING, worker=worker, health=health)
 
 
-async def new_thread(chat, text="First question"):
-    stream = await events(chat, {"type": "threads.create", "params": {"input": message(text)}})
+async def new_thread(chat, text="First question", user=None):
+    stream = await events(chat, {"type": "threads.create", "params": {"input": message(text)}}, user=user)
     assert not [event for event in stream if event["type"] == "error"], stream
     return next(event["thread"]["id"] for event in stream if event["type"] == "thread.created"), stream
 
@@ -226,25 +229,54 @@ def test_the_page_serves_an_agents_health_summary(worker, tmp_path):
     chat.store.close()
 
 
+def raw_memory(conversation: str, updated: datetime, text: str) -> str:
+    """A raw memory as the SDK writes it, header first."""
+    return (f"rollout_id: {conversation}\nupdated_at: {updated.isoformat()}\nrollout_path: sessions/{conversation}.jsonl\n"
+            f"rollout_summary_file: rollout_summaries/{conversation}_incident.md\nterminal_state: completed\n\n---\n{text}\n")
+
+
+def remember(root, conversation: str, text: str, updated: datetime | None = None) -> None:
+    """Store one conversation's memory on the host, as a published consolidation would leave it."""
+    updated = updated or datetime.now(timezone.utc)
+    (root / "raw_memories").mkdir(parents=True, exist_ok=True)
+    (root / "rollout_summaries").mkdir(parents=True, exist_ok=True)
+    (root / "raw_memories" / f"{conversation}.md").write_text(raw_memory(conversation, updated, text))
+    (root / "rollout_summaries" / f"{conversation}_incident.md").write_text(f"updated_at: {updated.isoformat()}\n{text}\n")
+    with (root / "MEMORY.md").open("a") as handle:
+        handle.write(f"- {text}\n")
+    (root / "memory_summary.md").write_text("Payments: see MEMORY.md.\n")
+
+
+def writes_memory(text: str):
+    """A scripted shell call that leaves memory in the workspace, as the SDK's generation would at close."""
+    now = datetime.now(timezone.utc)
+    script = raw_memory("thr-earlier", now, text).replace("\n", "\\n")
+    return shell("mkdir -p memories/raw_memories memories/rollout_summaries"
+                 f" && echo '{text}' > memories/MEMORY.md && echo 'Payments: {text}' > memories/memory_summary.md"
+                 f" && printf '{script}' > memories/raw_memories/thr-earlier.md"
+                 f" && echo '{text}' > memories/rollout_summaries/thr-earlier_incident.md")
+
+
 async def test_memory_carries_across_conversations_through_the_harness(worker, tmp_path):
     """The SDK distils memory into memories/ when a session closes; here the script writes it, as that step would."""
-    store = MemoryStore(tmp_path / "memory")
-    write = shell("mkdir -p memories/rollout_summaries && echo 'payments-processor needs DATABASE_URL' > memories/MEMORY.md"
-                  " && echo 'Payments: check DATABASE_URL first.' > memories/memory_summary.md"
-                  " && echo 'first incident' > memories/rollout_summaries/thr-1.md")
-    chat = make_chat(worker, tmp_path, Calls([write], answer="Noted."), memory=store, idle_close_s=0.2)
+    memory = UserMemory(tmp_path / "memory")
+    store = memory.for_user(None)
+    chat = make_chat(worker, tmp_path, Calls([writes_memory("payments-processor needs DATABASE_URL")], answer="Noted."),
+                     memory=memory, idle_close_s=0.2)
     try:
         first, _ = await new_thread(chat, "Investigate payments")
         assert first in chat._open and store.files() == {}  # open, and nothing published while it is
         await asyncio.sleep(0.6)
         assert first not in chat._open  # closed when idle, and its memory published
         assert store.files()["MEMORY.md"] == b"payments-processor needs DATABASE_URL\n"
-        assert store.summary()["text"].startswith("Payments: check DATABASE_URL") and store.summary()["conversations"] == 1
+        summary = memory.summary(None)
+        assert summary["text"].startswith("Payments: payments-processor") and summary["conversations"] == 1
+        assert summary["user"] == "guest" and summary["shared"] is True
 
         chat.model = Calls([shell("cat memories/MEMORY.md")], answer="I remember.")
         second, stream = await new_thread(chat, "Anything known about payments?")
         assert "payments-processor needs DATABASE_URL" in chat.model.outputs[0]
-        assert "Seeded with the agent's memory from earlier conversations (3 files)" in json.dumps(stream)
+        assert "Seeded with the agent's memory from earlier conversations (4 files)" in json.dumps(stream)
 
         # A deleted conversation is not remembered, even with memory waiting in its open session.
         chat.model = Calls([shell("echo 'forget me' > memories/MEMORY.md")], answer="Done.")
@@ -258,21 +290,143 @@ async def test_memory_carries_across_conversations_through_the_harness(worker, t
         chat.store.close()
 
 
+async def test_each_signed_in_user_has_their_own_memory_and_guests_share_one(worker, tmp_path):
+    memory = UserMemory(tmp_path / "memory")
+    chat = make_chat(worker, tmp_path, Calls([writes_memory("Ana prefers kubectl tables")], answer="Noted."),
+                     memory=memory, idle_close_s=3600)
+    try:
+        ana, _ = await new_thread(chat, "Investigate payments", user="ana@example.com")
+        assert (await chat.store.load_thread(ana, {})).metadata["owner"] == "ana@example.com"
+        await chat.close_all()
+        assert b"Ana prefers" in memory.for_user("ana@example.com").files()["MEMORY.md"]
+        assert memory.for_user(None).files() == {} and memory.for_user("bo@example.com").files() == {}
+        assert memory.summary("ana@example.com")["shared"] is False
+
+        # Another user, and the guest, start without Ana's memory.
+        for user in ("bo@example.com", None):
+            chat.model = Calls([shell("cat memories/MEMORY.md || echo none")], answer="Checked.")
+            _, stream = await new_thread(chat, "Anything known?", user=user)
+            assert "Ana prefers" not in chat.model.outputs[0] and "Seeded" not in json.dumps(stream)
+            await chat.close_all()
+        # Ana's next conversation starts with hers.
+        chat.model = Calls([shell("cat memories/MEMORY.md")], answer="I remember.")
+        await new_thread(chat, "Anything known?", user="ana@example.com")
+        assert "Ana prefers kubectl tables" in chat.model.outputs[0]
+    finally:
+        await chat.close_all()
+        chat.store.close()
+
+
+async def test_a_deleted_conversation_is_forgotten_after_its_memory_was_published(worker, tmp_path):
+    memory = UserMemory(tmp_path / "memory")
+    chat = make_chat(worker, tmp_path, Calls([shell("echo hi")], answer="Done."), memory=memory, idle_close_s=3600)
+    try:
+        kept, _ = await new_thread(chat, "First", user="ana@example.com")
+        gone, _ = await new_thread(chat, "Second", user="ana@example.com")
+        await chat.close_all()
+        store = memory.for_user("ana@example.com")
+        remember(store.root, kept, "kept lesson")
+        remember(store.root, gone, "lesson from the deleted conversation")
+        await chat.store.delete_thread(gone, {})
+        files = store.files()
+        assert f"raw_memories/{kept}.md" in files and f"raw_memories/{gone}.md" not in files
+        assert not any(name.startswith(f"rollout_summaries/{gone}") for name in files)
+        assert b"deleted conversation" not in files["raw_memories.md"]  # what the agent may read is rebuilt
+        assert memory.summary("ana@example.com")["conversations"] == 1
+        await chat.store.delete_thread(kept, {})
+        assert store.files() == {} and not store.root.exists()  # nothing left to remember
+    finally:
+        await chat.close_all()
+        chat.store.close()
+
+
+def test_memory_forgets_conversations_by_age_and_beyond_the_newest(tmp_path):
+    now = datetime.now(timezone.utc)
+    store = MemoryStore(tmp_path / "ana", max_age=timedelta(days=90), max_conversations=2)
+    for name, days in (("old", 91), ("older-but-kept", 30), ("recent", 2), ("newest", 1)):
+        remember(store.root, name, f"lesson {name}", now - timedelta(days=days))
+    # "old" is past 90 days; "older-but-kept" falls outside the newest two.
+    assert sorted(store.prune(now)) == ["old", "older-but-kept"]
+    assert sorted(path.stem for path in (store.root / "raw_memories").glob("*.md")) == ["newest", "recent"]
+    assert sorted(path.name for path in (store.root / "rollout_summaries").iterdir()) == [
+        "newest_incident.md", "recent_incident.md"]
+    assert "lesson old" not in (store.root / "raw_memories.md").read_text()
+    # MEMORY.md keeps its lines until the SDK's next consolidation sees the conversations gone.
+    assert "lesson old" in (store.root / "MEMORY.md").read_text()
+    assert store.prune(now + timedelta(days=100)) == ["newest", "recent"]
+    assert not store.root.exists()
+    assert MemoryStore(tmp_path / "forever", max_age=None).prune() == []
+
+
+async def test_memory_over_the_limit_is_not_published(tmp_path):
+    class Workspace:
+        """Just enough of a sandbox session for publish: a listing and reads."""
+        def __init__(self, files):
+            self.files = files
+
+        async def exec(self, *argv, shell=False):
+            listing = "\n".join(f"memories/{name}" for name in self.files)
+            return SimpleNamespace(ok=lambda: True, stdout=listing.encode())
+
+        async def read(self, path):
+            return io.BytesIO(self.files[str(path).removeprefix("memories/")])
+
+    store = MemoryStore(tmp_path / "ana", max_bytes=100, max_files=3)
+    remember(store.root, "kept", "kept lesson")
+    before = store.files()
+    assert await store.publish(Workspace({"MEMORY.md": b"x" * 101})) == len(before)
+    assert await store.publish(Workspace({f"note-{index}.md": b"x" for index in range(4)})) == len(before)
+    assert store.files() == before
+    assert await store.publish(Workspace({"MEMORY.md": b"small"})) == 1 and store.files() == {"MEMORY.md": b"small"}
+
+
+def test_the_signed_in_user_comes_only_from_the_configured_header(worker, tmp_path):
+    chat = make_chat(worker, tmp_path, Calls([], answer="Hi."))
+    seen = []
+
+    async def remembered(user):
+        seen.append(user)
+        return {"text": ""}
+
+    def app(user_header):
+        return http.ui_application(chat, config={"title": "Agent"}, port=8009, jaeger_url=None, memory=remembered,
+                                   user_header=user_header)
+
+    with TestClient(app("X-Forwarded-Email"), base_url="http://localhost:8009") as client:
+        client.get("/api/memory", headers={"X-Forwarded-Email": " ana@example.com "})
+        client.get("/api/memory")
+    with TestClient(app(None), base_url="http://localhost:8009") as client:
+        client.get("/api/memory", headers={"X-Forwarded-Email": "ana@example.com"})
+    assert seen == ["ana@example.com", None, None]
+    chat.store.close()
+
+
+def test_users_get_distinct_safe_directories_and_shared_memory_becomes_the_guests(tmp_path):
+    assert user_key(None) == user_key("") == user_key("  ") == "guest"
+    assert user_key("Ana@Example.com") == user_key("ana@example.com") != user_key("ana@example.org")
+    assert re.fullmatch(r"[a-z0-9._-]+", user_key("../../etc/passwd")) and user_key("guest") != "guest"
+    remember(tmp_path / "memory", "thr-1", "from before memory was per user")
+    memory = UserMemory(tmp_path / "memory")
+    assert sorted(path.name for path in (tmp_path / "memory").iterdir()) == ["users"]
+    assert b"from before" in memory.for_user(None).files()["MEMORY.md"]
+
 
 async def test_stopping_the_server_closes_open_sessions_and_keeps_their_memory(worker, tmp_path):
-    store = MemoryStore(tmp_path / "memory")
-    write = shell("mkdir -p memories && echo 'remembered at shutdown' > memories/MEMORY.md")
-    chat = make_chat(worker, tmp_path, Calls([write], answer="Noted."), memory=store, idle_close_s=3600)
+    memory = UserMemory(tmp_path / "memory")
+    chat = make_chat(worker, tmp_path, Calls([writes_memory("remembered at shutdown")], answer="Noted."),
+                     memory=memory, idle_close_s=3600)
     try:
         thread_id, _ = await new_thread(chat, "Investigate payments")
         assert thread_id in chat._open
         app = app_for(chat)
         async with app.router.lifespan_context(app):
             pass
-        assert thread_id not in chat._open and store.files()["MEMORY.md"] == b"remembered at shutdown\n"
+        assert thread_id not in chat._open
+        assert memory.for_user(None).files()["MEMORY.md"] == b"remembered at shutdown\n"
     finally:
         await chat.close_all()
         chat.store.close()
+
 
 async def test_a_turn_that_runs_out_of_steps_ends_with_a_message_instead_of_failing(worker, tmp_path):
     chat = make_chat(worker, tmp_path, Calls([shell("echo one"), shell("echo two"), shell("echo three")], answer="Done."),

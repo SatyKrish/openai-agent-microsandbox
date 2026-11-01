@@ -13,7 +13,7 @@ sandbox worker's read-only identity, and cannot change anything. It runs on the
 | `pod_logs` tool | Gets a pod's log from the worker as an excerpt: errors and warnings with context, the last lines, repeats collapsed, credentials and personal data masked, at most 40 lines. The raw log never leaves the worker. |
 | Worker journal | Every command, and the output of every plain kubectl read as evidence. No container can see it. |
 | Host check | Every quote in `output/findings.json` must appear in the worker's copy of the evidence file it cites. |
-| Memory | What earlier investigations of this application learned, distilled by the SDK when a conversation's session closes and shared by the harness with later conversations. |
+| Memory | What a user's earlier investigations of this application learned, distilled by the SDK when a conversation's session closes and carried by the harness into that user's later conversations. Without sign-in, everyone shares the guest's. |
 
 ## Access
 
@@ -59,7 +59,8 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   exit, recent warning events). **Investigate** starts a conversation about one
   workload; **Investigate all** about every unhealthy one. The worker builds
   this summary with its own identity; it is not sent to the model. Below it,
-  **What the agent remembers** shows the agent's memory summary.
+  **What the agent remembers** shows your memory summary, or the guest's when
+  you are not signed in, and how long conversations are kept.
 - **Steps.** Each step is titled with what ran (`kubectl describe pod …`,
   `pod_logs payments-api -n payments match="timeout"`) and where: the sandbox or
   the harness.
@@ -74,20 +75,29 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
 ## Memory
 
 When a conversation's session closes, after `SRE_SESSION_IDLE_S` without a
-message or when the harness stops, the SDK distils it into memory with the
-agent's model, guided by [`agent/memory.md`](agent/memory.md): workloads and
-their dependencies, causes the evidence confirmed, fixes proposed, and which
-reads found the cause. The harness keeps that memory on its volume
-(`/data/memory`) and seeds it into every new conversation, where the agent
-reads it as a lead and checks it against fresh evidence. The agent cannot edit
-memory during a run, memory never holds raw logs, credentials or personal data,
-and deleted conversations are not remembered. See
-[architecture](../../docs/architecture.md#memory-across-conversations).
+message or when the harness stops, the SDK distils it into memory, guided by
+[`agent/memory.md`](agent/memory.md): workloads and their dependencies, causes
+the evidence confirmed, fixes proposed, and which reads found the cause.
+`gpt-6-luna` extracts each conversation and `gpt-6.1-terra` consolidates; the
+rest are the SDK's defaults. Memory belongs to the user who started the
+conversation: the signed-in user, or the guest, whose memory everyone without
+sign-in shares. The harness keeps each user's memory on its volume
+(`/data/memory/users/`) and seeds it into that user's new conversations, where
+the agent reads it as a lead and checks it against fresh evidence.
+
+The agent cannot edit memory during a run, and memory never holds raw logs,
+credentials or personal data. Conversations are forgotten 90 days after their
+last message (`SRE_MEMORY_MAX_AGE_DAYS`), beyond the newest 256, and when
+deleted. See [architecture](../../docs/architecture.md#memory-across-conversations).
 
 ## Settings
 
 The harness reads these from its environment (or the matching flags of
-`python -m examples.sre.ui`):
+`python -m examples.sre.ui`). In the cluster, the `OPENAI_*` settings come from
+`.env` through the `openai-creds` Secret (`make secrets`), and the rest are in
+the harness's manifest
+([`harness.yaml`](../../deploy/kubernetes/base/harness.yaml)); apply either and
+the harness pod restarts with them.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -95,7 +105,10 @@ The harness reads these from its environment (or the matching flags of
 | `SRE_NAMESPACES` | `payments` | The namespaces the agent is told it may read |
 | `SRE_MAX_TURNS` | `25` | Model steps per turn; at the limit the agent stops and offers to continue |
 | `SRE_SESSION_IDLE_S` | `300` | Seconds a conversation's session stays open after a turn; memory is generated when it closes |
-| `SRE_MEMORY_MODEL` | the agent's model | The model that generates memory; `off` turns memory off |
+| `SRE_MEMORY` | `on` | `off` turns memory off |
+| `MEMORY_EXTRACT_MODEL`, `MEMORY_CONSOLIDATE_MODEL` | `gpt-6-luna`, `gpt-6.1-terra` | The models that extract each conversation and consolidate a user's memory |
+| `SRE_MEMORY_MAX_AGE_DAYS` | `90` | Forget conversations this many days after their last message; `0` keeps them |
+| `SRE_USER_HEADER` | unset | The header in which an authenticating proxy passes the signed-in user; unset, everyone is the guest. See [signing users in](../../docs/deployment.md#signing-users-in) |
 | `SRE_DATA_DIR` | `artifacts/sre` | Threads, history, host copies of outputs and evidence, and memory |
 
 ## Layout

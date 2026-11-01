@@ -12,10 +12,11 @@ agent's host check.
 
 The session stays open between turns, as the SDK expects for a multi-turn
 conversation, and closes after ``idle_close_s`` without a message. Closing is when the
-SDK's Memory capability distils the conversation into memory; with a ``MemoryStore``
-the harness seeds that memory from, and publishes it back to, the agent's memory
-across conversations. Deleting the thread deletes the workspace, the history and the
-host copies without generating memory; the worker keeps its audit journal.
+SDK's Memory capability distils the conversation into memory; with a ``UserMemory``
+the harness seeds that memory from, and publishes it back to, the memory of the user
+who started the conversation. Deleting the thread deletes the workspace, the history
+and the host copies, and the conversation is not remembered; the worker keeps its
+audit journal.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from agents import Runner, SQLiteSession, trace
 from agents.run import RunConfig
@@ -54,7 +55,7 @@ from agent_mxc import MXCSandboxOptions, WorkerError
 from agent_mxc.instrumentation import operation
 from agent_mxc.tracing import otel_trace_id, tracing_enabled
 
-from .memory import MemoryStore
+from .memory import UserMemory, user_key
 from .spec import AgentSpec, Conversation, TurnContext
 from .steps import ToolSteps, fenced, user_text
 from .uploads import UploadRejected, UploadStore, upload_name
@@ -91,6 +92,13 @@ def preferred_file(turn: dict, preferred: str | None = None) -> str | None:
     return None
 
 
+class _Open(NamedTuple):
+    """A conversation's sandbox session, open between turns."""
+    session: object
+    closer: asyncio.Task | None  # closes it once it has been idle
+    owner: str | None            # whose memory it draws on and adds to
+
+
 class TurnError(Exception):
     """A turn failure whose message is safe to show."""
 
@@ -104,7 +112,7 @@ class HarnessChatServer(ChatKitServer[dict]):
                  base_url: str = "http://localhost:8000", model_label: str | None = None, max_turns: int = 25,
                  card: Callable[[Conversation, dict, set[str]], list[dict]] | None = None,
                  file_status: Callable[[Conversation, dict], dict[str, dict]] | None = None,
-                 preferred_output: str | None = None, memory: MemoryStore | None = None, idle_close_s: float = 300):
+                 preferred_output: str | None = None, memory: UserMemory | None = None, idle_close_s: float = 300):
         self.spec = spec
         self.output_dir = Path(output_dir)
         self.uploads = UploadStore(store, self.output_dir / ".staged", base_url, spec.uploads)
@@ -123,9 +131,13 @@ class HarnessChatServer(ChatKitServer[dict]):
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.memory = memory
         self.idle_close_s = idle_close_s
-        # thread id -> (open sandbox session, its idle-close task); a running turn takes its session out.
-        self._open: dict[str, tuple[object, asyncio.Task | None]] = {}
-        self._memory_lock = asyncio.Lock()
+        # thread id -> its open sandbox session; a running turn takes its session out.
+        self._open: dict[str, _Open] = {}
+        # One consolidation at a time per user, so two never overwrite each other's lessons.
+        self._memory_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Conversations deleted while their user's memory may be consolidating, by user: forgotten
+        # again once it publishes.
+        self._forgotten: defaultdict[str, set[str]] = defaultdict(set)
 
     def conversation(self, thread: ThreadMetadata) -> Conversation:
         return Conversation(thread, self.output_dir / thread.id)
@@ -221,7 +233,7 @@ class HarnessChatServer(ChatKitServer[dict]):
         thread, meta = conversation.thread, conversation.metadata
         opened = self._open.pop(thread.id, None)
         if opened is not None:
-            session, closer = opened
+            session, closer, _ = opened
             if closer is not None:
                 closer.cancel()
             turn["lifecycle"] = "continued"
@@ -229,7 +241,7 @@ class HarnessChatServer(ChatKitServer[dict]):
                 async for event in self._continue_turn(conversation, context_, turn, text, attachments, session):
                     yield event
             finally:
-                self._park(thread.id, session)
+                self._park(thread.id, session, meta.get("owner"))
             return
         created = meta.get("sandbox") is None
         step = CustomTask(title="Creating the workspace" if created else "Reopening the workspace", status_indicator="loading")
@@ -246,6 +258,8 @@ class HarnessChatServer(ChatKitServer[dict]):
             # Save immediately: a failed first turn must still be deletable.
             meta["sandbox"] = self.client.serialize_session_state(session.state)
             meta["workspace"] = f"{self.client.worker}/{workspace_id}"
+            # Whose memory the conversation draws on and adds to: the signed-in user who started it, or the guest.
+            meta["owner"] = context_.request_context.get("user")
             await self.store.save_thread(thread, context_.request_context)
         else:
             session = await self.client.resume(self.client.deserialize_session_state(meta["sandbox"]))
@@ -260,7 +274,7 @@ class HarnessChatServer(ChatKitServer[dict]):
                 boundary = await session.exec('test -z "${OPENAI_API_KEY:-}"')
                 if not boundary.ok():
                     raise RuntimeError("The sandbox must not contain the harness API key")
-            remembered = await self.memory.seed(session) if self.memory is not None else 0
+            remembered = await self.memory.for_user(meta.get("owner")).seed(session) if self.memory is not None else 0
             seconds = time.monotonic() - began
             turn["start_s"] = round(seconds, 1)
             verb = "Created" if created else "Reopened"
@@ -275,7 +289,7 @@ class HarnessChatServer(ChatKitServer[dict]):
             async for event in self._continue_turn(conversation, context_, turn, text, attachments, session, workflow):
                 yield event
         finally:
-            self._park(thread.id, session)
+            self._park(thread.id, session, meta.get("owner"))
 
     async def _continue_turn(self, conversation: Conversation, context_: AgentContext, turn: dict, text: str,
                              attachments: list, session, workflow: WorkflowItem | None = None):
@@ -509,35 +523,41 @@ class HarnessChatServer(ChatKitServer[dict]):
             id=self.store.generate_item_id("message", thread, context), thread_id=thread.id,
             created_at=datetime.now(), widget=widget))
 
-    def _park(self, thread_id: str, session) -> None:
+    def _park(self, thread_id: str, session, owner: str | None) -> None:
         """Keep a conversation's session open after its turn, and close it once it has been idle."""
-        self._open[thread_id] = (session, asyncio.get_running_loop().create_task(self._close_when_idle(thread_id)))
+        closer = asyncio.get_running_loop().create_task(self._close_when_idle(thread_id))
+        self._open[thread_id] = _Open(session, closer, owner)
 
     async def _close_when_idle(self, thread_id: str) -> None:
         await asyncio.sleep(self.idle_close_s)
         async with self._locks[thread_id]:
             opened = self._open.get(thread_id)
-            if opened is None or opened[1] is not asyncio.current_task():
+            if opened is None or opened.closer is not asyncio.current_task():
                 return  # a turn took the session meanwhile
             del self._open[thread_id]
-            await self._close(thread_id, opened[0], f"after {self.idle_close_s:.0f} s idle")
+            await self._close(thread_id, opened, f"after {self.idle_close_s:.0f} s idle")
 
-    async def _close(self, thread_id: str, session, why: str) -> None:
-        """Close a session; with a memory store, the SDK's memory generation runs here and its result is published."""
+    async def _close(self, thread_id: str, opened: _Open, why: str) -> None:
+        """Close a session; with memory, the SDK's memory generation runs here and its result is published."""
+        session = opened.session
         if self.memory is None:
             await _quietly(session.aclose(), f"closing {thread_id}")
             return
-        async with self._memory_lock:
+        key = user_key(opened.owner)
+        store = self.memory.for_user(opened.owner)
+        async with self._memory_locks[key]:
             began = time.monotonic()
-            # Consolidate on top of what other conversations published since this one opened. Without that,
-            # publishing could drop their lessons, so a failed seed closes the session without publishing.
-            if await _quietly(self.memory.seed(session), f"seeding memory for {thread_id}") is False:
+            # Consolidate on top of what the user's other conversations published since this one opened. Without
+            # that, publishing could drop their lessons, so a failed seed closes the session without publishing.
+            if await _quietly(store.seed(session), f"seeding memory for {thread_id}") is False:
                 await _quietly(session.aclose(), f"closing {thread_id}")
                 return
             if await _quietly(session.aclose(), f"generating memory for {thread_id}") is False:
                 return
-            files = await _quietly(self.memory.publish(session), f"publishing memory from {thread_id}")
-            logger.info("Closed %s %s; memory has %s files (%.1f s)", thread_id, why, files,
+            files = await _quietly(store.publish(session), f"publishing memory from {thread_id}")
+            for conversation in self._forgotten.pop(key, ()):
+                store.forget(conversation)
+            logger.info("Closed %s %s; %s's memory has %s files (%.1f s)", thread_id, why, key, files,
                         time.monotonic() - began)
 
     async def close_all(self) -> None:
@@ -547,23 +567,25 @@ class HarnessChatServer(ChatKitServer[dict]):
                 opened = self._open.pop(thread_id, None)
                 if opened is None:
                     continue
-                if opened[1] is not None:
-                    opened[1].cancel()
-                await self._close(thread_id, opened[0], "on shutdown")
+                if opened.closer is not None:
+                    opened.closer.cancel()
+                await self._close(thread_id, opened, "on shutdown")
 
     async def delete_workspace(self, thread_id: str) -> None:
         """Delete the workspace on the worker, the history, then the host copies. The worker keeps its journal.
 
-        A deleted conversation is not remembered: its open session closes without generating memory.
+        A deleted conversation is not remembered: its open session is deleted without closing, so the SDK
+        generates no memory from it, and what memory already holds from it is forgotten.
         """
         thread = await self.store.load_thread(thread_id, {})
         state = thread.metadata.get("sandbox")
+        owner = thread.metadata.get("owner")
         async with self._locks[thread_id]:
             opened = self._open.pop(thread_id, None)
-            if opened is not None and opened[1] is not None:
-                opened[1].cancel()
+            if opened is not None and opened.closer is not None:
+                opened.closer.cancel()
             if opened is not None:
-                await self.client.delete(opened[0])
+                await self.client.delete(opened.session)
             elif state is not None:
                 # A workspace that is already gone is not an error: the worker reports it and moves on.
                 session = await self.client.resume(self.client.deserialize_session_state(state))
@@ -574,6 +596,10 @@ class HarnessChatServer(ChatKitServer[dict]):
             finally:
                 history.close()
             shutil.rmtree(self.output_dir / thread_id, ignore_errors=True)
+            if self.memory is not None:
+                # Forget it now, and again after any consolidation of this user's memory that is running.
+                self._forgotten[user_key(owner)].add(thread_id)
+                self.memory.for_user(owner).forget(thread_id)
 
 
 async def _quietly(awaitable, what: str):
