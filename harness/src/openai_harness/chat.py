@@ -279,9 +279,8 @@ class HarnessChatServer(ChatKitServer[dict]):
             seconds = time.monotonic() - began
             turn["start_s"] = round(seconds, 1)
             verb = "Created" if created else "Reopened"
-            detail = (f"Session `{workspace}`: a workspace on the worker's volume. Every command runs in its own "
-                      "Microsoft eXecution Container that sees only this workspace." if created
-                      else f"Same session `{workspace}`; its workspace still holds the earlier turns' files.")
+            detail = (f"Session `{workspace}`." if created
+                      else f"Session `{workspace}`, with the earlier turns' files.")
             if remembered:
                 detail += f" Seeded with the agent's memory from earlier conversations ({remembered} files)."
             step = CustomTask(title=f"{verb} the workspace · {seconds:.1f} s", content=detail, status_indicator="complete")
@@ -486,12 +485,11 @@ class HarnessChatServer(ChatKitServer[dict]):
         if turn["uploads"]:
             children.append({"type": "Text", "size": "sm", "value": "Uploaded to inputs/uploads/: " + ", ".join(turn["uploads"])})
         rows = self.card(conversation, turn, changed) if self.card is not None else []
-        if not any(_has_badge(row) for row in rows) and turn["status"] == "completed":
-            # Every turn says what the host checked, even when the answer is that nothing was.
-            outputs = any(path.startswith("output/") for path in changed)
-            rows.append({"type": "Row", "children": [{"type": "Badge", "variant": "soft", "color": "warning" if outputs
-                         else "secondary", "label": "Not checked on the host" if outputs
-                         else "No output files changed · nothing to check"}]})
+        if (not any(_has_badge(row) for row in rows) and turn["status"] == "completed"
+                and any(path.startswith("output/") for path in changed)):
+            # Outputs the host did not check say so; a turn that only answered in chat needs no badge.
+            rows.append({"type": "Row", "children": [{"type": "Badge", "variant": "soft", "color": "warning",
+                         "label": "Not checked on the host"}]})
         children += rows
         buttons = [
             {"type": "Button", "label": item["path"].removeprefix("output/"), "style": "secondary", "size": "sm",
@@ -499,13 +497,6 @@ class HarnessChatServer(ChatKitServer[dict]):
                                "payload": {"thread_id": thread.id, "turn": turn["number"], "path": item["path"]}}}
             for item in turn["files"] if item.get("changed") and item["path"].startswith("output/") and not item.get("too_large")
         ][:4]
-        check = turn.get("check") or {}
-        quotes = len(check.get("checked_quotes") or []) if check.get("quotes_from", "") in changed else 0
-        if quotes:
-            buttons.append({"type": "Button", "label": f"Show the quote{'s' if quotes != 1 else ''}", "style": "secondary",
-                            "size": "sm", "iconStart": "check-circle",
-                            "onClickAction": {"type": "open_quotes", "handler": "client",
-                                              "payload": {"thread_id": thread.id, "turn": turn["number"]}}})
         if turn.get("otel_trace_id"):
             buttons.append({"type": "Button", "label": "View trace", "style": "secondary", "size": "sm", "iconStart": "chart",
                             "onClickAction": {"type": "open_trace", "handler": "client",

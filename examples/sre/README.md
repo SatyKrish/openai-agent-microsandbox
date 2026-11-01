@@ -54,34 +54,41 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
 
 ## Using the UI
 
-- **Top bar.** One chip says what the agent reads and with which model; hover
-  for the worker, and it turns amber when the worker is unreachable.
-- **Start screen.** "Cluster now" lists each workload in scope, failing first,
-  with its readiness, restarts and why it is unhealthy (waiting reasons, the last
-  exit, and when the latest warning event happened, its text on hover).
-  **Investigate** starts a conversation about one workload; **Investigate all**
-  about every unhealthy one. The worker builds this summary with its own
-  identity; it is not sent to the model. Below it, a line says how many
-  conversations your memory holds, with a link to the memory view. The side
-  panel stays closed until a conversation has output.
+- **Top bar.** One button says what the agent reads and with which model, and
+  turns amber when the worker is unreachable. It opens **How this works**: the
+  worker, its containment and egress, and how the agent is contained, said once
+  here rather than on every view. Settings opens it too.
+- **Start screen.** Under the composer, each namespace lists its workloads,
+  failing first, with readiness and why each is unhealthy (waiting reasons, the
+  last exit, restarts, when the latest warning happened). Only each workload's
+  dot is coloured. **Investigate** starts a conversation about one workload;
+  **Investigate all** about every unhealthy one. The worker builds this summary
+  with its own identity; it is not sent to the model. The side panel stays
+  closed until a conversation has output.
 - **Memory.** The book button beside the history button shows what the agent
   remembers the way history shows conversations: one entry per earlier
   conversation, grouped by day. Select one to open it, forget one, or forget
-  everything. **Correct it** starts a conversation to tell the agent what is
-  wrong; it is remembered when that conversation goes idle. While history itself
-  is open, the start screen steps aside.
+  everything. **Correct something** starts a conversation to tell the agent what
+  is wrong; it is remembered when that conversation goes idle. While history
+  itself is open, the start screen steps aside.
 - **Steps.** Each step is titled with what ran (`kubectl describe pod …`,
-  `pod_logs payments-api -n payments match="timeout"`) and where: the sandbox or
-  the harness.
-- **Findings.** `output/findings.json` opens as cards: the workload, the
-  problem, the cause, the proposed fix (marked "not run", with a copy button)
-  and each quote with **Show in source**, which opens the evidence file at that
-  line. A banner says whether the host check passed.
+  `pod_logs payments-api -n payments match="timeout"`); its icon says where it
+  ran. The title adds only what is unusual: a non-zero exit, or `harness` for a
+  harness tool.
+- **Findings.** `output/findings.json` opens as one section per finding, titled
+  by its short problem label: the workload, the cause, the proposed fix as a code
+  block with a copy button, and each quote with its evidence file, which opens
+  the file at that line. A line above says how many quotes the host check found;
+  a failed check is red.
 - **Evidence.** The side panel names each evidence file by the read that
   produced it (`kubectl get pods -n payments -o wide`, `pod_logs …`), with the
-  file name on hover. A log excerpt shows its counts (read, shown, withheld,
-  masked), errors and warnings highlighted, masked values and collapsed repeats
-  marked. A `kubectl get` read shows as a table with status coloured.
+  file name on hover; files from earlier turns are muted. A log excerpt says how
+  many lines it shows of how many, with errors and warnings highlighted and
+  masked values and collapsed repeats marked. A `kubectl get` read shows as a
+  table; only failing statuses are coloured.
+- **Trace.** One line of totals (time, model calls, tokens, tool calls,
+  failures), then each lane and step on one time axis. Bars take their lane's
+  colour; failed commands are red.
 
 ## Memory
 

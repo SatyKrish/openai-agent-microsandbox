@@ -3,9 +3,10 @@
 //
 // The SRE agent's UI. ChatKit runs the conversation; around it the page shows the
 // cluster's health on the start screen (sre.js), follow-up suggestions, what the agent
-// remembers, and a side panel with the conversation's files, the quotes the host
-// checked and the turn's trace. The panel opens when a turn has something to show
-// and stays collapsed once you collapse it. The harness's API serves the data.
+// remembers, and a side panel with the conversation's files and the turn's trace. The
+// panel opens when a turn has something to show and stays collapsed once you collapse
+// it. How the agent is contained is said once, in the How this works dialog. The
+// harness's API serves the data.
 
 import { $, el, formatBytes, getJSON, plural, readStorage, writeStorage } from "./dom.js";
 import { findQuote, renderCode, renderText } from "./render.js";
@@ -28,8 +29,8 @@ const state = {
   used: new Map(), // conversation -> suggestions already sent from it
   poll: null,
   themeChoice: "system",
-  memoryVersion: 0, // bumped when memory is forgotten, so views of it reload
   historyOpen: false, // ChatKit's own history view is showing
+  worker: null, // the sandbox worker's description, when it answers
 };
 const key = (name) => `${state.config.name || "agent"}:${name}`;
 
@@ -70,8 +71,8 @@ function chatkitOptions() {
     api: { url: "/chatkit", domainKey: "local-dev" },
     initialThread: state.threadId,
     theme: {
-      colorScheme: scheme, radius: "round", density: "normal",
-      color: { accent: { primary: scheme === "dark" ? "#97ADE9" : "#2F5BD3", level: 1 } },
+      colorScheme: scheme, radius: "soft", density: "normal",
+      color: { accent: { primary: scheme === "dark" ? "#8AA9F0" : "#2557D6", level: 1 } },
     },
     // Memory sits beside ChatKit's own history button; ChatKit draws header buttons from its own icon set.
     header: { enabled: true, title: { enabled: true },
@@ -87,7 +88,10 @@ function chatkitOptions() {
         const payload = action.payload || {};
         if (action.type === "open_file") openPanel({ tab: "files", turn: payload.turn, view: { path: payload.path } });
         if (action.type === "open_trace") openPanel({ tab: "trace", turn: payload.turn });
-        if (action.type === "open_quotes") openPanel({ tab: "quotes", turn: payload.turn });
+        // Cards saved before the Quotes tab went have this button; the findings show each quote with its source.
+        if (action.type === "open_quotes") {
+          openPanel({ tab: "files", turn: payload.turn, view: { path: state.config.preferred_output || "output/findings.json" } });
+        }
       },
     },
   };
@@ -314,11 +318,6 @@ function defaultPath(turn, files) {
   return files.find((file) => file.path.startsWith("output/"))?.path || files[0]?.path || null;
 }
 
-function badgeFor(file, turn) {
-  if (!turn || file.turn !== turn.number || !file.changed) return null;
-  return file.upload ? "uploaded" : file.evidence ? "read" : file.new ? "new" : "changed";
-}
-
 /* ---------- Rendering ---------- */
 
 function render() {
@@ -336,17 +335,12 @@ function renderHeader() {
   toggle.setAttribute("aria-label", state.panelOpen ? "Collapse files and trace" : "Show files and trace");
   const count = state.panelOpen ? 0 : unseenCount();
   $("panel-count").hidden = !count;
-  $("panel-count").textContent = `${count} new`;
+  $("panel-count").textContent = String(count);
+  $("panel-count").title = plural(count, "new file");
 }
 
-// A line under the chat only while something runs; the workspace's name is in its title.
 function renderStatus() {
-  const thread = state.thread;
-  const running = thread?.state === "running";
-  $("elsewhere").hidden = thread?.state !== "elsewhere";
-  $("workspace-status").hidden = !running;
-  $("workspace-text").textContent = running ? "Investigating · each command runs in its own MXC container" : "";
-  $("workspace-status").title = thread?.workspace ? `Workspace ${thread.workspace} on the sandbox worker` : "";
+  $("elsewhere").hidden = state.thread?.state !== "elsewhere";
 }
 
 function renderSuggestions() {
@@ -365,7 +359,7 @@ function renderSuggestions() {
   box.hidden = false;
 }
 
-// The start screen's health board and memory line (sre.js), above the composer's suggestions.
+// The start screen's health board (sre.js).
 function renderHome() {
   const home = $("agent-home");
   if (state.historyOpen) {
@@ -373,8 +367,7 @@ function renderHome() {
     return;
   }
   const running = state.responding || latestTurn()?.status === "running";
-  renderSreHome({ container: home, suggest, config: state.config, threadId: state.threadId, running, openMemory,
-    memoryVersion: state.memoryVersion })
+  renderSreHome({ container: home, suggest, config: state.config, threadId: state.threadId, running })
     .then(() => { if (state.historyOpen) home.hidden = true; })
     .catch((error) => console.warn("renderHome failed", error));
 }
@@ -392,9 +385,6 @@ function renderPanel() {
   const latest = latestTurn();
   if (latest && latest.status !== "running") remember("seen", state.threadId, latest.number);
   const turn = currentTurn();
-  const quotes = turn?.check?.checked_quotes || [];
-  if (state.tab === "quotes" && !quotes.length) state.tab = "files";
-  $("tab-quotes").hidden = !quotes.length;
   $("tab-trace").hidden = !state.threadId;
   if (!state.threadId && state.tab === "trace") state.tab = "files";
   for (const tab of document.querySelectorAll("[data-tab]")) tab.setAttribute("aria-selected", String(tab.dataset.tab === state.tab));
@@ -418,7 +408,6 @@ function renderPanel() {
     return renderTrace({ threadId: state.threadId, turn, body, config: state.config, setHead, isCurrent,
       onLive: () => { if (isCurrent()) renderTrace({ threadId: state.threadId, turn: currentTurn() || turn, body, config: state.config, setHead, isCurrent, onLive: () => renderPanel() }); } });
   }
-  if (state.tab === "quotes" && turn) return renderQuotes(turn, quotes, body);
   return renderFiles(turn, body, isCurrent);
 }
 
@@ -428,11 +417,10 @@ function renderFiles(turn, body, isCurrent) {
     setHead(turn ? `Turn ${turn.number}` : "Workspace files", turn?.status === "running" ? "The agent is working…" : "");
     body.replaceChildren(el("div", { class: "empty" },
       el("h3", {}, turn ? "No files yet" : "Files appear here"),
-      el("p", {}, state.config.intro || "After each turn the server copies the agent's files here and checks them on the host.")));
+      el("p", {}, "The evidence the agent reads and the findings it writes.")));
     return;
   }
   const bar = $("file-bar");
-  if (!state.thread?.turns?.length && state.config.starting_note) bar.append(el("p", { class: "file-note" }, state.config.starting_note));
   let group = null;
   for (const file of files) {
     const index = groupOf(file.path);
@@ -441,21 +429,23 @@ function renderFiles(turn, body, isCurrent) {
       group = label;
       bar.append(el("span", { class: "file-group" }, label));
     }
-    const badge = badgeFor(file, turn);
-    const tone = file.status?.state || (file.start ? "source" : "");
+    // Files from earlier turns are muted; only a failed check is marked.
+    const earlier = turn && !file.start && file.turn !== turn.number;
+    const failed = file.status?.state === "failed";
     // Evidence is named by the read that produced it; its file name is on hover.
     const name = file.evidence && file.command ? file.command : file.path.replace(/^(output|inputs|evidence|work)\//, "");
     bar.append(el("button", {
-      type: "button", class: `file-chip ${tone}`, "aria-pressed": String(state.view?.path === file.path),
-      title: [file.path, file.status?.label].filter(Boolean).join(" · "),
+      type: "button", class: `file-chip${earlier ? " earlier" : ""}`, "data-path": file.path,
+      "aria-pressed": String(state.view?.path === file.path),
+      title: [file.path, file.status?.label, earlier ? `from turn ${file.turn}` : ""].filter(Boolean).join("\n"),
       onclick: () => apply({ tab: "files", view: { path: file.path } }),
-    }, tone && tone !== "source" ? el("span", { class: `state-dot ${tone}`, "aria-hidden": "true" }) : null,
-      el("span", { class: "file-chip-label" }, name), badge ? el("span", { class: "badge" }, badge) : null));
+    }, failed ? el("span", { class: "state-dot failed", "aria-label": "check failed" }) : null,
+      el("span", { class: "file-chip-label" }, name)));
   }
   const path = state.view?.path && files.some((file) => file.path === state.view.path) ? state.view.path : defaultPath(turn, files);
   const file = files.find((item) => item.path === path);
   // A long list scrolls; keep the open file's chip in view.
-  for (const chip of bar.querySelectorAll(".file-chip")) chip.setAttribute("aria-pressed", String(chip.title.split(" · ")[0] === path));
+  for (const chip of bar.querySelectorAll(".file-chip")) chip.setAttribute("aria-pressed", String(chip.dataset.path === path));
   bar.querySelector('.file-chip[aria-pressed="true"]')?.scrollIntoView({ block: "nearest" });
   if (!file) return;
   renderFile(turn, file, body, isCurrent);
@@ -467,7 +457,7 @@ async function renderFile(turn, file, body, isCurrent) {
   setHead(name, [file.path, file.too_large ? "over the transfer limit" : formatBytes(file.bytes),
     file.start ? "" : turn && file.turn === turn.number ? `turn ${file.turn}` : `from turn ${file.turn}`, status].filter(Boolean).join(" · "));
   if (file.too_large) {
-    body.replaceChildren(el("div", { class: "notice warn" }, "This file is larger than the provider's transfer limit and was not copied."));
+    body.replaceChildren(el("p", { class: "note" }, "Over the transfer limit, so it was not copied."));
     return;
   }
   const url = fileUrl(file);
@@ -485,16 +475,13 @@ async function renderFile(turn, file, body, isCurrent) {
   const nodes = [];
   if (file.status?.state === "unchecked" && turn && file.turn === turn.number) {
     const checked = Object.entries(turn.file_status || {}).filter(([, item]) => item.state === "checked").map(([path]) => path.split("/").pop());
-    nodes.push(el("div", { class: "notice warn" }, `Not checked on the host: ${name} is the agent's own work.`,
-      checked.length ? ` The host checked ${checked.join(", ")}.` : ""));
+    nodes.push(el("p", { class: "note" }, `Not checked against the evidence${checked.length ? `; ${checked.join(", ")} is` : ""}.`));
   }
   if (!response.ok) {
-    nodes.push(el("div", { class: "notice err" }, "The file could not be loaded."));
+    nodes.push(el("p", { class: "note err" }, "The file could not be loaded."));
   } else if (highlight) {
     const range = findQuote(text, highlight);
-    nodes.push(el("div", { class: `notice ${range ? "ok" : "warn"}` }, range
-      ? "The quote, highlighted in the host's copy of the source."
-      : "The quote is not in this copy of the source."));
+    if (!range) nodes.push(el("p", { class: "note err" }, "The quote is not in this copy of the file."));
     nodes.push(renderCode(text, range));
   } else {
     const rendered = renderText(name, text);
@@ -504,45 +491,35 @@ async function renderFile(turn, file, body, isCurrent) {
   body.replaceChildren(...nodes);
 }
 
-function renderQuotes(turn, quotes, body) {
-  setHead("Checked quotes", `${plural(quotes.length, "quote")} · each appears in the host's copy of the source it cites`);
-  const bySource = new Map();
-  for (const quote of quotes) {
-    if (!bySource.has(quote.source)) bySource.set(quote.source, []);
-    bySource.get(quote.source).push(quote);
-  }
-  body.replaceChildren(el("div", { class: "quotes" }, [...bySource.entries()].map(([source, items]) => el("section", { class: "quote-group" },
-    el("h3", {}, source),
-    items.map((quote) => el("figure", { class: `quote ${quote.kind === "visual" ? "visual" : ""}` },
-      el("blockquote", {}, `“${quote.quote}”`),
-      el("figcaption", {},
-        quote.context ? el("span", { class: "muted" }, quote.context) : null,
-        quote.page ? el("span", { class: "muted" }, `page ${quote.page}`) : null,
-        quote.kind === "visual" ? el("span", { class: "pill" }, "read from the page image · review") : null,
-        el("button", { type: "button", onclick: () => apply({ tab: "files", view: { path: source, page: quote.page,
-          highlight: quote.page ? null : quote.quote } }) },
-          "Show in source"))))))));
-}
-
 /* ---------- Sandbox worker ---------- */
 
-// One chip: what the agent reads and with which model; the worker's details on hover, amber when it is down.
+// One chip: what the agent reads and with which model, amber when the worker is down; it opens How this works.
 async function refreshWorker() {
   if (!state.config.worker) return;
   const chip = $("context-chip");
-  const scope = (state.config.namespaces || []).join(", ");
   const { status, body } = await getJSON("/api/worker").catch(() => ({ status: 0, body: null }));
+  state.worker = status === 200 ? body : null;
   chip.hidden = false;
-  chip.classList.toggle("warn", status !== 200);
-  $("context-dot").classList.toggle("ok", status === 200);
-  if (status !== 200) {
-    $("context-text").textContent = `${scope} · worker unreachable`;
-    chip.title = "The harness cannot reach its MXC sandbox worker; new turns fail until it is back.";
-    return;
-  }
-  $("context-text").textContent = [scope, state.config.model].filter(Boolean).join(" · ");
-  chip.title = `Reads ${scope} with the sandbox worker's read-only identity\nWorker ${body.worker_id} · MXC ${body.containment}`
-    + `\nContainers reach ${body.egress}\nModel ${state.config.model}`;
+  chip.classList.toggle("warn", !state.worker);
+  $("context-dot").classList.toggle("ok", Boolean(state.worker));
+  $("context-scope").textContent = (state.config.namespaces || []).join(", ");
+  $("context-model").textContent = state.worker ? state.config.model || "" : "worker unreachable";
+}
+
+function openAbout() {
+  const worker = state.worker;
+  const facts = [
+    ["Reads", (state.config.namespaces || []).join(", ")],
+    ["Model", state.config.model],
+    ["Worker", worker ? `${worker.worker_id}, MXC ${worker.containment}` : "unreachable; new turns fail until it is back"],
+    ["Containers reach", worker?.egress],
+  ].filter(([, value]) => value);
+  $("about-facts").replaceChildren(...facts.flatMap(([name, value]) => [el("dt", {}, name), el("dd", {}, value)]));
+  const days = state.config.memory_max_age_days;
+  const memory = state.config.memory ? ["The agent starts each conversation from what it learned in earlier ones and "
+    + `checks that against the cluster.${days ? ` A conversation is forgotten ${plural(days, "day")} after its last message.` : ""}`] : [];
+  $("about-list").replaceChildren(...[...(state.config.about || []), ...memory].map((line) => el("li", {}, line)));
+  $("about-dialog").showModal();
 }
 
 /* ---------- Menus and dialogs ---------- */
@@ -589,14 +566,12 @@ async function renderMemory() {
     body.replaceChildren(el("p", { class: "memory-error" }, "Memory is unavailable right now."));
     return;
   }
-  $("memory-whose").textContent = memory.shared ? "Guest · shared by everyone not signed in" : memory.user;
-  const days = state.config.memory_max_age_days;
+  $("memory-whose").textContent = memory.shared ? "Guest" : memory.user;
+  $("memory-whose").title = memory.shared ? "Everyone who isn't signed in shares this memory." : "";
   const minutes = Math.round((state.config.idle_close_s || 300) / 60);
-  const note = el("p", { class: "memory-note" }, "The agent starts each conversation with this and checks it against "
-    + `what it reads now.${days ? ` A conversation is forgotten ${plural(days, "day")} after its last message.` : ""}`);
   if (!memory.remembered.length) {
-    body.replaceChildren(note, el("p", { class: "memory-empty" }, "Nothing remembered yet. When a conversation has been "
-      + `idle for ${plural(minutes, "minute")}, the agent distils what it learned.`));
+    body.replaceChildren(el("p", { class: "memory-empty" }, "Nothing remembered yet. A conversation is remembered "
+      + `once it has been idle for ${plural(minutes, "minute")}.`));
     return;
   }
   const groups = new Map();
@@ -611,7 +586,7 @@ async function renderMemory() {
       onclick: () => openRemembered(item.id) }, item.description || item.id),
     el("button", { type: "button", class: "link-button danger memory-forget", "aria-label": "Forget this conversation",
       onclick: () => forgetMemory(item, memory.shared) }, "Forget"));
-  body.replaceChildren(note,
+  body.replaceChildren(
     ...[...groups].flatMap(([group, items]) => [el("div", { class: "memory-group" }, group),
       el("ul", { class: "memory-list" }, items.map(entry))]),
     el("div", { class: "memory-more" },
@@ -619,10 +594,11 @@ async function renderMemory() {
         el("pre", {}, memory.text)) : null,
       memory.index ? el("details", { class: "memory-section" }, el("summary", {}, "Everything it remembers (MEMORY.md)"),
         el("pre", {}, memory.index)) : null,
-      el("p", { class: "memory-note" }, "Something wrong? Tell the agent in a conversation; it is remembered when that "
-        + "conversation goes idle. ", el("button", { type: "button", class: "link-button", onclick: correctMemory }, "Correct it")),
-      el("div", {}, el("button", { type: "button", class: "link-button danger", onclick: () => forgetMemory(null, memory.shared) },
-        "Forget everything…"))));
+      el("div", { class: "memory-actions" },
+        el("button", { type: "button", class: "link-button", title: "Tell the agent in a new conversation; it is "
+          + "remembered when that conversation goes idle.", onclick: correctMemory }, "Correct something"),
+        el("button", { type: "button", class: "link-button danger", onclick: () => forgetMemory(null, memory.shared) },
+          "Forget everything…"))));
 }
 
 function openMemory() {
@@ -661,9 +637,7 @@ async function forgetMemory(item, shared) {
   if (dialog.returnValue !== "forget") return;
   const url = item ? `/api/memory/conversations/${encodeURIComponent(item.id)}` : "/api/memory";
   const response = await fetch(url, { method: "DELETE" }).catch(() => null);
-  state.memoryVersion += 1;
   await renderMemory();
-  renderHome();
   if (!response?.ok && response?.status !== 404) {
     $("memory-body").prepend(el("p", { class: "memory-error" }, "Memory could not be changed. The server log has the cause."));
   }
@@ -699,6 +673,8 @@ async function main() {
 
   const setSettings = popover("settings-button", "settings-panel");
   const setMenu = popover("conversation-menu-button", "conversation-menu");
+  $("context-chip").addEventListener("click", openAbout);
+  $("about-open").addEventListener("click", () => { setSettings(false); openAbout(); });
   if (state.config.memory) {
     $("memory-back").addEventListener("click", closeMemory);
     document.addEventListener("keydown", (event) => {

@@ -52,8 +52,10 @@ you saw scroll past. Logs come only from `pod_logs`, as excerpts.
      }]}
      ```
 
-     Each finding needs at least one evidence entry, citing a file the worker
-     saved. A quote is text copied exactly from that file, without the line
+     `problem` is a short label, at most five words, such as
+     `CrashLoopBackOff`, `Image not found` or `Readiness probe failing`; the
+     cause and the fix go in their own fields. Each finding needs at least one
+     evidence entry, citing a file the worker saved. A quote is text copied exactly from that file, without the line
      number prefix of a log excerpt; whitespace differences are allowed.
      Runbooks are context, not evidence.
 7. Reopen both files and confirm every quote appears in its evidence file, for

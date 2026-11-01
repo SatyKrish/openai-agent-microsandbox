@@ -14,6 +14,7 @@ from chatkit.types import CustomTask, UserMessageItem, Workflow, WorkflowItem
 _EXIT_CODE = re.compile(r"Process exited with code (-?\d+)")
 _TASK_TEXT = 1600
 # Where a tool ran, shown on its step: harness tools hold credentials, sandbox tools run in an MXC container.
+# The icon says it for every step; the title names only the exception, the harness.
 ICONS = {"harness": "keys", "sandbox": "cube"}
 
 
@@ -80,8 +81,10 @@ def headline(name: str, raw) -> str:
 
 
 def step_title(name: str, where: str, status: str = "", summary: str = "") -> str:
-    """``kubectl get pods -n payments · exit 0 · sandbox``: what ran, how it ended, and where."""
-    return " · ".join(part for part in (summary or name, status, where) if part)
+    """``kubectl logs api -n payments · exit 1``: what ran, and only what is unusual about it, a failure or a
+    harness tool; a sandbox command that exited 0 is just its command."""
+    return " · ".join(part for part in (summary or name, "" if status == "exit 0" else status,
+                                        "harness" if where == "harness" else "") if part)
 
 
 def describe_output(output) -> tuple[str, str]:

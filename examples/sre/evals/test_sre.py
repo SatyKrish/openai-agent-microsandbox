@@ -115,9 +115,13 @@ async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(
         assert turn["file_status"]["output/findings.json"]["state"] == "checked"
         assert turn["file_status"][PODS_FILE]["state"] == "source"
         card = json.dumps(stream, ensure_ascii=False)
-        assert "3 reads recorded as evidence by the sandbox worker" in card
-        assert "1 finding · 2 quotes match the evidence" in card
-        assert "deployment/payments-processor · CrashLoopBackOff" in card
+        assert "1 finding, 2 quotes found in the evidence" in card
+        assert '"value": "CrashLoopBackOff"' in card and '"value": "deployment/payments-processor"' in card
+        # Steps name only what is unusual: here, the harness tool.
+        titles = [event["update"]["task"]["title"] for event in stream
+                  if (event.get("update") or {}).get("type") == "workflow.task.updated"]
+        assert any(title.startswith("pod_logs ") and title.endswith(" · harness") for title in titles)
+        assert "kubectl get pods -n payments -o wide" in titles
         assert turn["check"]["summary"] == [{"resource": "deployment/payments-processor", "problem": "CrashLoopBackOff"}]
         assert [tool["where"] for tool in turn["tools"]] == ["sandbox", "harness", "harness", "sandbox", "sandbox",
                                                             "sandbox", "sandbox"]
@@ -152,7 +156,7 @@ def test_the_ui_serves_its_own_page_and_the_health_summary(worker, tmp_path):
             assert "export async function renderHome" in browser.get("/static/sre.js").text
             assert browser.get("/static/app.css").status_code == 200 and browser.get("/harness/app.js").status_code == 404
             config = browser.get("/api/config").json()
-            assert "extension" not in config and config["greeting"].startswith("Investigate unhealthy workloads")
+            assert "extension" not in config and config["greeting"] and len(config["about"]) == 4
             assert config["health"] is True and config["worker"] is True and config["follow_ups"]
             health = browser.get("/api/health").json()
             processor = health["namespaces"][0]["workloads"][0]

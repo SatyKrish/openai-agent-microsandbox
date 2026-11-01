@@ -84,8 +84,8 @@ make ui
 
 You see each command as it runs, every one in its own MXC container. The agent
 writes `output/findings.md` and `output/findings.json`; the side panel shows the
-findings as cards with their proposed fixes, the kubectl reads and log excerpts
-the worker recorded as evidence, the quotes the harness checked, and the turn's
+findings with their proposed fixes and the quotes the harness checked, the
+kubectl reads and log excerpts the worker recorded as evidence, and the turn's
 trace when tracing is on. Later messages continue in the same workspace. When a
 conversation goes idle, the SDK distils what it learned into your memory,
 which your next conversation starts with; the book button beside history

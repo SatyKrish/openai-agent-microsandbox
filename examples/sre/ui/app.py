@@ -18,13 +18,17 @@ STATIC = Path(__file__).resolve().parent / "static"
 
 # The page's words that are not code; served at /api/config with what __main__ and the harness add.
 UI = {
-    "greeting": "Investigate unhealthy workloads from an isolated, read-only sandbox",
-    "intro": "Every command the agent runs starts in its own Microsoft eXecution Container on this application's "
-             "sandbox worker. kubectl there uses the worker's read-only identity and reaches only the Kubernetes API; "
-             "the worker never holds the model's API key. Plain kubectl reads are recorded as evidence in the "
-             "worker's journal, which no container can edit, and after every turn the harness checks each quote in "
-             "findings.json against that copy. The agent proposes fixes; it cannot apply them.",
-    "starting_note": "Seeded into every new workspace: the application team's runbooks.",
+    "greeting": "Which workload should I look at?",
+    # How this works: said once, in the dialog the top bar opens, rather than on every view.
+    "about": [
+        "Each command runs in its own Microsoft eXecution Container on the sandbox worker. kubectl there has the "
+        "worker's read-only identity and reaches only the Kubernetes API. The worker never holds the model's API key.",
+        "The worker records each kubectl read as evidence in a journal no container can edit. A pod's log is cut to "
+        "an excerpt there, with credentials and personal data masked; the full log never reaches the model.",
+        "After each turn the harness checks every quote in findings.json against the journal's copy. Causes are the "
+        "agent's reasoning; fixes are proposals it cannot run.",
+        "New workspaces start with the application team's runbooks.",
+    ],
     "follow_ups": [
         {"label": "How would I fix it?", "prompt": "For each finding, propose the smallest fix as commands I could run "
                                                    "myself. Don't run anything."},

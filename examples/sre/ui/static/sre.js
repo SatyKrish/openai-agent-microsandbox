@@ -2,18 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The SRE views of the page: a health board of the workloads the worker can read,
-// findings as cards with copyable fixes and checked quotes, and readable evidence:
-// log excerpts and kubectl tables. Everything from the cluster, the sandbox or the
-// model is inserted as text, never as HTML.
+// findings with copyable fixes and checked quotes, and readable evidence: log
+// excerpts and kubectl tables. Colour marks state and failures only. Everything from
+// the cluster, the sandbox or the model is inserted as text, never as HTML.
 
 import { el, getJSON, plural } from "./dom.js";
 
 const HEALTH_EVERY_MS = 10_000;
 let health = { at: 0, status: 0, body: null, pending: null };
-let memory = { at: 0, version: 0, body: null };
 
 const STATE_LABEL = { failing: "failing", degraded: "degraded", healthy: "healthy" };
 const BAD = /CrashLoopBackOff|ImagePullBackOff|ErrImagePull|Error|OOMKilled|Unschedulable|CreateContainer|InvalidImage|Failed|Evicted/;
+const COUNTS = ["failing", "degraded", "healthy"];
 const GOOD = /^(Running|Completed|Succeeded)$/;
 
 function ago(iso) {
@@ -60,55 +60,32 @@ function prompt(workload, namespace) {
     + "Find the cause from the evidence and propose a fix.";
 }
 
-// Kubernetes counts a repeated warning event's occurrences for as long as it lasts, so the count only grows;
-// when the latest one happened says more.
-function warningChip(workload) {
-  if (!workload.warnings) return null;
-  const when = workload.last_warning_at ? ago(workload.last_warning_at) : "";
-  return el("span", { class: "sre-chip warn", title: workload.last_warning || "" }, when ? `warning ${when}` : "warnings");
+// What is wrong, as plain text. Kubernetes counts a repeated warning event's occurrences for as long as it
+// lasts, so the count only grows; when the latest one happened says more.
+function reasons(workload) {
+  const warned = workload.warnings && workload.last_warning_at ? `last warning ${ago(workload.last_warning_at)}` : "";
+  return [...workload.reasons, workload.restarts ? plural(workload.restarts, "restart") : "", warned]
+    .filter(Boolean).join(", ");
 }
 
 function workloadRow(suggest, workload, namespace) {
   return el("li", { class: `sre-workload ${workload.state}` },
     el("span", { class: "sre-dot", title: STATE_LABEL[workload.state] }),
-    el("span", { class: "sre-name" }, el("span", { class: "sre-kind" }, workload.kind), workload.name),
+    el("span", { class: "sre-name", title: workload.kind }, workload.name),
     el("span", { class: "sre-ready", title: "ready / desired" }, `${workload.ready}/${workload.desired}`),
-    el("span", { class: "sre-reasons" },
-      workload.reasons.map((reason) => el("span", { class: `sre-chip${BAD.test(reason) ? " bad" : ""}` }, reason)),
-      workload.restarts ? el("span", { class: "sre-chip" }, plural(workload.restarts, "restart")) : null,
-      warningChip(workload)),
+    el("span", { class: "sre-reasons", title: workload.last_warning || "" }, reasons(workload)),
     workload.state === "healthy" ? el("span") : el("button", { type: "button", class: "sre-investigate",
       onclick: () => suggest(prompt(workload, namespace)) }, "Investigate"));
 }
 
-async function loadMemory(version) {
-  if (memory.version === version && Date.now() - memory.at < HEALTH_EVERY_MS) return memory.body;
-  const { status, body } = await getJSON("/api/memory").catch(() => ({ status: 0, body: null }));
-  memory = { at: Date.now(), version, body: status === 200 ? body : null };
-  return memory.body;
-}
-
-// One line on the start screen; the Memory view, beside the history button, lists and forgets what is remembered.
-function memoryLine(config, remembered, openMemory) {
-  if (!config.memory) return null;
-  const whose = !remembered || remembered.shared ? "The guest memory, shared by everyone not signed in."
-    : `${remembered.user}'s memory.`;
-  const count = remembered?.conversations || 0;
-  return el("p", { class: "sre-board-note sre-memory", title: `${whose} Investigations start from it.` },
-    count ? `${plural(count, "remembered conversation")} · ` : "Nothing remembered yet · ",
-    el("button", { type: "button", class: "sre-link", onclick: () => openMemory?.() }, "View memory"));
-}
-
-export async function renderHome({ container, suggest, config, threadId, running, openMemory, memoryVersion }) {
+export async function renderHome({ container, suggest, config, threadId, running }) {
   if (!config.health || threadId || running) {
     container.hidden = true;
     return;
   }
-  const [{ status, body }, remembered] = await Promise.all([loadHealth(),
-    config.memory ? loadMemory(memoryVersion) : null]);
+  const { status, body } = await loadHealth();
   if (status !== 200 || !body) {
-    container.replaceChildren(el("p", { class: "sre-board-note" },
-      "Cluster health is unavailable: the sandbox worker cannot be reached right now."));
+    container.replaceChildren(el("p", { class: "sre-board-note" }, "Can't reach the sandbox worker for cluster health."));
     container.hidden = false;
     return;
   }
@@ -120,32 +97,23 @@ export async function renderHome({ container, suggest, config, threadId, running
     const all = unhealthy.length > 1 ? el("button", { type: "button", class: "sre-investigate",
       onclick: () => suggest(`Which workloads in ${item.namespace} are unhealthy (${unhealthy.map((workload) =>
         workload.name).join(", ")}), and why? Find each cause from the evidence and propose fixes.`) },
-      `Investigate all ${unhealthy.length}`) : null;
-    return el("div", { class: "sre-namespace" },
+      "Investigate all") : null;
+    return el("section", { class: "sre-namespace" },
       el("div", { class: "sre-board-head" },
-        el("strong", {}, item.namespace),
-        el("span", { class: "sre-counts" },
-          counts.failing ? el("span", { class: "sre-count failing" }, `${counts.failing} failing`) : null,
-          counts.degraded ? el("span", { class: "sre-count degraded" }, `${counts.degraded} degraded`) : null,
-          el("span", { class: "sre-count healthy" }, `${counts.healthy} healthy`)),
+        el("h2", {}, item.namespace),
+        el("span", { class: "sre-counts" }, COUNTS.filter((state) => counts[state] || state === "healthy")
+          .map((state) => el("span", { class: state === "failing" ? "failing" : "" }, `${counts[state]} ${state}`))),
         all),
       item.error ? el("p", { class: "sre-board-note" }, `Could not read ${item.namespace}: ${item.error}`)
         : el("ul", { class: "sre-workloads" }, item.workloads.map((workload) => workloadRow(suggest, workload,
           item.namespace))));
   });
-  container.replaceChildren(el("div", { class: "sre-board" },
-    el("div", { class: "sre-board-title", title: "Read by the sandbox worker with its read-only identity: "
-      + "workload metadata only, never sent to the model." },
-      "Cluster now", updated ? el("span", { class: "sre-board-note" }, ` · ${updated}`) : null),
-    sections, memoryLine(config, remembered, openMemory)));
+  container.replaceChildren(el("div", { class: "sre-board" }, sections,
+    updated ? el("p", { class: "sre-board-note" }, `As of ${updated}`) : null));
   container.hidden = false;
 }
 
 /* ---------- Findings ---------- */
-
-function problemClass(problem) {
-  return BAD.test(problem || "") ? "bad" : "warn";
-}
 
 function renderFindings({ body, open, check, text }) {
   let findings;
@@ -155,37 +123,34 @@ function renderFindings({ body, open, check, text }) {
   } catch {
     return false;
   }
-  const banner = check?.status === "evidence_passed"
-    ? el("div", { class: "notice ok", title: "Every quote appears in the worker's journal copy of the evidence it cites. "
-      + "Causes and fixes are the agent's reasoning; fixes are proposals and were not run." },
-      `${plural(check.quotes, "quote")} match the recorded evidence.`)
-    : check?.status === "failed" ? el("div", { class: "notice err" }, `Evidence check failed: ${check.detail || ""}`)
-      : el("div", { class: "notice warn" }, "Not checked on the host for this turn.");
+  const checked = check?.status === "evidence_passed" ? `${plural(findings.length, "finding")}, `
+    + (check.quotes === 1 ? "1 quote, found in the evidence" : `${check.quotes} quotes, all found in the evidence`) : null;
+  const failed = check?.status === "failed" ? el("p", { class: "note err" }, `Evidence check failed: ${check.detail || ""}`)
+    : !checked ? el("p", { class: "note" }, "Not checked against the evidence.") : null;
   const raw = el("pre", { class: "sre-json", hidden: true }, JSON.stringify(findings, null, 2));
   const toggle = el("button", { type: "button", class: "sre-link" }, "View JSON");
   toggle.addEventListener("click", () => {
     raw.hidden = !raw.hidden;
     toggle.textContent = raw.hidden ? "View JSON" : "Hide JSON";
   });
+  // The problem is the finding's title: a short label, as the triage skill asks for.
   const cards = findings.map((finding) => el("article", { class: "sre-finding" },
-    el("header", {},
-      // A short label; agents sometimes write a sentence here, which stays available on hover.
-      el("span", { class: `sre-problem ${problemClass(finding.problem)}`, title: finding.problem || "" },
-        String(finding.problem || "finding").split(/[;:.]\s|,\s/)[0].slice(0, 40)),
-      el("strong", {}, finding.resource || "resource"),
-      finding.namespace ? el("span", { class: "sre-muted" }, `in ${finding.namespace}`) : null),
+    el("h3", {}, String(finding.problem || "Finding")),
+    el("p", { class: "sre-resource" }, finding.resource || "resource",
+      finding.namespace ? el("span", { class: "muted" }, ` in ${finding.namespace}`) : null),
     finding.cause ? el("p", { class: "sre-cause" }, finding.cause) : null,
     finding.fix ? el("div", { class: "sre-fix" },
-      el("div", { class: "sre-fix-head" }, el("span", {}, "Proposed fix · not run"), copyButton(String(finding.fix))),
+      el("div", { class: "sre-label" }, "Proposed fix", copyButton(String(finding.fix))),
       el("pre", {}, String(finding.fix))) : null,
-    Array.isArray(finding.evidence) && finding.evidence.length ? el("ul", { class: "sre-quotes" },
-      finding.evidence.map((item) => el("li", {},
-        el("blockquote", {}, `“${item.quote}”`),
-        el("span", { class: "sre-muted" }, String(item.file || "").replace(/^evidence\//, "")),
-        item.file ? el("button", { type: "button", class: "sre-link", onclick: () => open(item.file, item.quote) },
-          "Show in source") : null))) : null));
-  body.replaceChildren(el("div", { class: "sre-findings" }, banner,
-    el("div", { class: "sre-findings-head" }, el("span", {}, plural(findings.length, "finding")), toggle), raw, cards));
+    Array.isArray(finding.evidence) && finding.evidence.length ? el("div", { class: "sre-evidence" },
+      el("div", { class: "sre-label" }, "Evidence"),
+      el("ul", { class: "sre-quotes" }, finding.evidence.map((item) => el("li", {},
+        el("blockquote", {}, item.quote),
+        item.file ? el("button", { type: "button", class: "sre-link", title: item.file,
+          onclick: () => open(item.file, item.quote) }, String(item.file).replace(/^evidence\//, "")) : null)))) : null));
+  body.replaceChildren(el("div", { class: "sre-findings" },
+    el("div", { class: "sre-findings-head" }, el("span", {}, checked || plural(findings.length, "finding")), toggle),
+    failed, raw, cards));
   return true;
 }
 
@@ -208,13 +173,12 @@ function renderLogExcerpt({ body, text }) {
       el("span", { class: "sre-log-text" }, parts,
         match?.[4] ? el("span", { class: "sre-repeat" }, `×${match[4]} more, last at line ${match[5]}`) : null));
   });
+  const count = (value) => Number(value).toLocaleString();
   body.replaceChildren(el("div", { class: "sre-log" },
-    el("div", { class: "notice", title: "The worker's log policy kept errors and warnings with their context and the last "
-      + "lines, collapsed repeats, and masked credentials and personal data." },
-      el("strong", {}, "Log excerpt"), " · the raw log never left the worker",
-      stats ? el("div", { class: "sre-stats" },
-        el("span", {}, `${stats[1]} lines read`), el("span", {}, `${stats[2]} shown`),
-        el("span", {}, `${stats[3]} withheld`), el("span", {}, `${stats[4]} values masked`)) : null),
+    el("p", { class: "note", title: "The worker kept errors and warnings with their context and the last lines, "
+      + "collapsed repeats, and masked credentials and personal data." }, stats
+      ? `Excerpt: ${count(stats[2])} of ${count(stats[1])} lines, ${count(stats[4])} values masked.`
+      : "Excerpt of the log, cut by the worker."),
     rows.length ? el("div", { class: "sre-log-lines" }, rows) : el("p", { class: "empty" }, "The log was empty.")));
   return true;
 }

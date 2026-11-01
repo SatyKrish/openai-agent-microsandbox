@@ -5,25 +5,23 @@
 from __future__ import annotations
 
 
+def _plural(count: int, word: str) -> str:
+    return f"{count} {word}{'s' if count != 1 else ''}"
+
+
 def check_rows(conversation, turn: dict, changed: set[str]) -> list[dict]:
+    """One badge for the check's result, then each finding as a line of text: its problem and resource."""
     check = turn.get("check") or {}
-    evidence = sum(1 for item in turn["files"] if item.get("evidence"))
     rows = []
-    if evidence:
-        rows.append({"type": "Text", "size": "sm", "color": "secondary", "value":
-                     f"{evidence} read{'s' if evidence != 1 else ''} recorded as evidence by the sandbox worker."})
     fresh = "output/findings.json" in changed
     if check.get("status") == "evidence_passed" and fresh:
         count, quotes = check["findings"], check["quotes"]
         rows.append({"type": "Row", "children": [{"type": "Badge", "variant": "soft", "color": "success", "label":
-                     f"{count} finding{'s' if count != 1 else ''} · {quotes} quote{'s' if quotes != 1 else ''} match the evidence"}]})
-        if check.get("summary"):
+                     f"{_plural(count, 'finding')}, {_plural(quotes, 'quote')} found in the evidence"}]})
+        for item in check.get("summary") or []:
             rows.append({"type": "Row", "gap": 2, "wrap": "wrap", "children": [
-                {"type": "Badge", "variant": "outline", "color": "danger" if item["problem"] else "secondary",
-                 "label": f"{item['resource']} · {item['problem']}" if item["problem"] else item["resource"]}
-                for item in check["summary"]]})
-        rows.append({"type": "Text", "size": "sm", "color": "secondary", "value":
-                     "Fixes are proposals; this agent cannot change the cluster."})
+                {"type": "Text", "size": "sm", "weight": "semibold", "value": item["problem"] or "Finding"},
+                {"type": "Text", "size": "sm", "color": "secondary", "value": item["resource"]}]})
     elif check.get("status") == "evidence_passed":
         rows.append({"type": "Row", "children": [{"type": "Badge", "variant": "soft", "color": "secondary",
                      "label": "No new findings this turn"}]})
@@ -44,13 +42,13 @@ def file_status(conversation, turn: dict) -> dict[str, dict]:
     for item in turn["files"]:
         path = item["path"]
         if item.get("evidence"):
-            status[path] = {"state": "source", "label": f"recorded by the worker · {item.get('command', 'kubectl')}"}
+            status[path] = {"state": "source", "label": f"evidence: {item.get('command', 'kubectl')}"}
         elif not path.startswith("output/"):
             continue
         elif path == "output/findings.json" and check.get("status") == "evidence_passed":
-            status[path] = {"state": "checked", "label": "quotes checked against the evidence"}
+            status[path] = {"state": "checked", "label": "quotes checked"}
         elif path == "output/findings.json" and check.get("status") == "failed":
             status[path] = {"state": "failed", "label": "evidence check failed"}
         else:
-            status[path] = {"state": "unchecked", "label": "not checked on the host · fixes are proposals"}
+            status[path] = {"state": "unchecked", "label": "not checked"}
     return status

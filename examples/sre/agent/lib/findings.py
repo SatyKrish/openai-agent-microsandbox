@@ -32,7 +32,6 @@ def check(conversation, files: dict[str, bytes]) -> dict:
     quotes = 0
     resources = []
     summary = []  # one line per finding, for the turn card
-    listed = []  # every checked quote and its evidence file, for the UI
     for finding in findings:
         if not isinstance(finding, dict):
             return {"status": "failed", "detail": "Each finding must be an object.", "unchecked": unchecked}
@@ -56,13 +55,10 @@ def check(conversation, files: dict[str, bytes]) -> dict:
                 shown = quote if len(quote) <= 120 else quote[:120] + "…"
                 return {"status": "failed", "detail": f"Not found in {path}: {shown}", "unchecked": unchecked}
             quotes += 1
-            if len(listed) < 80:
-                listed.append({"source": path, "quote": quote if len(quote) <= 240 else quote[:240] + "…",
-                               "context": resource})
         resources.append(resource)
         if len(summary) < 12:
             summary.append({"resource": resource[:80], "problem": str(finding.get("problem") or "")[:60]})
     if not findings:
         return {"status": "no_findings", "unchecked": unchecked}
     return {"status": "evidence_passed", "findings": len(findings), "quotes": quotes, "resources": resources,
-            "unchecked": unchecked, "checked_quotes": listed, "quotes_from": "output/findings.json", "summary": summary}
+            "unchecked": unchecked, "summary": summary}

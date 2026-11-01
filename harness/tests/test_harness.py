@@ -187,12 +187,13 @@ def test_a_turn_running_in_another_process_blocks_a_new_one_until_it_is_stale():
     assert not running_elsewhere({"turns": [{"status": "running", "started_at": stale}]}, set(), "thr_1")
 
 
-async def test_steps_say_what_ran_and_where(worker, tmp_path):
+async def test_steps_say_what_ran_and_where_by_icon(worker, tmp_path):
     chat = make_chat(worker, tmp_path, Calls([shell("echo hi > output/a.txt")], answer="Done."))
     _, stream = await new_thread(chat, "Write a file")
     tasks = [event["update"]["task"] for event in stream if (event.get("update") or {}).get("type") == "workflow.task.updated"]
     done = [task for task in tasks if task["title"].startswith("echo hi")]
-    assert done[-1]["title"] == "echo hi > output/a.txt · exit 0 · sandbox"
+    # A sandbox command that exited 0 is just its command; the icon says where it ran.
+    assert done[-1]["title"] == "echo hi > output/a.txt" and done[-1]["icon"] == "cube"
     thread = (await chat.store.load_threads(10, None, "desc", {})).data[0]
     assert thread.metadata["turns"][0]["tools"][0]["summary"] == "echo hi > output/a.txt"
     assert any(task["title"].startswith("Created the workspace") for task in tasks)
@@ -208,7 +209,7 @@ async def test_parallel_steps_each_keep_their_own_exit_status(worker, tmp_path):
     assert [(tool["summary"], tool["status"]) for tool in turn["tools"]] == [("exit 3", "exit 3"), ("echo ok", "exit 0")]
     titles = [event["update"]["task"]["title"] for event in stream
               if (event.get("update") or {}).get("type") == "workflow.task.updated"]
-    assert "exit 3 · exit 3 · sandbox" in titles and "echo ok · exit 0 · sandbox" in titles
+    assert "exit 3 · exit 3" in titles and "echo ok" in titles
     chat.store.close()
 
 

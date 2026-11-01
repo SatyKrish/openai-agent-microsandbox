@@ -224,7 +224,7 @@ history: one entry per remembered conversation, with the SDK's one-line
 description, grouped by day. Selecting an entry opens that conversation;
 Forget appears on hover, and Forget everything below the list. It also shows the
 summary the agent starts with and `MEMORY.md` in full. A correction is made in
-a conversation ("Correct it" starts one), so it passes through the same
+a conversation ("Correct something" starts one), so it passes through the same
 extraction rules as everything else; memory is not edited as free text, which
 would put a user's words into later conversations' instructions unfiltered.
 The panel uses `GET /api/memory?detail=1`, `DELETE /api/memory/conversations/ID`
