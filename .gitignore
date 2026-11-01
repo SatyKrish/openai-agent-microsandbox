@@ -1,0 +1,19 @@
+# Python and Node build output and caches.
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+worker/node_modules/
+worker/dist/
+
+# Local conversations, tokens and logs.
+artifacts/
+
+# Settings with secrets; only the example is tracked.
+.env
+.env.*
+!.env.example
+
+.DS_Store
+.openai.env.tmp

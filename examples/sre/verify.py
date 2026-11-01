@@ -1,0 +1,145 @@
+# Copyright 2026 openai-agent-mxc contributors
+# SPDX-License-Identifier: Apache-2.0
+"""Verify a deployed harness/worker pair without a model: boundary probes, then a scripted investigation.
+
+Run it in the harness pod (``make verify``). It uses the same settings as the UI.
+The probes run real commands in MXC containers on the worker; the investigation
+drives the harness with a scripted model, so it reads the real cluster and checks
+real evidence without model API usage. Exits nonzero if anything fails.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+PROBES = [
+    ("container has no capabilities", "grep -Eq '^CapEff:[[:space:]]+0+$' /proc/self/status", 0, None),
+    ("container sees only its own processes", "test \"$(ls /proc | grep -cE '^[0-9]+$')\" -lt 10", 0, None),
+    ("worker journal is not mounted", "test ! -e /sandboxes/history", 0, None),
+    ("other workspaces are not mounted", 'test "$(ls /sandboxes/active)" = "$(basename "$PWD")"', 0, None),
+    ("system files are read-only", "! touch /usr/bin/probe 2>/dev/null && ! touch /etc/probe 2>/dev/null", 0, None),
+    ("no model API key in the environment", 'test -z "${OPENAI_API_KEY:-}" && ! env | grep -qi openai', 0, None),
+    ("no route to the public internet",
+     "python3 -c \"import socket; socket.create_connection(('1.1.1.1', 443), 3)\"", "nonzero", None),
+    ("Kubernetes API reachable", "kubectl version --output=yaml", 0, "serverVersion"),
+    ("reads pods in payments", "kubectl get pods -n payments", 0, "payments-"),
+    ("cannot read Secrets", "kubectl get secrets -n payments", "nonzero", "Forbidden"),
+    ("cannot read other namespaces", "kubectl get pods -n kube-system", "nonzero", "Forbidden"),
+    ("cannot delete pods", "kubectl auth can-i delete pods -n payments", "nonzero", "no"),
+    ("credentials in output are redacted", "echo DATABASE_URL=postgres://app:hunter2@db/orders password=hunter2hunter2",
+     0, "postgres://app:[REDACTED]@db/orders password=[REDACTED]"),
+]
+PODS = "evidence/001-kubectl-get-pods-n-payments-o-wide.txt"
+LOGS = "evidence/002-kubectl-logs-deploy-payments-processor-n-payments.txt"
+
+
+def report(ok: bool, name: str, detail: str = "") -> bool:
+    print(f"  {'PASS' if ok else 'FAIL'}  {name}{f'  ({detail})' if detail else ''}", flush=True)
+    return ok
+
+
+async def probes(client) -> bool:
+    from agents.sandbox import Manifest
+
+    from agent_mxc import MXCSandboxOptions
+
+    workspace = client.new_workspace_id()
+    session = await client.create(manifest=Manifest(root=client.workspace_root(workspace)),
+                                  options=MXCSandboxOptions(workspace_id=workspace))
+    passed = True
+    async with session:
+        for name, command, expected, needle in PROBES:
+            began = time.monotonic()
+            result = await session.exec(command, timeout=30)
+            output = (result.stdout + result.stderr).decode(errors="replace")
+            ok = (result.exit_code == 0) if expected == 0 else (result.exit_code != 0)
+            ok = ok and (needle is None or needle in output)
+            detail = f"exit {result.exit_code}, {(time.monotonic() - began) * 1000:.0f} ms"
+            if not ok:
+                detail += f": {output.strip()[:300]!r}"
+            passed &= report(ok, name, detail)
+    await client.delete(session, purge_history=True)
+    harness_token = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
+    passed &= report(not harness_token.exists(), "harness pod has no Kubernetes token")
+    return passed
+
+
+async def investigation(client, namespaces) -> bool:
+    import json
+
+    from openai_harness.chat import HarnessChatServer
+    from openai_harness.store import SQLiteStore
+    from openai_harness.testing import Calls, events, message, shell
+
+    from .agent.spec import REPORT, make_spec
+    from .ui.card import check_rows, file_status
+
+    findings = json.dumps({"findings": [{
+        "resource": "deployment/payments-processor", "namespace": "payments", "problem": "CrashLoopBackOff",
+        "cause": "DATABASE_URL is not set", "fix": "Set DATABASE_URL from the payments-db Secret",
+        "evidence": [{"file": LOGS, "quote": "Missing required env var DATABASE_URL"},
+                     # The pod's status alternates between Error and CrashLoopBackOff; its name does not.
+                     {"file": PODS, "quote": "payments-processor-"}]}]})
+    model = Calls([
+        shell("kubectl get pods -n payments -o wide"),
+        shell("kubectl logs deploy/payments-processor -n payments"),
+        shell("grep -c payments-processor evidence/*.txt; grep -c DATABASE_URL runbooks/payments.md"),
+        shell(f"printf '%s' '{findings}' > output/findings.json && echo '# payments-processor' > output/findings.md"),
+    ], answer="payments-processor crashes at startup: DATABASE_URL is not set.")
+    with tempfile.TemporaryDirectory() as data:
+        store = SQLiteStore(Path(data) / "threads.sqlite3")
+        chat = HarnessChatServer(make_spec(namespaces), store, client, model=model, output_dir=Path(data) / "threads",
+                                 model_label="scripted", card=check_rows, file_status=file_status, preferred_output=REPORT)
+        try:
+            began = time.monotonic()
+            stream = await events(chat, {"type": "threads.create", "params": {
+                "input": message("Why is payments-processor crashing?")}})
+            errors = [event for event in stream if event["type"] == "error"]
+            thread_id = next((event["thread"]["id"] for event in stream if event["type"] == "thread.created"), None)
+            thread = await store.load_thread(thread_id, {}) if thread_id else None
+            turn = thread.metadata["turns"][0] if thread else {}
+            evidence = [entry["label"] for entry in (thread.metadata.get("evidence", []) if thread else [])]
+            passed = report(not errors and turn.get("status") == "completed", "scripted turn completed",
+                            f"{time.monotonic() - began:.1f} s" + (f": {errors[0].get('message')}" if errors else ""))
+            passed &= report(len(evidence) == 2, "kubectl reads recorded as evidence", "; ".join(evidence))
+            check = turn.get("check") or {}
+            passed &= report(check.get("status") == "evidence_passed", "findings quotes match the journal copy",
+                             check.get("detail") or f"{check.get('quotes', 0)} quotes")
+            if thread_id:
+                await store.delete_thread(thread_id, {})
+        finally:
+            store.close()
+    return passed
+
+
+async def main() -> int:
+    from agent_mxc import MXCSandboxClient
+
+    token_file = os.environ.get("MXC_WORKER_TOKEN_FILE")
+    client = MXCSandboxClient(os.environ.get("MXC_WORKER_TARGET", "127.0.0.1:50051"),
+                              worker=os.environ.get("MXC_WORKER_NAME"),
+                              token=Path(token_file).read_text().strip() if token_file else None,
+                              workspace_base=os.environ.get("MXC_WORKSPACE_BASE", "/sandboxes/active"))
+    namespaces = frozenset(name for name in os.environ.get("SRE_NAMESPACES", "payments").split(",") if name)
+    info = await client.info()
+    print(f"Worker {info['worker_id']} · domain {info['domain']} · MXC {info['containment']} "
+          f"(SDK {info['mxc_sdk_version']}) · egress {info['egress']}", flush=True)
+    print("Boundary probes, each in its own MXC container:", flush=True)
+    passed = await probes(client)
+    print("Scripted investigation through the harness:", flush=True)
+    passed &= await investigation(client, namespaces)
+    await client.aclose()
+    print("All checks passed." if passed else "Some checks FAILED.", flush=True)
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    from agents import set_tracing_disabled
+
+    set_tracing_disabled(True)
+    sys.exit(asyncio.run(main()))

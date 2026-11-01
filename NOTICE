@@ -1,0 +1,13 @@
+openai-agent-mxc
+Copyright 2026 openai-agent-mxc contributors
+
+Licensed under the Apache License, Version 2.0.
+
+harness/ (the shared agent harness and its UI), examples/sre/agent/lib/findings.py
+and examples/sre/agent/skills/kubernetes-triage/scripts/triage.py derive from
+openai-agent-substrate, Copyright 2026 openai-agent-substrate contributors,
+Apache-2.0. Files that keep that copyright line are those copies.
+
+The worker image installs Microsoft eXecution Container (@microsoft/mxc-sdk),
+Copyright (c) Microsoft Corporation, under the MIT License, from npm; the
+repository vendors none of its source.

@@ -1,0 +1,49 @@
+# The sandbox worker's identity: read-only, and only in the payments namespace.
+# No Secrets, no ConfigMaps, no exec, no port-forward, no write verbs, nothing
+# cluster-wide. kubectl in every MXC container uses this account's token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payments-sre-sa
+  namespace: sre-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: payments-sre-readonly
+  namespace: payments
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: payments-sre-readonly
+  namespace: payments
+subjects:
+  - kind: ServiceAccount
+    name: payments-sre-sa
+    namespace: sre-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: payments-sre-readonly
+---
+# The harness's identity has no permissions and its token is never mounted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-harness-payments
+  namespace: sre-system
+automountServiceAccountToken: false

@@ -1,0 +1,58 @@
+# Default deny in sre-system, then exactly the paths the pair needs. kubectl
+# port-forward to the harness enters through the kubelet, not the pod network.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: sre-system
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# The worker accepts gRPC from its own harness only. Its containers reach the
+# Kubernetes API (MXC's egress rules allow only the API service address), so the
+# pod may connect to the API server's ports and nowhere else, not even DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sre-sandbox-payments
+  namespace: sre-system
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: sre-sandbox, sre.example.com/domain: payments}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: sre-harness, sre.example.com/domain: payments}
+      ports:
+        - {protocol: TCP, port: 50051}
+  egress:
+    - ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 6443}
+---
+# The harness reaches DNS, its worker, and HTTPS for the model API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sre-harness-payments
+  namespace: sre-system
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: sre-harness, sre.example.com/domain: payments}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: sre-sandbox, sre.example.com/domain: payments}
+      ports:
+        - {protocol: TCP, port: 50051}
+    - ports:
+        - {protocol: TCP, port: 443}

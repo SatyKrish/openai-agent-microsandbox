@@ -1,0 +1,29 @@
+# AKS with Pod Sandboxing: the worker pod runs in a Kata Containers microVM, so a
+# kernel escape from an MXC container lands in a dedicated guest kernel, not the
+# node. Unverified in this repository: check that your Kata runtime class admits
+# the worker's security context (or use the Kind overlay's privileged patch,
+# which is then confined to the guest VM). Set the images to your registry.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - {name: mxc-sandbox-worker, newName: REGISTRY.azurecr.io/mxc-sandbox-worker, newTag: "0.1.0"}
+  - {name: sre-agent-harness, newName: REGISTRY.azurecr.io/sre-agent-harness, newTag: "0.1.0"}
+patches:
+  - target: {kind: StatefulSet, name: sre-sandbox-payments}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/runtimeClassName
+        value: kata-vm-isolation
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: managed-csi-premium
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 32Gi
+  - target: {kind: StatefulSet, name: sre-harness-payments}
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: managed-csi-premium

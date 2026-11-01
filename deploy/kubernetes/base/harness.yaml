@@ -1,0 +1,69 @@
+# The OpenAI Agents SDK harness for payments: the agent loop, conversation
+# history and the shared SRE UI. It holds the model's API key and no Kubernetes
+# credentials. The UI binds 127.0.0.1 inside the pod and has no Service: reach it
+# with `kubectl port-forward`, which the API server authorizes.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sre-harness-payments
+  namespace: sre-system
+  labels: {app.kubernetes.io/name: sre-harness, sre.example.com/domain: payments}
+spec:
+  serviceName: sre-harness-payments
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: sre-harness, sre.example.com/domain: payments}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: sre-harness, sre.example.com/domain: payments}
+    spec:
+      serviceAccountName: sre-harness-payments
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: harness
+          image: sre-agent-harness:local
+          command: ["python", "-m", "examples.sre.ui"]
+          args: ["--host", "127.0.0.1", "--port", "8001"]
+          envFrom:
+            - secretRef: {name: openai-creds}
+          env:
+            - {name: MXC_WORKER_TARGET, value: "sre-sandbox-payments-0.sre-sandbox-payments.sre-system.svc.cluster.local:50051"}
+            - {name: MXC_WORKER_NAME, value: sre-sandbox-payments-0}
+            - {name: MXC_WORKER_TOKEN_FILE, value: /var/run/secrets/mxc/token}
+            - {name: MXC_WORKSPACE_BASE, value: /sandboxes/active}
+            - {name: SRE_NAMESPACES, value: payments}
+            - {name: SRE_DATA_DIR, value: /data}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          # The UI listens on loopback only, so the kubelet probes it from inside the pod.
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/config', timeout=3)"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+            - {name: pair-token, mountPath: /var/run/secrets/mxc, readOnly: true}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: pair-token
+          secret: {secretName: sre-payments-pair-token, defaultMode: 0440}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: {requests: {storage: 1Gi}}

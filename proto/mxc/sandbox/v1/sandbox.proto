@@ -1,0 +1,135 @@
+// Copyright 2026 openai-agent-mxc contributors
+// SPDX-License-Identifier: Apache-2.0
+//
+// The harness/sandbox boundary: the OpenAI Agents SDK harness calls this service
+// on its paired MXC sandbox worker. Every command runs in a fresh Microsoft
+// eXecution Container (Bubblewrap backend) that sees only its own session's
+// workspace. The worker holds the application-scoped Kubernetes identity; the
+// harness holds the model credentials. Neither crosses this boundary.
+//
+// Errors use gRPC status codes: INVALID_ARGUMENT for bad session IDs or paths
+// that leave the workspace, NOT_FOUND for a missing session, file or evidence
+// entry, RESOURCE_EXHAUSTED for a file over the size limit, UNAUTHENTICATED for
+// a missing or wrong worker token, UNAVAILABLE when MXC cannot launch a
+// container. A command's nonzero exit or timeout is a normal ExecResponse.
+
+syntax = "proto3";
+
+package mxc.sandbox.v1;
+
+service Sandbox {
+  // What this worker is: its identity, MXC backend, limits and egress policy.
+  rpc Info(InfoRequest) returns (InfoResponse);
+  // Create the session's workspace, or confirm it still exists. Idempotent.
+  rpc InitSession(InitSessionRequest) returns (InitSessionResponse);
+  // Run one command in a fresh MXC container over the session's workspace.
+  rpc Exec(ExecRequest) returns (ExecResponse);
+  // File I/O inside the session's workspace, without a container round trip.
+  rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  // Cluster reads the worker recorded as evidence, from its own journal that
+  // the containers cannot see.
+  rpc ListEvidence(ListEvidenceRequest) returns (ListEvidenceResponse);
+  rpc ReadEvidence(ReadEvidenceRequest) returns (ReadEvidenceResponse);
+  // Remove the session's workspace. The audit journal stays unless purged.
+  rpc DestroySession(DestroySessionRequest) returns (DestroySessionResponse);
+}
+
+message InfoRequest {}
+
+message InfoResponse {
+  string worker_id = 1;          // pod name
+  string domain = 2;             // application domain this worker serves
+  string containment = 3;        // MXC backend, e.g. "bubblewrap"
+  string mxc_sdk_version = 4;
+  string egress = 5;             // e.g. "kube-api only (10.96.0.1:443)"
+  uint32 active_sessions = 6;
+  uint64 max_file_bytes = 7;
+  string workspace_base = 8;     // sessions live at <workspace_base>/<session_id>
+  repeated string namespaces = 9; // namespaces the worker's identity may read
+}
+
+message InitSessionRequest {
+  string session_id = 1;
+}
+
+message InitSessionResponse {
+  string workspace_root = 1;     // the same path inside and outside the container
+  bool created = 2;              // false when the workspace already existed
+}
+
+message ExecRequest {
+  string session_id = 1;
+  repeated string argv = 2;      // run as given; use ["sh", "-lc", "..."] for a shell
+  string cwd = 3;                // inside the workspace; defaults to its root
+  uint32 timeout_ms = 4;         // defaults to the worker's limit, never above it
+}
+
+message ExecResponse {
+  bytes stdout = 1;              // redacted, then capped
+  bytes stderr = 2;
+  int32 exit_code = 3;
+  bool timed_out = 4;
+  uint32 duration_ms = 5;
+  bool truncated = 6;
+  string evidence_path = 7;      // set when the command was recorded as evidence
+}
+
+message WriteFileRequest {
+  string session_id = 1;
+  string path = 2;               // absolute under the workspace root, or relative to it
+  bytes content = 3;
+}
+
+message WriteFileResponse {
+  uint64 bytes_written = 1;
+}
+
+message ReadFileRequest {
+  string session_id = 1;
+  string path = 2;
+  uint64 max_bytes = 3;          // 0: the whole file, refused above the worker's limit
+}
+
+message ReadFileResponse {
+  bytes content = 1;
+  uint64 size = 2;               // the file's full size
+}
+
+message Evidence {
+  uint32 seq = 1;
+  string path = 2;               // the workspace copy, e.g. evidence/003-kubectl-get-pods.txt
+  string command = 3;            // the kubectl command as run
+  string sha256 = 4;             // of the recorded (redacted) output
+  uint64 bytes = 5;
+  int32 exit_code = 6;
+  string recorded_at = 7;        // RFC 3339
+}
+
+message ListEvidenceRequest {
+  string session_id = 1;
+  uint32 after_seq = 2;
+}
+
+message ListEvidenceResponse {
+  repeated Evidence entries = 1;
+}
+
+message ReadEvidenceRequest {
+  string session_id = 1;
+  uint32 seq = 2;
+}
+
+message ReadEvidenceResponse {
+  Evidence entry = 1;
+  bytes content = 2;
+}
+
+message DestroySessionRequest {
+  string session_id = 1;
+  bool purge_history = 2;
+}
+
+message DestroySessionResponse {
+  bool existed = 1;
+}

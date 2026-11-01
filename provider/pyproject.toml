@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openai-agent-mxc"
+version = "0.1.0"
+description = "OpenAI Agents SDK sandbox provider that runs commands in Microsoft eXecution Containers on a Kubernetes worker"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "openai-agents==0.24.0",
+    "grpcio>=1.85.1,<2",
+    "protobuf>=7.35.1,<8",
+]
+
+[project.optional-dependencies]
+tracing = [
+    "opentelemetry-exporter-otlp-proto-http>=1.39,<2",
+    "opentelemetry-sdk>=1.39,<2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agent_mxc = ["proto/*.pyi"]

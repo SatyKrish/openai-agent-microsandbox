@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openai-harness"
+version = "0.1.0"
+description = "Runs OpenAI Agents SDK SandboxAgents with one MXC sandbox session per ChatKit conversation"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "openai-agent-mxc[tracing]",
+    "openai-chatkit==1.6.5",
+    "python-multipart>=0.0.20",
+    "starlette>=1,<2",
+    "uvicorn>=0.30,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# The shared agent UI page and its assets.
+openai_harness = ["static/*"]

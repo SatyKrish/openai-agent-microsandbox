@@ -1,0 +1,272 @@
+# Copyright 2026 openai-agent-mxc contributors
+# SPDX-License-Identifier: Apache-2.0
+"""OpenAI Agents SDK sandbox client for an MXC sandbox worker on Kubernetes.
+
+A session is a workspace directory on the worker's volume. Every command runs in
+a new Microsoft eXecution Container over that directory, so nothing runs between
+commands and there is nothing to suspend: closing a session only closes it on
+this side, and the workspace stays until ``delete``. Files move over the worker's
+own file RPCs rather than through shell commands.
+"""
+
+from __future__ import annotations
+
+import io
+import re
+import uuid
+from pathlib import Path, PurePosixPath
+from typing import Literal
+
+import grpc
+from pydantic import field_validator
+
+from agents.sandbox import Manifest
+from agents.sandbox.entries import BaseEntry, Dir, File, LocalDir, LocalFile
+from agents.sandbox.errors import ExecTimeoutError, ExecTransportError
+from agents.sandbox.session import SandboxSession, SandboxSessionState
+from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
+from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase, SnapshotSpec
+from agents.sandbox.types import ExecResult, User
+
+from .instrumentation import operation, traced_operation
+from .transport import MIB, WorkerError, WorkerTransport
+
+BACKEND = "mxc-kubernetes-worker"
+MAX_FILE_BYTES = 10 * MIB
+_SESSION_ID = re.compile(r"[a-z0-9][a-z0-9-]{2,62}")
+
+
+def workspace_id(value: str) -> str:
+    """The worker's session ID for a workspace (the SDK's own ``session_id`` is a UUID for its events)."""
+    if not _SESSION_ID.fullmatch(value or ""):
+        raise ValueError("A workspace ID matches [a-z0-9][a-z0-9-]{2,62}")
+    return value
+
+
+class MXCSandboxOptions(BaseSandboxClientOptions):
+    type: Literal["mxc-kubernetes-worker"] = BACKEND
+    workspace_id: str | None = None
+
+    @field_validator("workspace_id")
+    @classmethod
+    def _id(cls, value: str | None) -> str | None:
+        return workspace_id(value) if value is not None else None
+
+
+class MXCSessionState(SandboxSessionState):
+    type: Literal["mxc-kubernetes-worker"] = BACKEND
+    workspace_id: str
+    worker: str
+
+    @field_validator("workspace_id")
+    @classmethod
+    def _id(cls, value: str) -> str:
+        return workspace_id(value)
+
+
+def validate_manifest(manifest: Manifest) -> None:
+    root = PurePosixPath(manifest.root)
+    if not root.is_absolute() or str(root) == "/" or ".." in root.parts:
+        raise ValueError("Use an absolute workspace root below /, without '..'")
+    if manifest.users or manifest.groups or manifest.extra_path_grants or manifest.environment.value:
+        raise NotImplementedError("MXC workspaces hold files and directories only: no accounts, environment or path grants")
+
+    def validate(entry: BaseEntry) -> None:
+        if not isinstance(entry, (File, Dir, LocalFile, LocalDir)) or entry.group is not None:
+            raise NotImplementedError("MXC workspaces support File, Dir, LocalFile and LocalDir entries without ownership")
+        if isinstance(entry, Dir):
+            for child in entry.children.values():
+                validate(child)
+
+    for entry in manifest.validated_entries().values():
+        validate(entry)
+
+
+class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
+    """Bound to one worker. ``worker`` names it in saved session state, so a session
+    resumes only on the worker that holds its workspace.
+
+    ``workspace_base`` must match the worker's ``DATA_DIR``/active: a session's
+    workspace has the same path inside its containers as on the worker's volume.
+    """
+
+    backend_id = BACKEND
+
+    def __init__(self, target: str, *, worker: str | None = None, token: str | None = None,
+                 workspace_base: str = "/sandboxes/active", exec_timeout: float = 60,
+                 max_file_bytes: int = MAX_FILE_BYTES):
+        if max_file_bytes <= 0:
+            raise ValueError("max_file_bytes must be positive")
+        self.transport = WorkerTransport(target, token=token, max_message_bytes=max_file_bytes + 2 * MIB)
+        self.worker = worker or target
+        self.workspace_base = workspace_base.rstrip("/")
+        self.exec_timeout = exec_timeout
+        self.max_file_bytes = max_file_bytes
+
+    @staticmethod
+    def new_workspace_id() -> str:
+        return f"s-{uuid.uuid4().hex[:20]}"
+
+    def workspace_root(self, workspace: str) -> str:
+        return f"{self.workspace_base}/{workspace_id(workspace)}"
+
+    async def info(self) -> dict:
+        reply = await self.transport.info()
+        return {"worker_id": reply.worker_id, "domain": reply.domain, "containment": reply.containment,
+                "mxc_sdk_version": reply.mxc_sdk_version, "egress": reply.egress,
+                "active_sessions": reply.active_sessions, "namespaces": list(reply.namespaces)}
+
+    @traced_operation("sandbox.create")
+    async def create(self, *, options: MXCSandboxOptions | None = None, manifest: Manifest | None = None,
+                     snapshot: SnapshotSpec | SnapshotBase | None = None) -> SandboxSession:
+        if snapshot is not None:
+            raise NotImplementedError("Workspaces persist on the worker's volume; portable SDK snapshots are unsupported")
+        options = options or MXCSandboxOptions()
+        sid = options.workspace_id or self.new_workspace_id()
+        root = self.workspace_root(sid)
+        manifest = manifest if manifest is not None else Manifest(root=root)
+        if manifest.root != root:
+            raise ValueError(f"The manifest root must be the session's workspace, {root}")
+        self._validate_manifest_for_create(manifest)
+        validate_manifest(manifest)
+        state = MXCSessionState(workspace_id=sid, worker=self.worker, manifest=manifest,
+                                snapshot=NoopSnapshot(id=uuid.uuid4().hex))
+        return self._wrap_session(_MXCSession(state, self, preserved=False))
+
+    async def resume(self, state: SandboxSessionState) -> SandboxSession:
+        if not isinstance(state, MXCSessionState) or state.worker != self.worker:
+            raise ValueError("Resume requires MXC session state from this client's worker")
+        state.assert_path_grants_rebound()
+        validate_manifest(state.manifest)
+        return self._wrap_session(_MXCSession(state.model_copy(deep=True), self, preserved=True))
+
+    def deserialize_session_state(self, payload: dict[str, object]) -> MXCSessionState:
+        state = self._deserialize_session_state_payload(payload, MXCSessionState)
+        if not isinstance(state, MXCSessionState) or state.worker != self.worker:
+            raise ValueError("Session state belongs to another worker")
+        return state
+
+    @traced_operation("sandbox.delete")
+    async def delete(self, session: SandboxSession, *, purge_history: bool = False) -> SandboxSession:
+        inner = session._inner
+        if not isinstance(inner, _MXCSession) or inner.client is not self:
+            raise ValueError("Delete requires a session owned by this client")
+        if not inner.deleted:
+            await self.transport.destroy(inner.state.workspace_id, purge_history=purge_history)
+            inner.deleted = True
+            await session.aclose()
+        return session
+
+    async def aclose(self) -> None:
+        await self.transport.close()
+
+
+class _MXCSession(BaseSandboxSession):
+    def __init__(self, state: MXCSessionState, client: MXCSandboxClient, *, preserved: bool):
+        self.state = state
+        self.client = client
+        self.deleted = False
+        self.ready = False
+        self._set_start_state_preserved(preserved)
+
+    @property
+    def transport(self) -> WorkerTransport:
+        return self.client.transport
+
+    async def _ensure_backend_started(self) -> None:
+        if self.deleted:
+            raise RuntimeError("This session has been deleted")
+        validate_manifest(self.state.manifest)
+        with operation("sandbox.init"):
+            reply = await self.transport.init_session(self.state.workspace_id)
+        if reply.workspace_root != self.state.manifest.root:
+            raise RuntimeError("The worker's workspace path differs from this client's workspace_base")
+        if reply.created and self._workspace_state_preserved_on_start():
+            # The worker lost the workspace (a new volume): rebuild it from the manifest.
+            self._set_start_state_preserved(False)
+            self.state.workspace_root_ready = False
+        self.ready = True
+
+    async def _exec_internal(self, *command: str | Path, timeout: float | None = None) -> ExecResult:
+        if self.deleted or not self.ready:
+            raise RuntimeError("Start the sandbox session before executing commands")
+        argv = [str(part) for part in command]
+        limit = timeout if timeout is not None else self.client.exec_timeout
+        try:
+            with operation("sandbox.exec") as span:
+                reply = await self.transport.exec(self.state.workspace_id, argv, timeout_s=limit)
+                if span is not None:
+                    span.span_data.data.update(exit_code=reply.exit_code, stdout_bytes=len(reply.stdout),
+                                               stderr_bytes=len(reply.stderr))
+                    if reply.exit_code:
+                        span.set_error({"message": "Command returned nonzero", "data": {}})
+        except WorkerError as error:
+            raise ExecTransportError(command=tuple(argv), cause=error, retryable=False,
+                                     context={"backend": BACKEND, "retry_safe": False, "status": error.code.name}) from error
+        if reply.timed_out:
+            raise ExecTimeoutError(command=tuple(argv), timeout_s=limit, context={"backend": BACKEND})
+        return ExecResult(stdout=reply.stdout, stderr=reply.stderr, exit_code=reply.exit_code)
+
+    async def running(self) -> bool:
+        # Nothing runs between commands: a started session's workspace is ready for the next one.
+        # Probing with a command would cost a container launch on every SDK check.
+        return self.ready and not self.deleted
+
+    def _file_error(self, error: WorkerError, path: str) -> Exception:
+        if error.code == grpc.StatusCode.NOT_FOUND:
+            return FileNotFoundError(path)
+        if error.code == grpc.StatusCode.RESOURCE_EXHAUSTED:
+            return ValueError(f"{path} exceeds the {self.client.max_file_bytes / MIB:g} MiB file limit")
+        if error.code == grpc.StatusCode.INVALID_ARGUMENT:
+            return ValueError(error.details)
+        return error
+
+    async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:
+        if user is not None:
+            raise NotImplementedError("Per-user execution is unsupported")
+        target = str(self.normalize_path(path))
+        try:
+            with operation("sandbox.read"):
+                reply = await self.transport.read_file(self.state.workspace_id, target)
+        except WorkerError as error:
+            raise self._file_error(error, target) from None
+        return io.BytesIO(reply.content)
+
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        target = str(self.normalize_path(path))
+        try:
+            reply = await self.transport.read_file(self.state.workspace_id, target, max_bytes=max_bytes)
+        except WorkerError as error:
+            raise self._file_error(error, target) from None
+        return reply.content
+
+    async def write(self, path: Path, data: io.IOBase, *, user: str | User | None = None) -> None:
+        if user is not None:
+            raise NotImplementedError("Per-user execution is unsupported")
+        target = str(self.normalize_path(path, for_write=True))
+        value = data.read(self.client.max_file_bytes + 1)
+        payload = value.encode() if isinstance(value, str) else bytes(value)
+        if len(payload) > self.client.max_file_bytes:
+            raise ValueError(f"File exceeds the {self.client.max_file_bytes / MIB:g} MiB file limit")
+        try:
+            with operation("sandbox.write"):
+                await self.transport.write_file(self.state.workspace_id, target, payload)
+        except WorkerError as error:
+            raise self._file_error(error, target) from None
+
+    async def evidence(self, after_seq: int = 0) -> list[dict]:
+        """Cluster reads the worker recorded for this session after ``after_seq``."""
+        entries = await self.transport.list_evidence(self.state.workspace_id, after_seq)
+        return [{"seq": item.seq, "path": item.path, "command": item.command, "sha256": item.sha256,
+                 "bytes": item.bytes, "recorded_at": item.recorded_at} for item in entries]
+
+    async def read_evidence(self, seq: int) -> bytes:
+        """The worker's own copy of an evidence entry, which no container can edit."""
+        return (await self.transport.read_evidence(self.state.workspace_id, seq)).content
+
+    async def persist_workspace(self) -> io.IOBase:
+        raise NotImplementedError("The workspace persists on the worker's volume")
+
+    async def hydrate_workspace(self, data: io.IOBase) -> None:
+        raise NotImplementedError("The workspace persists on the worker's volume")
