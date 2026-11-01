@@ -20,9 +20,11 @@ export interface EvidenceEntry {
   bytes: number;
   exit_code: number;
   recorded_at: string;
+  requester?: string;            // who asked for the turn, when the client said
 }
 
 export interface CommandRecord {
+  requester?: string;
   argv: readonly string[];
   cwd: string;
   exitCode: number;
@@ -64,7 +66,8 @@ export class Journal {
 
   async command(id: string, record: CommandRecord): Promise<void> {
     await this.append(id, 'journal.jsonl', {
-      ts: new Date().toISOString(), event: 'exec', argv: record.argv, cwd: record.cwd, exit_code: record.exitCode,
+      ts: new Date().toISOString(), event: 'exec', ...(record.requester ? { requester: record.requester } : {}),
+      argv: record.argv, cwd: record.cwd, exit_code: record.exitCode,
       timed_out: record.timedOut, duration_ms: record.durationMs, stdout_bytes: record.stdout.length,
       stderr_bytes: record.stderr.length, output_sha256: sha256(Buffer.concat([record.stdout, record.stderr])),
       stdout_preview: record.stdout.subarray(0, PREVIEW).toString('utf8'),

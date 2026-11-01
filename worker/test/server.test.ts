@@ -79,7 +79,8 @@ test('a session runs commands, records kubectl reads as evidence, and keeps file
   assert.equal(echo.evidence_path, '');
 
   const read = await call<{ stdout: Buffer; stderr: Buffer; evidence_path: string }>('Exec',
-    { session_id: 'conv-a', argv: ['sh', '-lc', 'kubectl get pods -n payments'] }, auth());
+    { session_id: 'conv-a', argv: ['sh', '-lc', 'kubectl get pods -n payments'], requester: 'ana@example.com\n' },
+    auth());
   assert.equal(read.evidence_path, 'evidence/001-kubectl-get-pods-n-payments.txt');
   assert.ok(read.stdout.toString().includes('token=[REDACTED]'));
   assert.match(read.stderr.toString(), /saved as evidence\/001/);
@@ -111,6 +112,11 @@ test('a session runs commands, records kubectl reads as evidence, and keeps file
 
   const journal = await fs.readFile(path.join(data, 'history', 'conv-a', 'journal.jsonl'), 'utf8');
   assert.equal(journal.trim().split('\n').length, 4); // init and three commands
+  // The journal names who asked for a command, when the client said, as printable text.
+  const commands = journal.trim().split('\n').map((line) => JSON.parse(line)).filter((entry) => entry.event === 'exec');
+  assert.deepEqual(commands.map((entry) => entry.requester), [undefined, 'ana@example.com', undefined]);
+  const evidence = await fs.readFile(path.join(data, 'history', 'conv-a', 'evidence.jsonl'), 'utf8');
+  assert.equal(JSON.parse(evidence.trim().split('\n')[0] ?? '{}').requester, 'ana@example.com');
 
   assert.equal((await call<{ existed: boolean }>('DestroySession', { session_id: 'conv-a' }, auth())).existed, true);
   await fs.access(path.join(data, 'history', 'conv-a', 'journal.jsonl'));
@@ -158,7 +164,8 @@ test('pod logs reach the caller only as a policy excerpt, recorded as evidence',
   await call('InitSession', { session_id: 'conv-logs' }, auth());
   const reply = await call<{ excerpt: string; evidence_path: string; lines_read: number; lines_shown: number;
     lines_withheld: number; redactions: number }>('ReadLogs',
-    { session_id: 'conv-logs', namespace: 'payments', pod: 'deploy/payments-api', tail_lines: 5000 }, auth());
+    { session_id: 'conv-logs', namespace: 'payments', pod: 'deploy/payments-api', tail_lines: 5000,
+      requester: 'bo@corp.test' }, auth());
   assert.equal(reply.lines_read, 1207);
   assert.ok(reply.lines_shown <= 40 && reply.lines_withheld >= 1167, `${reply.lines_shown} shown`);
   assert.match(reply.excerpt, /^\[log policy\] pod payments-api-7d9f8c6b5d-x2k4p in payments: read 1207 lines/);
@@ -173,7 +180,7 @@ test('pod logs reach the caller only as a policy excerpt, recorded as evidence',
   const copy = await call<{ content: Buffer }>('ReadFile', { session_id: 'conv-logs', path: reply.evidence_path }, auth());
   assert.equal(copy.content.toString(), reply.excerpt);
   const journal = await fs.readFile(path.join(data, 'history', 'conv-logs', 'journal.jsonl'), 'utf8');
-  assert.match(journal, /"event":"logs".*"lines_read":1207.*"raw_sha256":"[0-9a-f]{64}"/);
+  assert.match(journal, /"event":"logs","requester":"bo@corp.test".*"lines_read":1207.*"raw_sha256":"[0-9a-f]{64}"/);
   assert.doesNotMatch(journal, /@example\.com|4111 1111/);
 
   const asked = await call<{ excerpt: string }>('ReadLogs', { session_id: 'conv-logs', namespace: 'payments',

@@ -90,8 +90,14 @@ example `X-Forwarded-Email`. The harness trusts that header, so the proxy must
 be the only way users reach the UI, and must set the header on every request,
 replacing any the browser sent. `kubectl port-forward` to the harness pod
 bypasses the proxy, so anyone allowed to use it can claim any user; keep that
-permission to operators. Conversations themselves stay visible to every user
-of the harness; only memory is per user.
+permission to operators.
+
+With sign-in, each user sees and may delete only their own conversations;
+another user's reads as not found. Issues the health board opens are shared:
+everyone sees them and can investigate in them, and only an admin can delete
+one. `SRE_ADMIN_USERS` names the admins, who see and may delete everything.
+Each turn records who asked, and the worker's journal records it with every
+command and log read.
 
 ## Replicas follow the state backend
 

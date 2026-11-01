@@ -68,22 +68,34 @@ function reasons(workload) {
     .filter(Boolean).join(", ");
 }
 
-function workloadRow(suggest, workload, namespace) {
+// An unhealthy workload with an open issue opens that issue, shared by the team; without one, a new conversation.
+function workloadRow(suggest, openIssue, workload, namespace, issue) {
+  const question = prompt(workload, namespace);
+  const action = workload.state === "healthy" ? el("span")
+    : issue ? el("button", { type: "button", class: "sre-investigate", title: issue.title,
+      onclick: () => openIssue(issue.thread_id, question) }, "Open issue")
+      : el("button", { type: "button", class: "sre-investigate", onclick: () => suggest(question) }, "Investigate");
   return el("li", { class: `sre-workload ${workload.state}` },
     el("span", { class: "sre-dot", title: STATE_LABEL[workload.state] }),
     el("span", { class: "sre-name", title: workload.kind }, workload.name),
     el("span", { class: "sre-ready", title: "ready / desired" }, `${workload.ready}/${workload.desired}`),
     el("span", { class: "sre-reasons", title: workload.last_warning || "" }, reasons(workload)),
-    workload.state === "healthy" ? el("span") : el("button", { type: "button", class: "sre-investigate",
-      onclick: () => suggest(prompt(workload, namespace)) }, "Investigate"));
+    action);
 }
 
-export async function renderHome({ container, suggest, config, threadId, running }) {
+async function openIssues(config) {
+  if (!config.issues) return new Map();
+  const { status, body } = await getJSON("/api/issues").catch(() => ({ status: 0, body: null }));
+  const open = status === 200 ? body.issues.filter((issue) => issue.state === "open") : [];
+  return new Map(open.map((issue) => [issue.fingerprint, issue]));
+}
+
+export async function renderHome({ container, suggest, openIssue, config, threadId, running }) {
   if (!config.health || threadId || running) {
     container.hidden = true;
     return;
   }
-  const { status, body } = await loadHealth();
+  const [{ status, body }, issues] = await Promise.all([loadHealth(), openIssues(config)]);
   if (status !== 200 || !body) {
     container.replaceChildren(el("p", { class: "sre-board-note" }, "Can't reach the sandbox worker for cluster health."));
     container.hidden = false;
@@ -105,8 +117,8 @@ export async function renderHome({ container, suggest, config, threadId, running
           .map((state) => el("span", { class: state === "failing" ? "failing" : "" }, `${counts[state]} ${state}`))),
         all),
       item.error ? el("p", { class: "sre-board-note" }, `Could not read ${item.namespace}: ${item.error}`)
-        : el("ul", { class: "sre-workloads" }, item.workloads.map((workload) => workloadRow(suggest, workload,
-          item.namespace))));
+        : el("ul", { class: "sre-workloads" }, item.workloads.map((workload) => workloadRow(suggest, openIssue,
+          workload, item.namespace, issues.get(`${item.namespace}/${workload.kind.toLowerCase()}/${workload.name}`)))));
   });
   container.replaceChildren(el("div", { class: "sre-board" }, sections,
     updated ? el("p", { class: "sre-board-note" }, `As of ${updated}`) : null));

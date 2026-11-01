@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agents.sandbox import MemoryGenerateConfig, MemoryLayoutConfig, MemoryReadConfig, SandboxAgent
 from agents.sandbox.capabilities import Compaction, Filesystem, LocalDirLazySkillSource, Memory, Shell, Skills
+from agents.sandbox.capabilities.compaction import StaticCompactionPolicy
 from agents.sandbox.entries import LocalDir
 
 AGENT_ROOT = Path(__file__).resolve().parent
@@ -17,6 +18,10 @@ EXTRACT_MODEL = "gpt-6-luna"
 CONSOLIDATE_MODEL = "gpt-6.1-terra"
 # How many conversations consolidation draws on, the SDK's default; older ones are forgotten.
 REMEMBERED_CONVERSATIONS = MemoryGenerateConfig().max_raw_memories_for_consolidation
+# Context size at which the conversation is compacted. The SDK sizes this from the model's context window,
+# but it does not know the gpt-6 models and falls back to 240k tokens; an investigation's reads are in
+# evidence files, so its context can stay far smaller.
+COMPACT_AT_TOKENS = 100_000
 
 
 def memory(extract_model: str = EXTRACT_MODEL, consolidate_model: str = CONSOLIDATE_MODEL) -> Memory:
@@ -41,7 +46,7 @@ def build_agent(manifest, model, *, memory_models: tuple[str, str] | None = None
     ``memory_models`` (extraction, consolidation) turns on memory.
     """
     skills = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=AGENT_ROOT / "skills")))
-    capabilities = [Shell(), Filesystem(), Compaction(), skills]
+    capabilities = [Shell(), Filesystem(), Compaction(policy=StaticCompactionPolicy(threshold=COMPACT_AT_TOKENS)), skills]
     if memory_models:
         capabilities.append(memory(*memory_models))
     return SandboxAgent(

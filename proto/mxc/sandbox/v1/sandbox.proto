@@ -72,6 +72,7 @@ message ExecRequest {
   repeated string argv = 2;      // run as given; use ["sh", "-lc", "..."] for a shell
   string cwd = 3;                // inside the workspace; defaults to its root
   uint32 timeout_ms = 4;         // defaults to the worker's limit, never above it
+  string requester = 5;          // who asked for the turn, as the client knows them; recorded in the journal
 }
 
 message ExecResponse {
@@ -143,6 +144,7 @@ message ReadLogsRequest {
   uint32 tail_lines = 6;         // lines to read from the end; capped by the worker
   uint32 since_seconds = 7;      // optional
   string match = 8;              // optional literal text to look for, case-insensitive
+  string requester = 9;          // who asked for the turn; recorded in the journal
 }
 
 message ReadLogsResponse {

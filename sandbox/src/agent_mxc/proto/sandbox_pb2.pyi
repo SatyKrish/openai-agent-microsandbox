@@ -47,16 +47,18 @@ class InitSessionResponse(_message.Message):
     def __init__(self, workspace_root: _Optional[str] = ..., created: _Optional[bool] = ...) -> None: ...
 
 class ExecRequest(_message.Message):
-    __slots__ = ("session_id", "argv", "cwd", "timeout_ms")
+    __slots__ = ("session_id", "argv", "cwd", "timeout_ms", "requester")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     ARGV_FIELD_NUMBER: _ClassVar[int]
     CWD_FIELD_NUMBER: _ClassVar[int]
     TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
+    REQUESTER_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     argv: _containers.RepeatedScalarFieldContainer[str]
     cwd: str
     timeout_ms: int
-    def __init__(self, session_id: _Optional[str] = ..., argv: _Optional[_Iterable[str]] = ..., cwd: _Optional[str] = ..., timeout_ms: _Optional[int] = ...) -> None: ...
+    requester: str
+    def __init__(self, session_id: _Optional[str] = ..., argv: _Optional[_Iterable[str]] = ..., cwd: _Optional[str] = ..., timeout_ms: _Optional[int] = ..., requester: _Optional[str] = ...) -> None: ...
 
 class ExecResponse(_message.Message):
     __slots__ = ("stdout", "stderr", "exit_code", "timed_out", "duration_ms", "truncated", "evidence_path")
@@ -159,7 +161,7 @@ class ReadEvidenceResponse(_message.Message):
     def __init__(self, entry: _Optional[_Union[Evidence, _Mapping]] = ..., content: _Optional[bytes] = ...) -> None: ...
 
 class ReadLogsRequest(_message.Message):
-    __slots__ = ("session_id", "namespace", "pod", "container", "previous", "tail_lines", "since_seconds", "match")
+    __slots__ = ("session_id", "namespace", "pod", "container", "previous", "tail_lines", "since_seconds", "match", "requester")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     NAMESPACE_FIELD_NUMBER: _ClassVar[int]
     POD_FIELD_NUMBER: _ClassVar[int]
@@ -168,6 +170,7 @@ class ReadLogsRequest(_message.Message):
     TAIL_LINES_FIELD_NUMBER: _ClassVar[int]
     SINCE_SECONDS_FIELD_NUMBER: _ClassVar[int]
     MATCH_FIELD_NUMBER: _ClassVar[int]
+    REQUESTER_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     namespace: str
     pod: str
@@ -176,7 +179,8 @@ class ReadLogsRequest(_message.Message):
     tail_lines: int
     since_seconds: int
     match: str
-    def __init__(self, session_id: _Optional[str] = ..., namespace: _Optional[str] = ..., pod: _Optional[str] = ..., container: _Optional[str] = ..., previous: _Optional[bool] = ..., tail_lines: _Optional[int] = ..., since_seconds: _Optional[int] = ..., match: _Optional[str] = ...) -> None: ...
+    requester: str
+    def __init__(self, session_id: _Optional[str] = ..., namespace: _Optional[str] = ..., pod: _Optional[str] = ..., container: _Optional[str] = ..., previous: _Optional[bool] = ..., tail_lines: _Optional[int] = ..., since_seconds: _Optional[int] = ..., match: _Optional[str] = ..., requester: _Optional[str] = ...) -> None: ...
 
 class ReadLogsResponse(_message.Message):
     __slots__ = ("excerpt", "evidence_path", "lines_read", "lines_shown", "lines_withheld", "redactions")

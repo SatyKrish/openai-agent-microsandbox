@@ -6,8 +6,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import asyncio
+import contextlib
+
 from starlette.requests import Request
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -56,12 +59,34 @@ async def _icon(request: Request):
 
 
 def create_app(server: HarnessChatServer, *, config: dict, port: int, jaeger_url: str | None, worker=None,
-               health=None, user_header: str | None = None, starting_files: dict[str, bytes] | None = None):
+               health=None, user_header: str | None = None, starting_files: dict[str, bytes] | None = None,
+               issues=None):
     """``health`` is the worker's summary of its namespaces, shown on the start screen and never sent to the
     model. ``user_header`` carries the signed-in user from an authenticating proxy, whose memory the page
-    shows; without it everyone is the guest."""
-    api = http.api_routes(server, config={**UI, **config}, port=port, jaeger_url=jaeger_url, worker=worker,
-                          health=health, user_header=user_header, starting_files=starting_files)
-    return http.application([Route("/", _page), Route("/favicon.svg", _icon), Route("/favicon.ico", _icon), *api,
+    shows; without it everyone is the guest. ``issues`` (an ``Issues``) opens an issue for each unhealthy
+    workload while the server runs; ``/api/issues`` lists them."""
+    api = http.api_routes(server, config={**UI, **config, "issues": issues is not None}, port=port,
+                          jaeger_url=jaeger_url, worker=worker, health=health, user_header=user_header,
+                          starting_files=starting_files)
+    running: list[asyncio.Task] = []
+
+    async def listing(request: Request):
+        if issues is None:
+            return JSONResponse({"status": "disabled"}, status_code=404)
+        return JSONResponse({"status": "ok", "issues": await issues.listing()}, headers={"Cache-Control": "no-store"})
+
+    async def start():
+        if issues is not None:
+            running.append(asyncio.get_running_loop().create_task(issues.run()))
+
+    async def stop():
+        for task in running:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await server.close_all()
+
+    return http.application([Route("/", _page), Route("/favicon.svg", _icon), Route("/favicon.ico", _icon),
+                             Route("/api/issues", listing), *api,
                              Mount("/static", _Revalidated(directory=STATIC), name="static")],
-                            on_shutdown=server.close_all)
+                            on_startup=start, on_shutdown=stop)

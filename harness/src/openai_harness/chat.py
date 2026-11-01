@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 from agents import Runner, SQLiteSession, trace
+from agents.extensions import ToolOutputTrimmer
 from agents.run import RunConfig
 from agents.run_error_handlers import RunErrorHandlerResult
 from agents.sandbox import SandboxRunConfig
@@ -97,6 +98,23 @@ class _Open(NamedTuple):
     session: object
     closer: asyncio.Task | None  # closes it once it has been idle
     owner: str | None            # whose memory it draws on and adds to
+
+
+def usage_of(usage) -> dict:
+    """A run's token use, for the turn record: what each turn costs and how large its context grows."""
+    return {"requests": usage.requests, "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+            "cached_tokens": getattr(usage.input_tokens_details, "cached_tokens", 0) or 0,
+            "reasoning_tokens": getattr(usage.output_tokens_details, "reasoning_tokens", 0) or 0,
+            # The largest single request: how big the context got.
+            "max_input_tokens": max((entry.input_tokens for entry in usage.request_usage_entries), default=0)}
+
+
+def _requested_by(session, who: str) -> None:
+    """Name who the session's next commands are for, in the worker's journal (a person, or the harness itself)."""
+    inner = getattr(session, "_inner", session)
+    if hasattr(inner, "requester"):
+        inner.requester = who
 
 
 class TurnError(Exception):
@@ -192,6 +210,7 @@ class HarnessChatServer(ChatKitServer[dict]):
             "otel_trace_id": otel_trace_id(sdk_trace_id) if traced else None,
             "lifecycle": "reopened" if meta.get("sandbox") else "created",
             "model": self.model_label, "tools": [], "files": [], "uploads": [], "check": None,
+            "requested_by": context.get("user"),
         }
         turns.append(turn)
         await self.store.save_thread(thread, context)
@@ -232,11 +251,13 @@ class HarnessChatServer(ChatKitServer[dict]):
 
     async def _run_turn(self, conversation: Conversation, context_: AgentContext, turn: dict, text: str, attachments: list):
         thread, meta = conversation.thread, conversation.metadata
+        requester = turn["requested_by"] or "guest"
         opened = self._open.pop(thread.id, None)
         if opened is not None:
             session, closer, _ = opened
             if closer is not None:
                 closer.cancel()
+            _requested_by(session, requester)
             turn["lifecycle"] = "continued"
             try:
                 async for event in self._continue_turn(conversation, context_, turn, text, attachments, session):
@@ -260,10 +281,12 @@ class HarnessChatServer(ChatKitServer[dict]):
             meta["sandbox"] = self.client.serialize_session_state(session.state)
             meta["workspace"] = f"{self.client.worker}/{workspace_id}"
             # Whose memory the conversation draws on and adds to: the signed-in user who started it, or the guest.
-            meta["owner"] = context_.request_context.get("user")
+            # The store sets it when the conversation is created; this covers conversations from before.
+            meta.setdefault("owner", context_.request_context.get("user"))
             await self.store.save_thread(thread, context_.request_context)
         else:
             session = await self.client.resume(self.client.deserialize_session_state(meta["sandbox"]))
+        _requested_by(session, requester)
         workspace = meta["workspace"]
         try:
             await session.start()
@@ -345,11 +368,18 @@ class HarnessChatServer(ChatKitServer[dict]):
                 agent, text, session=history, max_turns=self.max_turns, error_handlers={"max_turns": step_limit},
                 run_config=RunConfig(sandbox=SandboxRunConfig(session=session), tracing_disabled=not tracing_enabled(),
                                      trace_include_sensitive_data=False,
+                                     # Earlier turns' tool output is kept as a preview: the files it came from
+                                     # stay in the workspace, so the agent can reread what it needs.
+                                     call_model_input_filter=ToolOutputTrimmer(max_output_chars=1000,
+                                                                               preview_chars=300),
                                      # A misspelled tool name is the model's mistake to correct, not a failed turn.
                                      tool_not_found_behavior="return_error_to_model"))
             steps = ToolSteps(result, context_, turn["tools"], frozenset(tool.name for tool in harness_tools))
-            async for event in stream_agent_response(context_, steps):
-                yield event
+            try:
+                async for event in stream_agent_response(context_, steps):
+                    yield event
+            finally:
+                turn["usage"] = usage_of(result.context_wrapper.usage)
             if out_of_turns:
                 turn["step_limit"] = True
                 yield ThreadItemDoneEvent(item=AssistantMessageItem(
@@ -505,6 +535,9 @@ class HarnessChatServer(ChatKitServer[dict]):
             children.append({"type": "Row", "gap": 2, "wrap": "wrap", "children": buttons})
         tools = len(turn["tools"])
         caption = f"Turn {turn['number']} · {turn['duration_s']} s · {tools} step{'s' if tools != 1 else ''}"
+        tokens = (turn.get("usage") or {}).get("total_tokens", 0)
+        if tokens:
+            caption += f" · {tokens / 1000:.0f}k tokens" if tokens >= 1000 else f" · {tokens} tokens"
         children.append({"type": "Caption", "size": "sm", "value": caption})
         widget = DynamicWidgetRoot.model_validate({"type": "Card", "size": "full", "children": children})
         return ThreadItemDoneEvent(item=WidgetItem(
@@ -528,6 +561,7 @@ class HarnessChatServer(ChatKitServer[dict]):
     async def _close(self, thread_id: str, opened: _Open, why: str) -> None:
         """Close a session; with memory, the SDK's memory generation runs here and its result is published."""
         session = opened.session
+        _requested_by(session, "harness")
         if self.memory is None:
             await _quietly(session.aclose(), f"closing {thread_id}")
             return

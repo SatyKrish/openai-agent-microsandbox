@@ -139,8 +139,17 @@ from the manifest.
 The SDK's `Runner` runs the loop in the harness, with the conversation's
 history. The SRE agent adds three things to the SDK's defaults:
 
-- **Compaction.** The SDK's `Compaction` capability summarizes earlier steps
-  when the context nears the model's limit, so a long investigation keeps going.
+- **Compaction, early.** The SDK's `Compaction` capability summarizes earlier
+  steps once the context reaches 100k tokens. The SDK would size that from the
+  model's context window, but it does not know the `gpt-6` models and would
+  wait until 240k; the reads are in evidence files, so the context can stay
+  smaller.
+- **Earlier turns' tool output as previews.** The SDK's `ToolOutputTrimmer`
+  shortens tool output from before the last two messages to a preview; the
+  files it came from stay in the workspace for the agent to reread.
+- **Token use per turn.** Each turn records its model requests, input, cached,
+  output and reasoning tokens, and its largest single request, which is how
+  large the context got; the turn's card shows the total.
 - **A step limit that ends the turn cleanly.** A turn may take
   `SRE_MAX_TURNS` model steps (25). At the limit, the turn ends with a message
   saying so instead of an error, and the partial turn stays in the history, so
@@ -159,7 +168,8 @@ or resuming the same workspace. Here each conversation has its own workspace,
 so evidence and logs stay apart, and the harness carries the directory between
 them instead ([`memory.py`](../harness/src/openai_harness/memory.py)):
 
-1. **Memory is per user.** A conversation belongs to the user who started it.
+1. **Memory is per user.** A conversation belongs to the user who started it;
+   an issue the health board opened belongs to the team, whose memory is its own.
    An authenticating proxy in front of the UI names the signed-in user in a
    header (`SRE_USER_HEADER`). Without it, every user is the guest and shares
    the guest's memory. Each user's memory is a directory under

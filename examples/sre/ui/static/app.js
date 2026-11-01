@@ -88,9 +88,11 @@ function chatkitOptions() {
         const payload = action.payload || {};
         if (action.type === "open_file") openPanel({ tab: "files", turn: payload.turn, view: { path: payload.path } });
         if (action.type === "open_trace") openPanel({ tab: "trace", turn: payload.turn });
+        // An issue's card: the question to investigate it, in the composer to read and send.
+        if (action.type === "investigate_issue" && payload.prompt) suggest(String(payload.prompt));
         // Cards saved before the Quotes tab went have this button; the findings show each quote with its source.
         if (action.type === "open_quotes") {
-          openPanel({ tab: "files", turn: payload.turn, view: { path: state.config.preferred_output || "output/findings.json" } });
+          openPanel({ tab: "files", turn: payload.turn, view: { path: "output/findings.json" } });
         }
       },
     },
@@ -367,9 +369,15 @@ function renderHome() {
     return;
   }
   const running = state.responding || latestTurn()?.status === "running";
-  renderSreHome({ container: home, suggest, config: state.config, threadId: state.threadId, running })
+  renderSreHome({ container: home, suggest, openIssue, config: state.config, threadId: state.threadId, running })
     .then(() => { if (state.historyOpen) home.hidden = true; })
     .catch((error) => console.warn("renderHome failed", error));
+}
+
+// Open an issue's conversation, with the question to investigate it in the composer.
+async function openIssue(threadId, question) {
+  await state.chatkit?.setThreadId(threadId);
+  suggest(question);
 }
 
 function setHead(title, sub) {
@@ -654,7 +662,8 @@ async function deleteConversation() {
   const response = await fetch("/chatkit", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ type: "threads.delete", params: { thread_id: threadId } }) });
   if (!response.ok) {
-    $("chat-error").textContent = "The conversation could not be deleted. The server log has the cause.";
+    $("chat-error").textContent = response.status === 403 ? "Only an admin can delete an issue the team shares."
+      : "The conversation could not be deleted. The server log has the cause.";
     $("chat-error").hidden = false;
     return;
   }

@@ -13,8 +13,9 @@ from agents.models.interface import Model
 from agents.usage import Usage
 from openai.types.responses import (
     Response, ResponseCompletedEvent, ResponseFunctionToolCall, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseOutputMessage, ResponseOutputText,
+    ResponseOutputItemDoneEvent, ResponseOutputMessage, ResponseOutputText, ResponseUsage,
 )
+from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 
 def shell(command: str) -> tuple[str, dict]:
@@ -57,7 +58,10 @@ class Calls(Model):
         else:
             output = [ResponseOutputMessage(id=f"msg_{uuid.uuid4().hex}", role="assistant", type="message", status="completed",
                                             content=[ResponseOutputText(type="output_text", annotations=[], text=self.answer)])]
-        return ModelResponse(output=output, usage=Usage(), response_id=None)
+        # A rough token count, about four characters each, so turns record a plausible use.
+        size = len(json.dumps(input, default=str)) // 4
+        return ModelResponse(output=output, usage=Usage(requests=1, input_tokens=size, output_tokens=20,
+                                                        total_tokens=size + 20), response_id=None)
 
     async def get_response(self, system_instructions, input, *args, **kwargs):
         return self.response(input)
@@ -73,8 +77,12 @@ class Calls(Model):
             yield ResponseOutputItemDoneEvent.model_construct(type="response.output_item.done", item=item,
                                                               output_index=index, sequence_number=sequence + 1)
             sequence += 2
+        usage = ResponseUsage.model_construct(
+            input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens,
+            total_tokens=response.usage.total_tokens, input_tokens_details=InputTokensDetails.model_construct(cached_tokens=0),
+            output_tokens_details=OutputTokensDetails.model_construct(reasoning_tokens=0))
         yield ResponseCompletedEvent.model_construct(type="response.completed", sequence_number=sequence, response=Response.model_construct(
-            id=f"resp_{uuid.uuid4().hex}", output=list(response.output), usage=None, object="response", model="scripted"))
+            id=f"resp_{uuid.uuid4().hex}", output=list(response.output), usage=usage, object="response", model="scripted"))
 
 
 def message(text: str, attachments=()) -> dict:

@@ -198,3 +198,74 @@ async def test_a_memory_enabled_agent_runs_before_any_memory_exists(worker, tmp_
         for opened in chat._open.values():
             opened.closer.cancel()
         store.close()
+
+
+def health_summary(*workloads, at="2026-11-01T12:00:00Z"):
+    return {"generated_at": at, "namespaces": [{"namespace": "payments", "workloads": list(workloads)}]}
+
+
+def workload(name, state, reasons=(), ready=0):
+    return {"kind": "Deployment", "name": name, "state": state, "ready": ready, "desired": 1, "reasons": list(reasons),
+            "restarts": 3 if state != "healthy" else 0, "warnings": 1, "last_warning": "Back-off pulling\x1b[2J image",
+            "last_warning_at": "2026-11-01T11:58:00Z"}
+
+
+async def test_the_health_board_opens_one_shared_issue_per_unhealthy_workload(worker, tmp_path):
+    import pytest
+    from starlette.testclient import TestClient
+
+    from examples.sre.agent.spec import issue_context
+    from examples.sre.ui.app import create_app
+    from examples.sre.ui.issues import Issues
+    from openai_harness.store import SHARED
+
+    store = SQLiteStore(tmp_path / "threads.sqlite3", admins=frozenset({"lead@example.com"}))
+    chat = HarnessChatServer(make_spec({"payments"}), store, worker.client(), model=Calls([shell("echo looking")]),
+                             output_dir=tmp_path / "threads")
+    issues = Issues(chat, None)
+    try:
+        failing = workload("payments-ledger", "failing", ["ImagePullBackOff"])
+        await issues.sync(health_summary(failing, workload("payments-api", "healthy", ready=1)))
+        await issues.sync(health_summary(failing))  # still failing: the same issue, not a second one
+        [opened] = await issues.listing()
+        assert (opened["fingerprint"], opened["state"]) == ("payments/deployment/payments-ledger", "open")
+        assert opened["title"] == "payments-ledger: ImagePullBackOff"
+
+        # Opened without a model: a card of what the worker read, with the question to investigate it.
+        items = (await store.load_thread_items(opened["thread_id"], None, 10, "asc", {})).data
+        card = json.dumps(items[0].widget.model_dump())
+        assert "ImagePullBackOff, 3 restarts" in card and "\x1b" not in card and "investigate_issue" in card
+        assert "Why is deployment payments-ledger in payments failing (ImagePullBackOff)?" in card
+
+        # Everyone sees it and can work in it; only an admin deletes it.
+        thread = await store.load_thread(opened["thread_id"], {"user": "bo@example.com"})
+        assert thread.metadata["owner"] == SHARED
+        for user in ("ana@example.com", "bo@example.com", None):
+            assert opened["thread_id"] in [item.id for item in (await store.load_threads(10, None, "asc", {"user": user})).data]
+        with pytest.raises(PermissionError):
+            await store.delete_thread(opened["thread_id"], {"user": "bo@example.com"})
+        assert "issue the health board opened" in issue_context(chat.conversation(thread))
+        stream = await events(chat, {"type": "threads.add_user_message", "params": {
+            "thread_id": opened["thread_id"], "input": message("Why?")}}, user="bo@example.com")
+        assert not [event for event in stream if event["type"] == "error"], stream
+        turn = (await store.load_thread(opened["thread_id"], {})).metadata["turns"][0]
+        assert turn["requested_by"] == "bo@example.com"
+
+        # Healthy again: recovered, with a note; failing later opens a new issue.
+        await issues.sync(health_summary(workload("payments-ledger", "healthy", ready=1), at="2026-11-01T12:30:00Z"))
+        [recovered] = await issues.listing()
+        assert recovered["state"] == "recovered" and recovered["title"].endswith("(recovered)")
+        await issues.sync(health_summary(failing, at="2026-11-01T13:00:00Z"))
+        assert [item["state"] for item in await issues.listing()] == ["recovered", "open"]
+
+        async def unchanged():
+            return health_summary(failing, at="2026-11-01T13:00:00Z")
+        app = create_app(chat, config={"model": "scripted"}, port=8001, jaeger_url=None, issues=Issues(chat, unchanged))
+        with TestClient(app, base_url="http://localhost:8001") as browser:
+            assert browser.get("/api/config").json()["issues"] is True
+            assert len(browser.get("/api/issues").json()["issues"]) == 2
+            refused = browser.post("/chatkit", json={"type": "threads.delete", "params": {"thread_id": opened["thread_id"]}})
+            assert refused.status_code == 403
+    finally:
+        await chat.close_all()
+        store.close()

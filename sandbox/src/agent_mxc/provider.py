@@ -188,6 +188,9 @@ class _MXCSession(BaseSandboxSession):
         self.client = client
         self.deleted = False
         self.ready = False
+        # Who asked for the current turn, sent with each command and log read for the worker's journal.
+        # The harness sets it per turn; it is not part of the saved session state.
+        self.requester = ""
         self._set_start_state_preserved(preserved)
 
     @property
@@ -215,7 +218,8 @@ class _MXCSession(BaseSandboxSession):
         limit = timeout if timeout is not None else self.client.exec_timeout
         try:
             with operation("sandbox.exec") as span:
-                reply = await self.transport.exec(self.state.workspace_id, argv, timeout_s=limit)
+                reply = await self.transport.exec(self.state.workspace_id, argv, timeout_s=limit,
+                                                  requester=self.requester)
                 if span is not None:
                     span.span_data.data.update(exit_code=reply.exit_code, stdout_bytes=len(reply.stdout),
                                                stderr_bytes=len(reply.stderr))
@@ -294,7 +298,7 @@ class _MXCSession(BaseSandboxSession):
         with operation("sandbox.logs"):
             reply = await self.transport.read_logs(
                 self.state.workspace_id, namespace, pod, container=container or "", previous=previous,
-                tail_lines=tail_lines, since_seconds=since_seconds, match=match or "")
+                tail_lines=tail_lines, since_seconds=since_seconds, match=match or "", requester=self.requester)
         return {"excerpt": reply.excerpt, "evidence_path": reply.evidence_path, "lines_read": reply.lines_read,
                 "lines_shown": reply.lines_shown, "lines_withheld": reply.lines_withheld,
                 "redactions": reply.redactions}

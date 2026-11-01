@@ -52,8 +52,15 @@ def parse_args(argv=None):
     parser.add_argument("--user-header", default=env("SRE_USER_HEADER") or None,
                         help="Header in which an authenticating proxy passes the signed-in user; "
                              "without it every user is the guest and shares the guest's memory")
+    parser.add_argument("--admin", action="append", dest="admins",
+                        help="A signed-in user who may see and delete everyone's conversations; repeat for more "
+                             "(SRE_ADMIN_USERS, comma-separated)")
     parser.add_argument("--idle-close", type=float, default=float(env("SRE_SESSION_IDLE_S", "300")),
                         help="Seconds a conversation's session stays open after a turn; memory is distilled on close")
+    parser.add_argument("--issues", choices=["on", "off"], default=env("SRE_ISSUES", "on"),
+                        help="Open an issue, shared by everyone, for each workload the health board finds unhealthy")
+    parser.add_argument("--issue-every", type=float, default=float(env("SRE_ISSUE_EVERY_S", "30")),
+                        help="Seconds between the health board's checks for issues")
     parser.add_argument("--max-turns", type=int, default=int(env("SRE_MAX_TURNS", "25")),
                         help="Model steps per turn before the agent stops and asks to continue")
     args = parser.parse_args(argv)
@@ -64,6 +71,7 @@ def parse_args(argv=None):
         parser.error(str(error))
     namespaces = args.namespaces or [name for name in env("SRE_NAMESPACES", "payments").split(",") if name]
     args.namespaces = frozenset(namespaces)
+    args.admins = frozenset(args.admins or [name.strip() for name in env("SRE_ADMIN_USERS", "").split(",") if name.strip()])
     args.token = args.token_file.read_text().strip() if args.token_file else None
     args.memory_models = (args.memory_extract_model, args.memory_consolidate_model) if args.memory == "on" else None
     return args
@@ -87,12 +95,13 @@ def main(argv=None):
     from ..agent.tools.logs import TOOL_NAMES
     from .app import create_app
     from .card import check_rows, file_status
+    from .issues import Issues
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
     spec = make_spec(args.namespaces, memory_models=args.memory_models)
     configure_tracing(operation_names=spec.trace_operations, harness_tools=TOOL_NAMES)
     client = MXCSandboxClient(args.worker, worker=args.worker_name, token=args.token, workspace_base=args.workspace_base)
-    store = SQLiteStore(args.data_dir / "threads.sqlite3")
+    store = SQLiteStore(args.data_dir / "threads.sqlite3", admins=args.admins)
     max_age = timedelta(days=args.memory_max_age_days) if args.memory_max_age_days > 0 else None
     memory = UserMemory(args.data_dir / "memory", memories_dir=spec.memory_dir, max_age=max_age,
                         max_conversations=REMEMBERED_CONVERSATIONS) if spec.memory_dir else None
@@ -103,9 +112,10 @@ def main(argv=None):
     scope = ", ".join(sorted(args.namespaces))
     config = {"model": args.model, "tracing": tracing_enabled(), "namespaces": sorted(args.namespaces),
               "idle_close_s": args.idle_close, "placeholder": f"Ask about workloads in {scope}…"}
+    issues = Issues(server, client.health, every_s=args.issue_every) if args.issues == "on" else None
     app = create_app(server, config=config, port=args.port, jaeger_url=args.jaeger_url if tracing_enabled() else None,
                      worker=client.info, health=client.health, starting_files=runbooks(),
-                     user_header=args.user_header)
+                     user_header=args.user_header, issues=issues)
     remembering = (f"{' → '.join(args.memory_models)}, kept {f'{args.memory_max_age_days:g} days' if max_age else 'forever'}"
                    if memory else "off")
     print(f"SRE agent UI: http://localhost:{args.port}  (model {args.model}, worker {client.worker}, "

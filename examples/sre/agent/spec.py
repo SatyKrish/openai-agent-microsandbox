@@ -32,6 +32,20 @@ def start(conversation, has_uploads: bool, root: str) -> Manifest:
                                         "runbooks": Dir(children=books)})
 
 
+def issue_context(conversation) -> str:
+    """What the agent is told about the issue a conversation is about: a lead to confirm from fresh reads.
+
+    The fields are the worker's summary of the cluster, already kept short and printable when the issue opened.
+    """
+    issue = conversation.metadata.get("issue")
+    if not issue:
+        return ""
+    reasons = ", ".join(issue.get("reasons") or []) or "no reason given"
+    return (f"This conversation is an issue the health board opened at {issue['opened_at']}: "
+            f"{issue['kind'].lower()} {issue['name']} in {issue['namespace']} was {issue['state_seen']} ({reasons}). "
+            "Treat that as a lead and confirm it from fresh reads.")
+
+
 def make_spec(namespaces, *, memory_models: tuple[str, str] | None = None) -> AgentSpec:
     """``memory_models`` (extraction, consolidation) turn on the SDK's memory; the harness keeps it per user."""
     scope = ", ".join(sorted(namespaces))
@@ -40,7 +54,8 @@ def make_spec(namespaces, *, memory_models: tuple[str, str] | None = None) -> Ag
         build_agent=partial(build_agent, memory_models=memory_models),
         memory_dir=MEMORY_DIR if memory_models else None,
         start=start,
-        instructions=lambda conversation: f"Namespaces you may read: {scope}.",
+        instructions=lambda conversation: "\n".join(
+            line for line in (f"Namespaces you may read: {scope}.", issue_context(conversation)) if line),
         tools=logs.tools,
         check=lambda conversation, turn, files: findings.check(conversation, files),
         default_question=f"Find unhealthy workloads in {scope} and explain why.",

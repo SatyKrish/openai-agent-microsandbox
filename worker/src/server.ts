@@ -112,7 +112,16 @@ function logStatus(status: number): grpc.status {
 
 interface ReadLogsRequest {
   session_id: string; namespace: string; pod: string; container: string; previous: boolean; tail_lines: number;
-  since_seconds: number; match: string;
+  since_seconds: number; match: string; requester: string;
+}
+
+interface ExecRequest { session_id: string; argv: string[]; cwd: string; timeout_ms: number; requester: string }
+
+/** Who asked, as the client says: the person behind the turn, so the journal answers more than "the service
+ * account". Printable and short; the client is the paired harness, but the journal stays readable regardless. */
+export function requesterOf(value: string | undefined): string | undefined {
+  const cleaned = (value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 200);
+  return cleaned || undefined;
 }
 
 export interface Sources {
@@ -217,14 +226,15 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
       ...(request.previous ? ['previous'] : []), ...(match ? ['match'] : [])]);
     const command = `pod_logs ${fetched.pod} -n ${namespace}${request.container ? ` -c ${request.container}` : ''}`
       + `${request.previous ? ' --previous' : ''}${match ? ` match=${JSON.stringify(match)}` : ''}`;
-    await journal.record(id, { seq, path: name, command, exit_code: 0 }, content);
+    const requester = requesterOf(request.requester);
+    await journal.record(id, { seq, path: name, command, exit_code: 0, requester }, content);
     try {
       await workspaces.write(id, name, content, config.maxEvidenceBytes);
     } catch (error) {
       if (!(error instanceof WorkspaceError)) throw error;
     }
     // The audit trail keeps the raw log's size and hash, never its text.
-    await journal.event(id, 'logs', { namespace, pod: fetched.pod, container: request.container || undefined,
+    await journal.event(id, 'logs', { requester, namespace, pod: fetched.pod, container: request.container || undefined,
       previous: request.previous, match: match || undefined, lines_read: excerpt.linesRead,
       lines_shown: excerpt.linesShown, lines_withheld: excerpt.linesWithheld, redactions: excerpt.redactions,
       raw_bytes: Buffer.byteLength(fetched.text), raw_sha256: sha256(fetched.text), evidence_seq: seq });
@@ -232,8 +242,9 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
       lines_shown: excerpt.linesShown, lines_withheld: excerpt.linesWithheld, redactions: excerpt.redactions };
   }
 
-  async function exec(request: { session_id: string; argv: string[]; cwd: string; timeout_ms: number }) {
+  async function exec(request: ExecRequest) {
     const id = validSessionId(request.session_id);
+    const requester = requesterOf(request.requester);
     if (!request.argv.length) throw new Status(grpc.status.INVALID_ARGUMENT, 'argv is empty');
     const root = await workspaces.require(id);
     const cwd = request.cwd ? workspaces.lexical(id, request.cwd) : root;
@@ -252,7 +263,8 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
       const seq = await journal.nextSeq(id);
       const name = evidenceName(seq, words);
       const content = Buffer.from(stdoutText, 'utf8').subarray(0, config.maxEvidenceBytes);
-      evidence = await journal.record(id, { seq, path: name, command: words.join(' '), exit_code: 0 }, content);
+      evidence = await journal.record(id, { seq, path: name, command: words.join(' '), exit_code: 0, requester },
+        content);
       // The agent's copy, for analysis in the workspace. Checks use the journal's copy.
       let note = `saved as ${name}`;
       try {
@@ -265,7 +277,7 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
     }
     const stdout = cap(stdoutText, config.maxOutputBytes);
     const stderr = cap(stderrText, config.maxOutputBytes);
-    await journal.command(id, { argv: request.argv, cwd, exitCode: result.exitCode, timedOut: result.timedOut,
+    await journal.command(id, { requester, argv: request.argv, cwd, exitCode: result.exitCode, timedOut: result.timedOut,
       durationMs: result.durationMs, stdout: stdout.data, stderr: stderr.data, evidenceSeq: evidence?.seq,
       warnings: result.warnings });
     return { stdout: stdout.data, stderr: stderr.data, exit_code: result.exitCode, timed_out: result.timedOut,
@@ -290,7 +302,7 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
         return { workspace_root: root, created };
       });
     }),
-    Exec: unary('Exec', (request: { session_id: string; argv: string[]; cwd: string; timeout_ms: number }) =>
+    Exec: unary('Exec', (request: ExecRequest) =>
       sessions.run(validSessionId(request.session_id), () => exec(request))),
     WriteFile: unary('WriteFile', async (request: { session_id: string; path: string; content: Buffer }) => {
       const id = validSessionId(request.session_id);

@@ -65,8 +65,10 @@ class WorkerTransport:
     async def init_session(self, session_id: str) -> pb.InitSessionResponse:
         return await self._call("InitSession", pb.InitSessionRequest(session_id=session_id))
 
-    async def exec(self, session_id: str, argv: list[str], *, cwd: str = "", timeout_s: float) -> pb.ExecResponse:
-        request = pb.ExecRequest(session_id=session_id, argv=argv, cwd=cwd, timeout_ms=int(timeout_s * 1000))
+    async def exec(self, session_id: str, argv: list[str], *, cwd: str = "", timeout_s: float,
+                   requester: str = "") -> pb.ExecResponse:
+        request = pb.ExecRequest(session_id=session_id, argv=argv, cwd=cwd, timeout_ms=int(timeout_s * 1000),
+                                 requester=requester)
         # The worker enforces the command's deadline; the call's covers queueing and transfer as well.
         return await self._call("Exec", request, timeout=timeout_s + self.deadline_margin)
 
@@ -84,10 +86,11 @@ class WorkerTransport:
         return await self._call("ReadEvidence", pb.ReadEvidenceRequest(session_id=session_id, seq=seq))
 
     async def read_logs(self, session_id: str, namespace: str, pod: str, *, container: str = "", previous: bool = False,
-                        tail_lines: int = 0, since_seconds: int = 0, match: str = "") -> pb.ReadLogsResponse:
+                        tail_lines: int = 0, since_seconds: int = 0, match: str = "",
+                        requester: str = "") -> pb.ReadLogsResponse:
         return await self._call("ReadLogs", pb.ReadLogsRequest(
             session_id=session_id, namespace=namespace, pod=pod, container=container, previous=previous,
-            tail_lines=tail_lines, since_seconds=since_seconds, match=match), timeout=60)
+            tail_lines=tail_lines, since_seconds=since_seconds, match=match, requester=requester), timeout=60)
 
     async def destroy(self, session_id: str, *, purge_history: bool = False) -> bool:
         response = await self._call("DestroySession",

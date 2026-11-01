@@ -10,10 +10,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from agents import Runner
 from agents.sandbox import Manifest, SandboxAgent
 from agents.sandbox.capabilities import Shell
 from agents.sandbox.entries import Dir
+from chatkit.store import NotFoundError
 from starlette.testclient import TestClient
 
 from openai_harness import http
@@ -195,6 +197,10 @@ async def test_steps_say_what_ran_and_where_by_icon(worker, tmp_path):
     # A sandbox command that exited 0 is just its command; the icon says where it ran.
     assert done[-1]["title"] == "echo hi > output/a.txt" and done[-1]["icon"] == "cube"
     thread = (await chat.store.load_threads(10, None, "desc", {})).data[0]
+    # Each turn records what it used: two model requests here, the second carrying the first's output.
+    usage = thread.metadata["turns"][0]["usage"]
+    assert usage["requests"] == 2 and usage["total_tokens"] > 0 and usage["max_input_tokens"] > 0
+    assert "tokens" in json.dumps(stream)
     assert thread.metadata["turns"][0]["tools"][0]["summary"] == "echo hi > output/a.txt"
     assert any(task["title"].startswith("Created the workspace") for task in tasks)
     effects = [event for event in stream if event["type"] == "client_effect"]
@@ -398,6 +404,71 @@ async def test_memory_over_the_limit_is_not_published(tmp_path):
     assert await store.publish(Workspace({f"note-{index}.md": b"x" for index in range(4)})) == len(before)
     assert store.files() == before
     assert await store.publish(Workspace({"MEMORY.md": b"small"})) == 1 and store.files() == {"MEMORY.md": b"small"}
+
+
+async def test_people_see_and_delete_only_their_own_conversations(worker, tmp_path):
+    chat = make_chat(worker, tmp_path, Calls([shell("echo hi")], answer="Done."))
+    try:
+        ana, _ = await new_thread(chat, "Investigate payments", user="ana@example.com")
+        bo, _ = await new_thread(chat, "Investigate payments too", user="bo@example.com")
+        guest, _ = await new_thread(chat, "And as the guest")
+        async def ids(user):
+            return [thread.id for thread in (await chat.store.load_threads(10, None, "asc", {"user": user})).data]
+        assert await ids("ana@example.com") == [ana] and await ids("bo@example.com") == [bo] and await ids(None) == [guest]
+
+        # Someone else's conversation reads as not found, through ChatKit and the page's API, and cannot be deleted.
+        with pytest.raises(NotFoundError):
+            await chat.store.load_thread(ana, {"user": "bo@example.com"})
+        with pytest.raises(NotFoundError):
+            await events(chat, {"type": "threads.add_user_message",
+                                "params": {"thread_id": ana, "input": message("Hijack")}}, user="bo@example.com")
+        with pytest.raises(NotFoundError):
+            await chat.store.delete_thread(ana, {"user": "bo@example.com"})
+        thread = await chat.store.load_thread(ana, {})
+        assert thread.metadata["owner"] == "ana@example.com" and len(thread.metadata["turns"]) == 1
+        assert thread.metadata["turns"][0]["requested_by"] == "ana@example.com"
+
+        # The worker's journal names who asked for each command of a turn; the guest's are the guest's.
+        async def requesters(thread_id):
+            session = (await chat.store.load_thread(thread_id, {})).metadata["workspace"].split("/", 1)[1]
+            journal = (worker.data_dir / "history" / session / "journal.jsonl").read_text().splitlines()
+            return {json.loads(line).get("requester") for line in journal if '"event":"exec"' in line}
+        assert await requesters(ana) == {"ana@example.com"} and await requesters(guest) == {"guest"}
+
+        api = http.application(http.api_routes(chat, config={}, port=8009, jaeger_url=None,
+                                               user_header="X-Forwarded-Email"))
+        with TestClient(api, base_url="http://localhost:8009") as client:
+            assert client.get(f"/api/threads/{ana}", headers={"X-Forwarded-Email": "bo@example.com"}).status_code == 404
+            assert client.get(f"/api/threads/{ana}", headers={"X-Forwarded-Email": "ana@example.com"}).status_code == 200
+
+        # An admin sees and deletes everyone's.
+        chat.store.admins = frozenset({"lead@example.com"})
+        assert set(await ids("lead@example.com")) == {ana, bo, guest}
+        await chat.store.delete_thread(bo, {"user": "lead@example.com"})
+        assert await ids("bo@example.com") == []
+    finally:
+        await chat.close_all()
+        chat.store.close()
+
+
+def test_conversations_from_before_owners_keep_theirs(tmp_path):
+    import sqlite3
+    path = tmp_path / "threads.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+    for thread_id, owner in (("thr_ana", "ana@example.com"), ("thr_guest", None)):
+        db.execute("INSERT INTO threads VALUES (?, ?)", (thread_id, json.dumps(
+            {"id": thread_id, "created_at": "2026-10-01T00:00:00", "status": {"type": "active"},
+             "metadata": {"owner": owner}})))
+    db.commit()
+    db.close()
+    store = SQLiteStore(path)
+    try:
+        page = asyncio.run(store.load_threads(10, None, "asc", {"user": "ana@example.com"}))
+        assert [thread.id for thread in page.data] == ["thr_ana"]
+        assert [thread.id for thread in asyncio.run(store.load_threads(10, None, "asc", {"user": None})).data] == ["thr_guest"]
+    finally:
+        store.close()
 
 
 def test_the_signed_in_user_comes_only_from_the_configured_header(worker, tmp_path):

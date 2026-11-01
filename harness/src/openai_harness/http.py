@@ -46,8 +46,9 @@ def api_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_url
     may serve files the agent derived from uploads; ``starting_files`` are the workspace's initial files.
 
     ``user_header`` names the header in which an authenticating proxy in front of the harness passes the
-    signed-in user; it decides whose memory a conversation uses and which memory ``/api/memory`` shows and
-    forgets. Without it, every user is the guest."""
+    signed-in user; it decides whose conversations a request sees and may delete (the store's admins see
+    all), whose memory a conversation uses, and which memory ``/api/memory`` shows and forgets. Without it,
+    every user is the guest."""
     origins = {f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
     uploads = server.spec.uploads
     max_upload = uploads.max_bytes if uploads else 0
@@ -74,6 +75,8 @@ def api_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_url
             result = await server.process(await request.body(), {"user": user(request)})
         except UploadRejected as error:
             return JSONResponse({"error": str(error)}, status_code=400)
+        except PermissionError as error:
+            return JSONResponse({"error": str(error)}, status_code=403)
         if isinstance(result, StreamingResult):
             return StreamingResponse(result, media_type="text/event-stream")
         return Response(content=result.json, media_type="application/json")
@@ -107,11 +110,12 @@ def api_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_url
         return JSONResponse({**config, "jaeger_url": jaeger_url})
 
     async def load(request: Request):
+        """The requested conversation, if it exists and belongs to the requesting user (or an admin)."""
         thread_id = request.path_params["thread_id"]
         if not _THREAD_ID.fullmatch(thread_id):
             return None
         try:
-            return await server.store.load_thread(thread_id, {})
+            return await server.store.load_thread(thread_id, {"user": user(request)})
         except NotFoundError:
             return None
 
@@ -180,9 +184,9 @@ def api_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_url
             logger.debug("health unavailable: %s", error)
             return JSONResponse({"status": "unavailable"}, status_code=503)
 
-    async def exists(thread_id: str) -> bool:
+    async def exists(thread_id: str, who: str | None) -> bool:
         try:
-            await server.store.load_thread(thread_id, {})
+            await server.store.load_thread(thread_id, {"user": who})
             return True
         except NotFoundError:
             return False
@@ -198,7 +202,7 @@ def api_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_url
         detail = request.query_params.get("detail") == "1"
         summary = server.memory.summary(user(request), detail=detail)
         for item in summary.get("remembered", []):
-            item["open"] = bool(_THREAD_ID.fullmatch(item["id"])) and await exists(item["id"])
+            item["open"] = bool(_THREAD_ID.fullmatch(item["id"])) and await exists(item["id"], user(request))
         return JSONResponse({"status": "ok", **summary}, headers={"Cache-Control": "no-store"})
 
     async def memory_conversation(request: Request):
@@ -246,14 +250,18 @@ def _days(age) -> float | None:
     return round(age.total_seconds() / 86400, 2) if age else None
 
 
-def application(routes: list, *, on_shutdown: Callable[[], Awaitable[None]] | None = None) -> Starlette:
-    """``on_shutdown`` runs when the server stops, after in-flight requests finish: the chat server
+def application(routes: list, *, on_startup: Callable[[], Awaitable[None]] | None = None,
+                on_shutdown: Callable[[], Awaitable[None]] | None = None) -> Starlette:
+    """``on_startup`` runs before the server takes requests (a UI starts its background work there).
+    ``on_shutdown`` runs when the server stops, after in-flight requests finish: the chat server
     closes its open sessions there, so a restart does not lose the memory they would have generated."""
     # Reject other Host headers so a rebinding DNS name cannot reach the loopback server.
     middleware = [Middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])]
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
+        if on_startup is not None:
+            await on_startup()
         yield
         if on_shutdown is not None:
             await on_shutdown()

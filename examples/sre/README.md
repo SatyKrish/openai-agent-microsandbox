@@ -58,11 +58,20 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   turns amber when the worker is unreachable. It opens **How this works**: the
   worker, its containment and egress, and how the agent is contained, said once
   here rather than on every view. Settings opens it too.
+- **Issues.** The health board opens an issue for each unhealthy workload,
+  without a model call, and the history lists it beside your conversations.
+  An issue is shared: everyone sees it and can investigate in it, and only an
+  admin can delete it. It starts with a card of what the worker read (state,
+  reasons, restarts, readiness, the latest warning and when it was read);
+  **Investigate** puts the question in the composer, and the agent is told
+  which issue it is in. When the workload is healthy again, the issue is marked
+  recovered; if it fails later, a new issue opens.
 - **Start screen.** Under the composer, each namespace lists its workloads,
   failing first, with readiness and why each is unhealthy (waiting reasons, the
   last exit, restarts, when the latest warning happened). Only each workload's
-  dot is coloured. **Investigate** starts a conversation about one workload;
-  **Investigate all** about every unhealthy one. The worker builds this summary
+  dot is coloured. **Open issue** opens a workload's issue with the question
+  in the composer (**Investigate** starts a conversation when there is none);
+  **Investigate all** asks about every unhealthy one. The worker builds this summary
   with its own identity; it is not sent to the model. The side panel stays
   closed until a conversation has output.
 - **Memory.** The book button beside the history button shows what the agent
@@ -127,6 +136,9 @@ the harness pod restarts with them.
 | `MEMORY_EXTRACT_MODEL`, `MEMORY_CONSOLIDATE_MODEL` | `gpt-6-luna`, `gpt-6.1-terra` | The models that extract each conversation and consolidate a user's memory |
 | `SRE_MEMORY_MAX_AGE_DAYS` | `90` | Forget conversations this many days after their last message; `0` keeps them |
 | `SRE_USER_HEADER` | unset | The header in which an authenticating proxy passes the signed-in user; unset, everyone is the guest. See [signing users in](../../docs/deployment.md#signing-users-in) |
+| `SRE_ADMIN_USERS` | unset | Signed-in users, comma-separated, who see and may delete every conversation and issue |
+| `SRE_ISSUES` | `on` | `off` stops the health board opening issues |
+| `SRE_ISSUE_EVERY_S` | `30` | Seconds between the health board's checks for issues |
 | `SRE_DATA_DIR` | `artifacts/sre` | Threads, history, host copies of outputs and evidence, and memory |
 
 ## Layout
