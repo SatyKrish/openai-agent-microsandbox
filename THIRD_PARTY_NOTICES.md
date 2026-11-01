@@ -11,7 +11,7 @@ The Apache-2.0 license in the repository root covers original project code and d
 
 ## openai-agent-substrate harness and UI
 
-- Files: `harness/` (the shared agent harness and its UI page), `examples/sre/agent/lib/findings.py` and `examples/sre/agent/skills/kubernetes-triage/scripts/triage.py`.
+- Files: `harness/` (the shared agent harness and its UI page), `apps/sre/agent/lib/findings.py` and `apps/sre/agent/skills/kubernetes-triage/scripts/triage.py`.
 - Source: openai-agent-substrate, adapted from Agent Substrate Actors to MXC sessions. Files that keep its copyright line are those copies.
 - Copyright: 2026 openai-agent-substrate contributors.
 - License: Apache-2.0.

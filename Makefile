@@ -70,17 +70,17 @@ ui: ## Port-forward the harness UI to http://localhost:$(UI_PORT)
 	$(KUBECTL) -n sre-system port-forward pod/sre-harness-payments-0 $(UI_PORT):8001
 
 verify: ## Boundary probes and a scripted investigation, in the cluster, without a model
-	$(KUBECTL) -n sre-system exec sre-harness-payments-0 -c harness -- python -m examples.sre.verify
+	$(KUBECTL) -n sre-system exec sre-harness-payments-0 -c harness -- python -m apps.sre.verify
 
 loadtest: ## Many conversations and users at once, in the cluster, without a model
-	$(KUBECTL) -n sre-system exec sre-harness-payments-0 -c harness -- python -m examples.sre.loadtest
+	$(KUBECTL) -n sre-system exec sre-harness-payments-0 -c harness -- python -m apps.sre.loadtest
 
 isolation: ## One session's logs and evidence out of every other's reach, in the cluster and from the host
 	@mkdir -p artifacts; status=0; \
-	  $(KUBECTL) -n sre-system exec sre-harness-payments-0 -c harness -- python -m examples.sre.isolation \
+	  $(KUBECTL) -n sre-system exec sre-harness-payments-0 -c harness -- python -m apps.sre.isolation \
 	    > artifacts/isolation.out 2>&1 || status=1; \
 	  grep -v '^STATE ' artifacts/isolation.out; \
-	  uv run --locked python -m examples.sre.isolation --host-check artifacts/isolation.out --context $(KUBE_CONTEXT) \
+	  uv run --locked python -m apps.sre.isolation --host-check artifacts/isolation.out --context $(KUBE_CONTEXT) \
 	    || status=1; \
 	  rm -f artifacts/isolation.out; exit $$status
 

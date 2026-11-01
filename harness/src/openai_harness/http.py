@@ -3,7 +3,7 @@
 """The HTTP API of the harness: conversations, their transcripts and live events, the ChatKit endpoint,
 uploads, and what a UI shows beside the chat.
 
-A UI serves its own page and adds these routes (the SRE agent's is in ``examples/sre/ui``).
+A UI serves its own page and adds these routes (the SRE agent's is in ``apps/sre/ui``).
 The conversation routes are the harness's own: list, start, read, rename and delete conversations,
 send a message, stop a turn, and follow a conversation's events as server-sent events. ``/chatkit``
 serves the same conversations in ChatKit's protocol. The server runs a paid model, so it serves

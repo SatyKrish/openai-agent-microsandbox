@@ -95,7 +95,7 @@ cluster and stops the VM.
 
 ## The SRE agent
 
-The [SRE agent](examples/sre/README.md) investigates unhealthy workloads with
+The [SRE agent](apps/sre/README.md) investigates unhealthy workloads with
 kubectl in its sandbox, using the worker's read-only identity: it can read pods,
 logs, events and workload objects in `payments`, and cannot read Secrets or
 change anything. It loads a `kubernetes-triage` skill, reads the application
@@ -104,7 +104,7 @@ run. It remembers across conversations through the SDK's `Memory` capability:
 the harness carries each conversation's distilled lessons into the same user's
 later conversations (everyone shares the guest's without sign-in), forgets
 them after 90 days, and the agent cannot write memory itself. The SRE UI is this
-repository's own page in `examples/sre/ui`, started from
+repository's own page in `apps/sre/ui`, started from
 [openai-agent-substrate](https://github.com/SatyKrish/openai-agent-substrate)'s shared UI; the
 harness serves only its API.
 
@@ -155,7 +155,7 @@ proto/mxc/sandbox/v1/       The harness/worker gRPC contract
 worker/                     MXC sandbox worker (Node 24, TypeScript), its unit tests and a host runner for tests
 sandbox/                    The provider (openai-agent-mxc): MXCSandboxClient, gRPC transport, tracing
 harness/                    The agent harness (openai-harness): turn engine, memory, HTTP API and a ChatKit adapter, adapted from openai-agent-substrate
-examples/sre/               The SRE agent: SandboxAgent, skill, runbooks, findings check, its UI, verify and load test
+apps/sre/                   The SRE agent: SandboxAgent, skill, runbooks, findings check, its UI, verify and load test
 deploy/docker/              Worker and harness images
 deploy/kubernetes/          Kustomize base (the pair, RBAC, NetworkPolicies) and kind and AKS overlays
 deploy/kind/, deploy/demo/  The Kind cluster and the broken payments workloads
@@ -169,7 +169,7 @@ docs/                       Architecture, local Kubernetes, deployment, usage, d
 - [Deploying on another cluster](docs/deployment.md)
 - [SDK integration and sessions](docs/usage.md)
 - [Development](docs/development.md) and the [verification record](docs/verification.md)
-- [SRE agent](examples/sre/README.md)
+- [SRE agent](apps/sre/README.md)
 
 ## License
 

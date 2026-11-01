@@ -12,10 +12,10 @@ from chatkit.types import ThreadMetadata
 
 from agents.sandbox import MemoryGenerateConfig
 
-from examples.sre.agent.agent import CONSOLIDATE_MODEL, EXTRACT_MODEL
-from examples.sre.agent.lib import findings
-from examples.sre.agent.spec import REPORT, make_spec, runbooks
-from examples.sre.ui.card import check_rows, file_status
+from apps.sre.agent.agent import CONSOLIDATE_MODEL, EXTRACT_MODEL
+from apps.sre.agent.lib import findings
+from apps.sre.agent.spec import REPORT, make_spec, runbooks
+from apps.sre.ui.card import check_rows, file_status
 from openai_harness.chat import HarnessChatServer
 from openai_harness.spec import Conversation
 from openai_harness.store import SQLiteStore
@@ -152,7 +152,7 @@ async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(
 def test_the_ui_serves_its_own_page_and_the_health_summary(worker, tmp_path):
     from starlette.testclient import TestClient
 
-    from examples.sre.ui.app import create_app
+    from apps.sre.ui.app import create_app
 
     store = SQLiteStore(tmp_path / "threads.sqlite3")
     client = worker.client()
@@ -229,9 +229,9 @@ async def test_the_health_board_opens_one_shared_issue_per_unhealthy_workload(wo
     import pytest
     from starlette.testclient import TestClient
 
-    from examples.sre.agent.spec import issue_context
-    from examples.sre.ui.app import create_app
-    from examples.sre.ui.issues import Issues
+    from apps.sre.agent.spec import issue_context
+    from apps.sre.ui.app import create_app
+    from apps.sre.ui.issues import Issues
     from openai_harness.store import SHARED
 
     store = SQLiteStore(tmp_path / "threads.sqlite3", admins=frozenset({"lead@example.com"}))
@@ -316,7 +316,7 @@ async def test_a_failed_check_gets_one_corrective_pass_and_the_card_says_so(work
 
 
 def test_pod_logs_since_takes_a_duration():
-    from examples.sre.agent.tools.logs import since_seconds
+    from apps.sre.agent.tools.logs import since_seconds
 
     assert [since_seconds(value) for value in (None, "", "45s", "10m", "1h30m", "30d")] == [0, 0, 45, 600, 5400, 604800]
     for value in ("ten minutes", "10", "5x"):

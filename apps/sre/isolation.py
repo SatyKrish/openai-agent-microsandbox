@@ -354,7 +354,7 @@ def host_check(state_file: Path, context: str) -> int:
         logs = kubectl(context, "logs", pod, "-c", container).stdout
         leaked = [marker for marker in markers if marker in logs]
         report(not leaked, f"{container} pod logs hold no command output", f"{len(logs.splitlines())} log lines")
-    purge = kubectl(context, "exec", harness, "-c", "harness", "--", "python", "-m", "examples.sre.isolation",
+    purge = kubectl(context, "exec", harness, "-c", "harness", "--", "python", "-m", "apps.sre.isolation",
                     "--purge", *ids)
     remaining = kubectl(context, "exec", worker, "-c", "worker", "--", "sh", "-c",
                         " ".join(f"test -e /sandboxes/history/{workspace} && echo {workspace};" for workspace in ids))

@@ -1,5 +1,5 @@
 # Workspace root: no package of its own. The SDK provider is sandbox/, the shared
-# agent harness (with its UI) is harness/, and the SRE agent in examples/ runs from here.
+# agent harness (with its UI) is harness/, and the SRE agent in apps/ runs from here.
 [tool.uv.workspace]
 members = ["sandbox", "harness"]
 
@@ -17,7 +17,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["sandbox/tests", "harness/tests", "examples/sre/evals"]
+testpaths = ["sandbox/tests", "harness/tests", "apps/sre/evals"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 

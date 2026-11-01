@@ -15,9 +15,9 @@ COPY sandbox ./sandbox
 COPY harness/pyproject.toml ./harness/
 COPY harness/src ./harness/src
 RUN uv sync --locked --no-dev --all-packages
-COPY examples ./examples
+COPY apps ./apps
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin harness && mkdir -p /data && chown 10001 /data
 ENV PATH=/app/.venv/bin:$PATH SRE_DATA_DIR=/data PYTHONDONTWRITEBYTECODE=1
 USER 10001
 EXPOSE 8001
-CMD ["python", "-m", "examples.sre.ui"]
+CMD ["python", "-m", "apps.sre.ui"]

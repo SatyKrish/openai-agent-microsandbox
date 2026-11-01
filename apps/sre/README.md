@@ -125,7 +125,7 @@ deleted. See [architecture](../../docs/architecture.md#memory-across-conversatio
 ## Settings
 
 The harness reads these from its environment (or the matching flags of
-`python -m examples.sre.ui`). In the cluster, the `OPENAI_*` settings come from
+`python -m apps.sre.ui`). In the cluster, the `OPENAI_*` settings come from
 `.env` through the `openai-creds` Secret (`make secrets`), and the rest are in
 the harness's manifest
 ([`harness.yaml`](../../deploy/kubernetes/base/harness.yaml)); apply either and

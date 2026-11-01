@@ -8,11 +8,12 @@
 | `worker/` | `mxc-sandbox-worker` (Node 24, TypeScript) | `@microsoft/mxc-sdk`, `@grpc/grpc-js` |
 | `sandbox/` | `openai-agent-mxc`, imported as `agent_mxc` | `openai-agents==0.24.0`, `grpcio`; never the harness or ChatKit |
 | `harness/` | `openai-harness`, imported as `openai_harness` | The provider; ChatKit only in its adapter, store view and uploads |
-| `examples/sre/` | The SRE agent, its UI settings and its in-cluster checks | The harness |
+| `apps/sre/` | The SRE agent, its UI settings and its in-cluster checks | The harness |
 
 The repository is a uv workspace (`sandbox`, `harness`); the worker is a
-separate npm project. The agents stay in `examples/`: a top-level `agents/`
-package would shadow the Agents SDK, whose import name is `agents`.
+separate npm project. Each agent is an app in `apps/`, run from the repository
+root (`python -m apps.sre.ui`); a top-level `agents/` package would shadow the
+Agents SDK, whose import name is `agents`.
 
 ## Tests
 
@@ -26,7 +27,7 @@ Python tests with pytest:
 - **Worker** (`worker/test/`): which commands count as evidence, evidence file
   names, redaction, container requests, workspace path guards against planted
   symlinks, and the gRPC service with its token, using a stand-in runner.
-- **Python** (`sandbox/tests`, `harness/tests`, `examples/sre/evals`): the
+- **Python** (`sandbox/tests`, `harness/tests`, `apps/sre/evals`): the
   provider, the harness and its UI routes, the trace summary, and the SRE agent
   end to end with a scripted model.
 
@@ -67,5 +68,5 @@ it visible to containers. The harness image installs the uv workspace from
 
 An agent is a plain `SandboxAgent` plus an `AgentSpec` for the harness: its
 starting manifest, extra instructions, optional harness tools, its host check
-and which folders to collect. `examples/sre/` is the worked example; its
+and which folders to collect. `apps/sre/` is the one to follow; its
 `ui/__main__.py` shows the launcher, and `verify.py` the in-cluster check.

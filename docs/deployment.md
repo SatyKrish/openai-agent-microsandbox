@@ -57,7 +57,7 @@ container stays in that VM. Check before relying on it:
    `managed-csi-premium` and gives the worker 32 GiB.
 
 Apply with `kubectl apply -k deploy/kubernetes/overlays/aks`, then run
-`kubectl -n sre-system exec sre-harness-payments-0 -- python -m examples.sre.verify`.
+`kubectl -n sre-system exec sre-harness-payments-0 -- python -m apps.sre.verify`.
 
 ## Another application domain
 

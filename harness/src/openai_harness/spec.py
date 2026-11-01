@@ -1,6 +1,6 @@
 # Copyright 2026 openai-agent-substrate contributors
 # SPDX-License-Identifier: Apache-2.0
-"""What an agent example hands the harness, beside its SDK SandboxAgent."""
+"""What an agent app hands the harness, beside its SDK SandboxAgent."""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ class Uploads:
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """The agent example's part of a turn. The agent itself is the SandboxAgent ``build_agent`` returns."""
+    """The agent app's part of a turn. The agent itself is the SandboxAgent ``build_agent`` returns."""
 
     name: str
     build_agent: Callable[[Manifest, Any], SandboxAgent]

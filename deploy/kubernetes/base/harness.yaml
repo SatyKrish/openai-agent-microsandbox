@@ -32,7 +32,7 @@ spec:
       containers:
         - name: harness
           image: sre-agent-harness:local
-          command: ["python", "-m", "examples.sre.ui"]
+          command: ["python", "-m", "apps.sre.ui"]
           args: ["--host", "127.0.0.1", "--port", "8001"]
           envFrom:
             - secretRef: {name: openai-creds}

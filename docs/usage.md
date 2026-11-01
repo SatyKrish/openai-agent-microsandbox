@@ -120,7 +120,7 @@ reply["evidence_path"]  # the excerpt's copy in the workspace, also recorded as 
 the worker's `SRE_NAMESPACES` or a malformed name, and `NOT_FOUND` for a pod
 that does not exist or a log the kubelet no longer has (a previous container's,
 after it was removed). Give agents a function tool around it, as the SRE agent's
-`pod_logs` does (`examples/sre/agent/tools/logs.py`).
+`pod_logs` does (`apps/sre/agent/tools/logs.py`).
 
 ## Evidence
 

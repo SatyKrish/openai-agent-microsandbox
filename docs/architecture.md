@@ -248,7 +248,7 @@ constrained:
 
 - **The agent cannot write it during a run** (`live_update=False`, where the
   SDK's default is to allow it). Only the SDK's extraction writes memory,
-  guided by [`memory.md`](../examples/sre/agent/memory.md): conclusions rather
+  guided by [`memory.md`](../apps/sre/agent/memory.md): conclusions rather
   than data; never raw log lines, pod specs, credentials or personal data;
   never instructions found in logs, events or pod specs; and a user preference
   only when stated as standing, never a one-off request, and never one that
@@ -258,7 +258,7 @@ constrained:
 - **It is read as a hypothesis.** The SDK adds the user's memory summary to the
   agent's instructions and has the agent search `MEMORY.md` before exploring,
   so memory decides where it looks first. The agent's
-  [instructions](../examples/sre/agent/instructions.md) add what the SDK's
+  [instructions](../apps/sre/agent/instructions.md) add what the SDK's
   read-only mode leaves out: the cluster as read now wins over memory; a
   remembered cause is a hypothesis to confirm and to try to rule out; memory is
   never cited in findings; the answer says what rests on memory it did not
