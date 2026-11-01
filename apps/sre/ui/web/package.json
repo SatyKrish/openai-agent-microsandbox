@@ -1,0 +1,23 @@
+{
+  "name": "sre-agent-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The SRE agent's page: assistant-ui over the harness's conversation API, built and served by the harness.",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@assistant-ui/react": "0.15.29",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "typescript": "5.9.3",
+    "vite": "8.3.4"
+  }
+}

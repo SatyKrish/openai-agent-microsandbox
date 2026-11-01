@@ -75,6 +75,9 @@ def test_findings_quotes_are_checked_against_the_journal_copy(tmp_path):
         "not in the file", "the sandbox worker never recorded this file"]
     assert checked["summary"][0]["verified"] is False and checked["quotes"] == 1 and checked["quotes_total"] == 3
     assert findings.check(conversation, findings_file())["status"] == "failed"
+    # A long label is cut to 80 characters and says so.
+    long = findings.check(conversation, findings_file(quote, resource="deployment/payments-processor · " + "x" * 80))
+    assert len(long["results"][0]["resource"]) == 80 and long["results"][0]["resource"].endswith("x…")
     assert findings.check(conversation, {"output/findings.md": b"x"})["status"] == "no_findings"
     # A failed check asks the agent once to re-read the file it cited.
     prompt = findings.retry_prompt(checked)
@@ -161,9 +164,20 @@ def test_the_ui_serves_its_own_page_and_the_health_summary(worker, tmp_path):
                      health=client.health)
     try:
         with TestClient(app, base_url="http://localhost:8001") as browser:
-            # The page is the SRE UI's own, with its views imported directly; the harness serves only the API.
+            # The page is the SRE UI's own, built from web/ into static/app; a checkout that has not built it serves
+            # the ChatKit page at / as well. The ChatKit page is always at /chatkit-ui. The harness serves the API.
+            chatkit = browser.get("/chatkit-ui")
+            assert chatkit.status_code == 200 and "<title>SRE agent</title>" in chatkit.text
+            assert "/static/app.js" in chatkit.text and chatkit.headers["cache-control"] == "no-store"
             page = browser.get("/")
-            assert page.status_code == 200 and "<title>SRE agent</title>" in page.text and "/static/app.js" in page.text
+            assert page.status_code == 200 and "<title>SRE agent</title>" in page.text
+            built = Path(__file__).resolve().parents[1] / "ui" / "static" / "app" / "index.html"
+            if built.is_file():
+                assert '<div id="root"></div>' in page.text and "/static/app.js" not in page.text
+                script = page.text.split('src="', 1)[1].split('"', 1)[0]
+                assert script.startswith("/static/app/assets/") and browser.get(script).status_code == 200
+            else:
+                assert page.text == chatkit.text
             assert 'from "./sre.js"' in browser.get("/static/app.js").text
             assert "export async function renderHome" in browser.get("/static/sre.js").text
             assert browser.get("/static/app.css").status_code == 200 and browser.get("/harness/app.js").status_code == 404

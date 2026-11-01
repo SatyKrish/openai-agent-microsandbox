@@ -81,11 +81,11 @@ def main(argv=None):
     args = parse_args(argv)
     import logging
 
-    import uvicorn
     from agents import flush_traces
 
     from agent_mxc import MXCSandboxClient
     from agent_mxc.tracing import configure_tracing, tracing_enabled
+    from openai_harness import http
     from openai_harness.chat import HarnessChatServer
     from openai_harness.memory import UserMemory
     from openai_harness.store import SQLiteStore
@@ -122,7 +122,7 @@ def main(argv=None):
           f"namespaces {scope}, memory {remembering}, users {f'from {args.user_header}' if args.user_header else 'guest'})",
           flush=True)
     try:
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        http.serve(app, host=args.host, port=args.port)
     finally:
         flush_traces()
         store.close()

@@ -58,15 +58,19 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   turns amber when the worker is unreachable. It opens **How this works**: the
   worker, its containment and egress, and how the agent is contained, said once
   here rather than on every view. Settings opens it too.
+- **Conversations.** The list beside the conversation has open issues first,
+  then your conversations, then recovered issues; a green dot marks a turn that
+  is running. A link to a conversation (`?c=ID`, or the ChatKit page's
+  `?thread=ID`) opens it. Stop in the composer stops the running turn.
 - **Issues.** The health board opens an issue for each unhealthy workload,
-  without a model call, and the history lists it beside your conversations.
+  without a model call, and the conversation list shows it under Open issues.
   An issue is shared: everyone sees it and can investigate in it, and only an
   admin can delete it. It starts with a card of what the worker read (state,
   reasons, restarts, readiness, the latest warning and when it was read);
   **Investigate** puts the question in the composer, and the agent is told
   which issue it is in. When the workload is healthy again, the issue is marked
   recovered; if it fails later, a new issue opens.
-- **Start screen.** Under the composer, each namespace lists its workloads,
+- **Start screen.** Above the composer, each namespace lists its workloads,
   failing first, with readiness and why each is unhealthy (waiting reasons, the
   last exit, restarts, when the latest warning happened). Only each workload's
   dot is coloured. Each row also says what changed: the latest rollout, its
@@ -76,13 +80,14 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   **Investigate all** asks about every unhealthy one. The worker builds this summary
   with its own identity; it is not sent to the model. The side panel stays
   closed until a conversation has output.
-- **Memory.** The book button beside the history button shows what the agent
-  remembers the way history shows conversations: one entry per earlier
+- **Memory.** The book button in the top bar shows what the agent remembers
+  the way the list shows conversations: one entry per earlier
   conversation, grouped by day. Select one to open it, forget one, or forget
   everything. **Correct something** starts a conversation to tell the agent what
-  is wrong; it is remembered when that conversation goes idle. While history
-  itself is open, the start screen steps aside.
-- **Steps.** Each step is titled with what ran (`kubectl describe pod …`,
+  is wrong; it is remembered when that conversation goes idle.
+- **Steps.** While the agent works, its steps show as they run; a finished
+  group folds to one line ("Worked for 8 s", with its step count) that opens again. Each
+  step is titled with what ran (`kubectl describe pod …`,
   `pod_logs payments-api -n payments match="timeout"`); its icon says where it
   ran. The title adds only what is unusual: a non-zero exit, or `harness` for a
   harness tool.
@@ -159,8 +164,11 @@ agent/
   lib/findings.py           Host check of findings.json against the evidence
   spec.py                   AgentSpec for the harness
 ui/                         The UI: its page served beside the harness's API, the turn card and the launcher
-  static/                   The page: app.js (chat, panel, memory view), sre.js (health board, findings,
-                            log excerpts, kubectl tables), styles, and the trace and file views
+  web/                      The page (assistant-ui, React): conversation list, chat, side panel, memory view;
+                            built into static/app and served at /
+  static/                   The views both pages share: sre.js (health board, findings, log excerpts,
+                            kubectl tables), styles, the trace and file views; and the ChatKit page
+                            (index.html, app.js) at /chatkit-ui
 evals/                      Tests against the worker's real gRPC service
 verify.py                   In-cluster boundary probes and a scripted investigation
 loadtest.py                 Many conversations and users at once

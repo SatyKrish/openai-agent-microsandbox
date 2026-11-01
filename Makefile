@@ -22,7 +22,7 @@ export DOCKER_HOST := unix://$(HOME)/.colima/$(COLIMA_PROFILE)/docker.sock
 endif
 KUBECTL := kubectl --context $(KUBE_CONTEXT)
 
-.PHONY: all cluster images load secrets deploy demo ui verify loadtest isolation journal logs status test test-worker test-python proto clean teardown
+.PHONY: all cluster page images load secrets deploy demo ui verify loadtest isolation journal logs status test test-worker test-python proto clean teardown
 
 all: cluster images load secrets deploy demo
 
@@ -39,6 +39,9 @@ endif
 	  previous=$$(kubectl config current-context 2>/dev/null); \
 	  kind create cluster --name $(CLUSTER) --config deploy/kind/cluster.yaml --wait 120s; \
 	  if [ -n "$$previous" ]; then kubectl config use-context "$$previous" >/dev/null; fi; }
+
+page: ## Build the UI's page (apps/sre/ui/web) into static/app, for running the UI outside the image
+	cd apps/sre/ui/web && npm ci --no-audit --no-fund && npm run build
 
 images: ## Build the worker and harness images
 	docker build -f deploy/docker/worker.Dockerfile -t $(WORKER_IMAGE) .
@@ -95,7 +98,7 @@ status:
 	$(KUBECTL) -n sre-system get pods,pvc,networkpolicy -o wide
 	$(KUBECTL) -n payments get pods -o wide
 
-test: test-worker test-python ## Unit and integration tests, no cluster needed
+test: test-worker page test-python ## Unit and integration tests, no cluster needed
 
 test-worker:
 	cd worker && npm ci --ignore-scripts --no-audit --no-fund && npm test

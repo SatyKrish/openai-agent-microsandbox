@@ -20,8 +20,8 @@ def _normal(text: str) -> str:
     return " ".join(text.split())
 
 
-def _short(text: str) -> str:
-    return text if len(text) <= _SHOWN else text[:_SHOWN] + "…"
+def _short(text: str, shown: int = _SHOWN) -> str:
+    return text if len(text) <= shown else text[:shown] + "…"
 
 
 def check(conversation, files: dict[str, bytes]) -> dict:
@@ -45,7 +45,7 @@ def check(conversation, files: dict[str, bytes]) -> dict:
         if not isinstance(finding, dict):
             failures.append({"resource": None, "reason": "A finding is not an object."})
             continue
-        resource = str(finding.get("resource") or "a finding")[:80]
+        resource = _short(str(finding.get("resource") or "a finding"), 79)
         quotes = []
         cited = finding.get("evidence")
         if not isinstance(cited, list) or not cited:

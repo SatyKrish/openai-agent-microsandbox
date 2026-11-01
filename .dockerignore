@@ -8,3 +8,5 @@ artifacts
 **/.ruff_cache
 worker/node_modules
 worker/dist
+apps/sre/ui/web/node_modules
+apps/sre/ui/static/app

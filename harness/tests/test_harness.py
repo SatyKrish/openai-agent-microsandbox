@@ -527,6 +527,12 @@ def test_the_harness_api_runs_conversations_without_chatkit(worker, tmp_path):
             time.sleep(0.1)
         assert turns[-1]["status"] == "stopped"
 
+        # When the server stops, the streams pages keep open end (the page reconnects), so the stop need not wait.
+        with client.stream("GET", f"/api/conversations/{thread_id}/events", headers=ana) as events:
+            client.portal.call(api.state.stopping.set)
+            assert list(events.iter_lines()) == [": following", ""]
+        api.state.stopping.clear()
+
         assert client.delete(f"/api/conversations/{thread_id}", headers=bo).status_code == 404
         assert client.delete(f"/api/conversations/{thread_id}", headers=ana).json() == {"deleted": True}
         assert client.get("/api/conversations", headers=ana).json()["conversations"] == []

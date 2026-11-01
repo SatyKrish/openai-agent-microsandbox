@@ -8,6 +8,7 @@ from pathlib import Path
 
 import asyncio
 import contextlib
+import logging
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
@@ -18,6 +19,7 @@ from openai_harness import http
 from openai_harness.chat import HarnessChatServer
 
 STATIC = Path(__file__).resolve().parent / "static"
+logger = logging.getLogger(__name__)
 
 # The page's words that are not code; served at /api/config with what __main__ and the harness add.
 UI = {
@@ -50,8 +52,10 @@ class _Revalidated(StaticFiles):
         return response
 
 
-async def _page(request: Request):
-    return FileResponse(STATIC / "index.html", media_type="text/html", headers={"Cache-Control": "no-store"})
+def _page(path: Path):
+    async def page(request: Request):
+        return FileResponse(path, media_type="text/html", headers={"Cache-Control": "no-store"})
+    return page
 
 
 async def _icon(request: Request):
@@ -86,7 +90,14 @@ def create_app(server: HarnessChatServer, *, config: dict, port: int, jaeger_url
                 await task
         await server.close_all()
 
-    return http.application([Route("/", _page), Route("/favicon.svg", _icon), Route("/favicon.ico", _icon),
+    # The page is built from web/ (assistant-ui) into static/app/; the ChatKit page stays at /chatkit-ui. A
+    # checkout that has not built the page serves the ChatKit page at / too.
+    page = STATIC / "app" / "index.html"
+    if not page.is_file():
+        logger.warning("The page is not built (make page); serving the ChatKit page at /")
+        page = STATIC / "index.html"
+    return http.application([Route("/", _page(page)), Route("/chatkit-ui", _page(STATIC / "index.html")),
+                             Route("/favicon.svg", _icon), Route("/favicon.ico", _icon),
                              Route("/api/issues", listing), *api,
                              Mount("/static", _Revalidated(directory=STATIC), name="static")],
                             on_startup=start, on_shutdown=stop)

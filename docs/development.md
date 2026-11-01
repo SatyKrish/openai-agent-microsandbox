@@ -8,12 +8,13 @@
 | `worker/` | `mxc-sandbox-worker` (Node 24, TypeScript) | `@microsoft/mxc-sdk`, `@grpc/grpc-js` |
 | `sandbox/` | `openai-agent-mxc`, imported as `agent_mxc` | `openai-agents==0.24.0`, `grpcio`; never the harness or ChatKit |
 | `harness/` | `openai-harness`, imported as `openai_harness` | The provider; ChatKit only in its adapter, store view and uploads |
-| `apps/sre/` | The SRE agent, its UI settings and its in-cluster checks | The harness |
+| `apps/sre/` | The SRE agent, its UI and its in-cluster checks | The harness |
+| `apps/sre/ui/web/` | `sre-agent-ui`, the UI's page (React, TypeScript) | `@assistant-ui/react`; the views in `ui/static/` |
 
-The repository is a uv workspace (`sandbox`, `harness`); the worker is a
-separate npm project. Each agent is an app in `apps/`, run from the repository
-root (`python -m apps.sre.ui`); a top-level `agents/` package would shadow the
-Agents SDK, whose import name is `agents`.
+The repository is a uv workspace (`sandbox`, `harness`); the worker and the
+UI's page are separate npm projects. Each agent is an app in `apps/`, run from
+the repository root (`python -m apps.sre.ui`); a top-level `agents/` package
+would shadow the Agents SDK, whose import name is `agents`.
 
 ## Tests
 
@@ -21,8 +22,8 @@ Agents SDK, whose import name is `agents`.
 make test
 ```
 
-This builds the worker, runs its unit tests with `node --test`, then runs the
-Python tests with pytest:
+This builds the worker, runs its unit tests with `node --test`, builds the UI's
+page (`make page`), then runs the Python tests with pytest:
 
 - **Worker** (`worker/test/`): which commands count as evidence, evidence file
   names, redaction, container requests, workspace path guards against planted
@@ -62,7 +63,14 @@ The worker image installs `@microsoft/mxc-sdk` from `package-lock.json` (its
 compiler), bubblewrap, slirp4netns, iptables and util-linux from Debian, and a
 checksum-verified kubectl into `/usr/bin`, where MXC's read-only baseline makes
 it visible to containers. The harness image installs the uv workspace from
-`uv.lock` and runs as uid 10001 with a read-only root filesystem.
+`uv.lock` and runs as uid 10001 with a read-only root filesystem; a Node stage
+builds the UI's page from `package-lock.json` into `static/app`, so the image
+needs no Node at run time.
+
+To work on the page, `npm run dev` in `apps/sre/ui/web` serves it with
+Vite and sends `/api` to the harness on `localhost:8001` (`make ui`).
+`make page` builds it into `apps/sre/ui/static/app` (not committed); a
+harness run from a checkout without it serves the ChatKit page at `/`.
 
 ## Adding an agent
 

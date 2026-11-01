@@ -12,7 +12,7 @@ The following diagram shows one application domain's pair on Kubernetes:
 flowchart LR
     Browser -->|kubectl port-forward| UI
     subgraph Harness["sre-harness-payments-0: no Kubernetes token"]
-        UI["SRE UI (ChatKit) + harness API"] --> Loop["Turn engine: Agents SDK Runner + SandboxAgent"]
+        UI["SRE UI (assistant-ui) + harness API"] --> Loop["Turn engine: Agents SDK Runner + SandboxAgent"]
         Loop --> Client["MXCSandboxClient"]
         Check["Host check of findings"]
         Memory["/data/memory: each user's memory"]
@@ -169,10 +169,18 @@ The harness serves this as its own API, for any UI:
 | `PATCH`, `DELETE /api/conversations/ID` | Renames or deletes it |
 | `POST /api/conversations/ID/messages` | Sends a message |
 | `POST /api/conversations/ID/stop` | Stops the running turn |
-| `GET /api/conversations/ID/events` | The conversation's events, as server-sent events |
+| `GET /api/conversations/ID/events` | The conversation's events, as server-sent events; the stream ends when the server stops, and the page reconnects |
+
+The SRE UI's page ([`apps/sre/ui/web`](../apps/sre/ui/web)) is
+built on assistant-ui's `ExternalStoreRuntime` over this API: the page holds
+the transcript it reads and follows over events, and the harness runs the
+turns. Steps and cards are the transcript's own entries, drawn as message
+parts; composer stop is `POST …/stop`. It is served from the harness, so the
+page has no third-party script and no CDN.
 
 ChatKit is one adapter over the engine
-([`chat.py`](../harness/src/openai_harness/chat.py)): `/chatkit` hands a message
+([`chat.py`](../harness/src/openai_harness/chat.py)), kept with its page at
+`/chatkit-ui`: `/chatkit` hands a message
 to the engine and streams that turn's events as ChatKit events, and the store
 serves ChatKit's items from the transcript, so ChatKit and the harness's API
 show the same conversation. Stopping a ChatKit stream stops the turn, as
@@ -273,9 +281,9 @@ SDK's generation at close may do, and anything forgotten while the conversation
 was open, which its stale copy would otherwise publish back.
 
 **People see and manage their memory** the way they see their conversations.
-The book button beside ChatKit's history button (ChatKit's header takes only
-its own icons) opens a Memory view over the chat, laid out like ChatKit's
-history: one entry per remembered conversation, with the SDK's one-line
+The book button in the top bar opens a Memory view in place of the
+conversation, laid out like the conversation list: one entry per remembered
+conversation, with the SDK's one-line
 description, grouped by day. Selecting an entry opens that conversation;
 Forget appears on hover, and Forget everything below the list. It also shows the
 summary the agent starts with and `MEMORY.md` in full. A correction is made in
@@ -363,7 +371,7 @@ components required it:
 
 - **Python harness.** The harness uses the Python Agents SDK (`openai-agents`
   0.24.0) and its `SandboxAgent`, `BaseSandboxClient` and `BaseSandboxSession`,
-  so the existing ChatKit SRE UI and harness run on it. The worker is
+  so the existing SRE UI and harness run on it. The worker is
   TypeScript because MXC's Node SDK is how MXC is embedded.
 - **MXC rather than hand-built Bubblewrap.** Mounts, environment, the seccomp
   filter and the slirp4netns proxy-only network come from MXC. MXC's Node SDK offers

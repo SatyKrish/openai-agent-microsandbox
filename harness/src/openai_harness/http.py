@@ -335,17 +335,21 @@ def api_routes(server: HarnessChatServer, *, config: dict, port: int, jaeger_url
             return JSONResponse({"error": "conversation not found"}, status_code=404)
 
         async def stream():
+            # The stream ends when the server stops (the page reconnects), so a stop need not wait for it.
+            stopping: asyncio.Event = request.app.state.stopping
             with engine.listen(thread.id) as events:
                 yield ": following\n\n"
-                while True:
-                    try:
-                        event = await asyncio.wait_for(events.get(), timeout=_PING_S)
-                    except asyncio.TimeoutError:
+                while not stopping.is_set():
+                    waits = [asyncio.ensure_future(events.get()), asyncio.ensure_future(stopping.wait())]
+                    done, pending = await asyncio.wait(waits, timeout=_PING_S, return_when=asyncio.FIRST_COMPLETED)
+                    for wait in pending:
+                        wait.cancel()
+                    if waits[0] in done:
+                        yield f"data: {json.dumps(waits[0].result())}\n\n"
+                    elif not done:
                         if await request.is_disconnected():
                             return
                         yield ": ping\n\n"
-                        continue
-                    yield f"data: {json.dumps(event)}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -390,4 +394,19 @@ def application(routes: list, *, on_startup: Callable[[], Awaitable[None]] | Non
         if on_shutdown is not None:
             await on_shutdown()
 
-    return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
+    app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
+    app.state.stopping = asyncio.Event()
+    return app
+
+
+def serve(app: Starlette, *, host: str, port: int, log_level: str = "info") -> None:
+    """Runs an ``application`` until it is told to stop. Stopping ends the event streams pages keep open,
+    waits briefly for other requests, then runs ``on_shutdown``."""
+    import uvicorn
+
+    class Server(uvicorn.Server):
+        async def shutdown(self, sockets=None):
+            app.state.stopping.set()
+            await super().shutdown(sockets)
+
+    Server(uvicorn.Config(app, host=host, port=port, log_level=log_level, timeout_graceful_shutdown=5)).run()

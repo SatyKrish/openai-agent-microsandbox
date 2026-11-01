@@ -24,7 +24,7 @@ can see only that workspace. Each application domain gets one pair:
 | Harness (`sre-harness-payments-0`) | Sandbox worker (`sre-sandbox-payments-0`) |
 | --- | --- |
 | The OpenAI Agents SDK, with SDK sessions for history | One workspace per conversation, kept on the worker's volume |
-| ChatKit for the streaming SRE UI | An MXC container per command: shell, files, skills, kubectl, Python |
+| The SRE UI (assistant-ui) over the harness's conversation API | An MXC container per command: shell, files, skills, kubectl, Python |
 | The model's API key, and no Kubernetes token | A read-only Kubernetes identity, used only by its API proxy, and no model API key |
 | Host checks of findings against recorded evidence | An audit journal and recorded evidence that no container can see |
 
