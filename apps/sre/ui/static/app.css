@@ -118,17 +118,18 @@ code, pre { font-family: var(--mono); }
 @keyframes pulse { 50% { opacity: .35; } }
 .panel-head select { min-height: 32px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font-size: 12.5px; margin-bottom: 6px; }
 .panel-head .icon-button { width: 32px; height: 32px; margin-bottom: 6px; }
-.file-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 10px 16px; border-bottom: 1px solid var(--border-soft); max-height: min(240px, 32vh); overflow: auto; }
-.file-group { font-size: 12px; font-weight: 600; color: var(--muted); margin-left: 6px; }
-.file-group:first-child { margin-left: 0; }
+/* A turn's files as a list of rows: the reads first, by the command that made each */
+.file-bar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 8px 10px; border-bottom: 1px solid var(--border-soft); max-height: min(220px, 30vh); overflow: auto; }
+.file-group { margin: 8px 8px 2px; font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.file-group:first-child { margin-top: 0; }
 .file-chip {
-  display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 8px; border: 1px solid var(--border);
-  border-radius: 4px; background: var(--surface); font: 12px var(--mono); cursor: pointer; white-space: nowrap; max-width: 100%;
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 26px; padding: 0 8px; border: 0;
+  border-radius: 4px; background: none; font: 12px var(--mono); text-align: left; cursor: pointer; white-space: nowrap;
 }
 .file-chip:hover { background: var(--sunken); }
-.file-chip.earlier { color: var(--muted); border-color: var(--border-soft); }
+.file-chip.earlier { color: var(--muted); }
 .file-chip-label { overflow: hidden; text-overflow: ellipsis; }
-.file-chip[aria-pressed="true"] { border-color: var(--ink); color: var(--ink); }
+.file-chip[aria-pressed="true"] { background: var(--sunken); color: var(--ink); font-weight: 600; }
 .state-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
 .state-dot.failed { background: var(--err); }
 .artifact-head { display: flex; align-items: center; gap: 10px 16px; padding: 12px 16px 8px; }
@@ -241,7 +242,7 @@ code, pre { font-family: var(--mono); }
   .doc { padding: 20px 16px 36px; }
 }
 
-/* ---------- SRE views: health board, findings, log excerpts, kubectl tables ---------- */
+/* ---------- SRE views: health board, log excerpts, kubectl tables ---------- */
 
 /* Health board: plain rows under the composer; only each workload's dot carries colour. */
 .agent-home { flex: 0 1 auto; min-height: 0; padding: 4px 20px 12px; max-height: 42vh; overflow-y: auto; }
@@ -273,40 +274,6 @@ code, pre { font-family: var(--mono); }
 .sre-investigate { min-height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface);
   color: var(--ink); font-size: 12.5px; font-weight: 500; cursor: pointer; white-space: nowrap; }
 .sre-investigate:hover { background: var(--sunken); }
-
-/* Findings: one section each, divided by a rule; the fix is a code block. */
-.sre-findings { padding: 0 0 24px; }
-.sre-findings-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 12px 20px; font-size: 12.5px; color: var(--muted); }
-.sre-finding { margin: 0 20px; padding: 16px 0; border-top: 1px solid var(--border); }
-.sre-finding h3 { margin: 0; font-size: 15px; font-weight: 600; }
-.sre-resource { margin: 2px 0 0; font: 12.5px var(--mono); color: var(--ink-2); overflow-wrap: anywhere; }
-.sre-resource .muted { font-family: var(--sans); }
-.sre-cause { margin: 10px 0 12px; line-height: 1.55; color: var(--ink-2); }
-.sre-label { display: flex; justify-content: space-between; align-items: center; margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
-.sre-fix pre { margin: 0; padding: 10px 12px; border-radius: 4px; background: var(--sunken); white-space: pre-wrap; word-break: break-word;
-  font-size: 12.5px; line-height: 1.55; }
-.sre-copy { min-height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); font-size: 12px; font-weight: 400; cursor: pointer; }
-.sre-evidence { margin-top: 12px; }
-.sre-quotes { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.sre-quotes blockquote { margin: 0; padding: 0 0 0 10px; border-left: 2px solid var(--border); font: 12.5px/1.5 var(--mono);
-  white-space: pre-wrap; word-break: break-word; color: var(--ink); }
-.sre-link { margin-left: 12px; border: 0; background: none; color: var(--accent-ink); font: 12px var(--mono); cursor: pointer; padding: 0; overflow-wrap: anywhere; text-align: left; }
-.sre-link:hover { text-decoration: underline; }
-.sre-findings-head .sre-link { font-family: var(--sans); }
-.sre-unverified { margin-left: 10px; padding: 1px 6px; border: 1px solid var(--err-border); border-radius: 4px;
-  font-size: 11.5px; font-weight: 600; color: var(--err); vertical-align: middle; }
-.sre-ruled { margin: 0 0 12px; }
-.sre-ruled ul { margin: 0; padding-left: 18px; color: var(--ink-2); font-size: 13px; line-height: 1.5; }
-.sre-fix-summary { margin: 0 0 8px; line-height: 1.5; }
-.sre-fix-step + .sre-fix-step { margin-top: 8px; }
-.sre-step-label { display: flex; justify-content: space-between; align-items: center; margin: 0 0 3px; font-size: 11.5px;
-  color: var(--muted); }
-.sre-risk { margin: 8px 0 0; font-size: 12.5px; color: var(--muted); }
-.sre-source { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; margin: 2px 0 0 12px; font-size: 12px; }
-.sre-source .sre-link { margin-left: 0; }
-.sre-missing { color: var(--err); font-weight: 600; }
-.sre-quotes li.missing blockquote { border-left-color: var(--err); background: var(--err-bg); }
-.sre-json { margin: 0 20px 14px; padding: 12px; border-radius: 4px; background: var(--sunken); font-size: 12px; line-height: 1.5; overflow-x: auto; }
 
 /* Log excerpts */
 .sre-log-lines { margin: 0 20px 24px; border: 1px solid var(--border-soft); border-radius: 4px; overflow: hidden; font: 12.5px/1.55 var(--mono); }

@@ -1,21 +1,24 @@
 // Copyright 2026 openai-agent-mxc contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// The SRE agent's page: on the left, History (issues the health board opened, shared by the team, and
-// your own conversations) and Memory (what the agent remembers from them); the conversation in the
-// middle; and a side panel of the turn's files and trace. The start screen is the health board. How the
+// The SRE agent's page, an incident console: on the left, the cluster's health now with the issue for each
+// unhealthy workload, then History (your conversations) and Memory (what the agent remembers from them);
+// in the middle the conversation, where each turn leads with its verdict and its findings' fixes; and a
+// side panel that opens on a quote, a file or the trace. The start screen is the health board. How the
 // agent is contained is said once, in the How this works dialog. Everything comes from the harness's API.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { renderHome } from "../../static/sre.js";
+import { loadHealth, renderHome } from "../../static/sre.js";
 
-import { api, type Config, type Conversation } from "./api";
+import { api, workloadKey, type Config, type Conversation, type Health, type Workload } from "./api";
 import { Chat } from "./Chat";
 import { toMessages, useConversation } from "./conversation";
+import { HealthList } from "./Health";
 import { MemoryList } from "./Memory";
 import { Panel, type View } from "./Panel";
 import { CardActionsContext } from "./parts";
+import { TurnContext } from "./Turn";
 
 type Theme = "system" | "light" | "dark";
 type Tab = "history" | "memory";
@@ -28,6 +31,15 @@ function stored(key: string): string | null {
 }
 function store(key: string, value: string | null) {
   try { if (value === null) localStorage.removeItem(`sre:${key}`); else localStorage.setItem(`sre:${key}`, value); } catch { /* private window */ }
+}
+
+function ago(iso: string): string {
+  const seconds = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (!Number.isFinite(seconds)) return "";
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)} h ago`;
+  return new Date(iso).toLocaleDateString();
 }
 
 function initialConversation(): string | null {
@@ -64,11 +76,16 @@ function Board({ config, onSuggest, onOpenIssue }: {
   return <section className="agent-home ax-board" ref={ref} aria-live="polite" />;
 }
 
-function Sidebar({ conversations, current, onSelect, onNew, tab, onTab, memory }: {
+function Sidebar({ conversations, current, onSelect, onNew, onInvestigate, tab, onTab, memory, health }: {
   conversations: Conversation[]; current: string | null; onSelect: (id: string) => void; onNew: () => void;
-  tab: Tab; onTab: (tab: Tab) => void; memory: ReactNode;
+  onInvestigate: (question: string) => void; tab: Tab; onTab: (tab: Tab) => void; memory: ReactNode;
+  health: Health | null | undefined;
 }) {
-  const open = conversations.filter((item) => item.issue?.state === "open");
+  const issues = new Map(conversations.filter((item) => item.issue?.state === "open").map((item) => [item.issue!.fingerprint, item]));
+  // Open issues show under Health now, by their workload; the rest (the health board unread, say) are listed here.
+  const shown = new Set((health?.namespaces || []).flatMap(({ namespace, workloads }) => workloads
+    .filter((workload) => workload.state !== "healthy").map((workload) => workloadKey(namespace, workload.kind, workload.name))));
+  const open = [...issues.values()].filter((item) => !shown.has(item.issue!.fingerprint));
   const mine = conversations.filter((item) => !item.issue);
   const recovered = conversations.filter((item) => item.issue && item.issue.state !== "open");
   const row = (item: Conversation) => (
@@ -76,7 +93,12 @@ function Sidebar({ conversations, current, onSelect, onNew, tab, onTab, memory }
       <button type="button" className="ax-conversation" aria-current={item.id === current ? "page" : undefined}
         onClick={() => onSelect(item.id)} title={item.title || item.id}>
         {item.issue ? <span className={`ax-dot ${item.issue.state === "open" ? "failing" : ""}`} aria-hidden="true" /> : null}
-        <span className="ax-conversation-title">{item.title || "New conversation"}</span>
+        <span className="ax-conversation-text">
+          <span className="ax-conversation-title">{item.title || "New conversation"}</span>
+          <span className="ax-conversation-meta">{item.state === "running" ? "running" : [ago(item.issue?.recovered_at || item.created_at),
+            item.issue?.state === "recovered" ? "recovered" : "", item.turns ? `${item.turns} turn${item.turns === 1 ? "" : "s"}` : "not investigated"]
+            .filter(Boolean).join(" · ")}</span>
+        </span>
         {item.state === "running" ? <span className="ax-running" aria-label="running" /> : null}
       </button>
     </li>
@@ -94,6 +116,7 @@ function Sidebar({ conversations, current, onSelect, onNew, tab, onTab, memory }
       ) : null}
       {memory && tab === "memory" ? memory : (
         <div role={memory ? "tabpanel" : undefined} aria-label="History">
+          <HealthList health={health} issues={issues} current={current} onOpen={onSelect} onInvestigate={onInvestigate} />
           {open.length ? <><h2 className="ax-list-head">Open issues</h2><ul className="ax-list">{open.map(row)}</ul></> : null}
           <h2 className="ax-list-head">Conversations</h2>
           {mine.length ? <ul className="ax-list">{mine.map(row)}</ul> : <p className="ax-list-empty">None yet.</p>}
@@ -132,6 +155,7 @@ export function App() {
   const [worker, setWorker] = useState<any>(null);
   const [workerDown, setWorkerDown] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [health, setHealth] = useState<Health | null | undefined>(undefined);
   const about = useRef<HTMLDialogElement>(null);
   const linked = useRef(new URLSearchParams(location.search).get("c"));
   const settings = useRef<HTMLDetailsElement>(null);
@@ -173,15 +197,21 @@ export function App() {
     return () => clearInterval(timer);
   }, []);
 
+  // The cluster's health, kept beside the conversation; the start screen's board reads the same copy.
+  useEffect(() => {
+    if (!config?.health) return;
+    const read = () => (loadHealth() as Promise<{ status: number; body: Health | null }>).then(({ status, body }) =>
+      setHealth(status === 200 && body ? body : null));
+    read();
+    const timer = setInterval(() => { if (!document.hidden) read(); }, 10_000);
+    return () => clearInterval(timer);
+  }, [config]);
+  const workloads = useMemo(() => new Map<string, Workload>((health?.namespaces || []).flatMap(({ namespace, workloads: items }) =>
+    items.map((workload) => [workloadKey(namespace, workload.kind, workload.name), workload] as const))), [health]);
+
+  // The side panel opens only when asked: a quote, a file or the trace. Findings show in the conversation.
   const conversation = useConversation(current, {
     onTurnEnd: () => { refreshThread(); refreshList(); },
-    onEffect: (name, data) => {
-      if (name === "open_file" && wide.matches) {
-        refreshThread();
-        setPanelOpen(true);
-        setView({ tab: "files", turn: Number(data.turn), path: String(data.path) });
-      }
-    },
     onTitle: () => refreshList(),
     // A remembered conversation that is gone opens the start screen; a link to one says why.
     onMissing: (id) => {
@@ -201,6 +231,10 @@ export function App() {
   }, []);
   const chooseTab = useCallback((name: Tab) => { setTab(name); store("tab", name === "memory" ? name : null); }, []);
   const openIssue = useCallback((id: string, question: string) => { select(id); suggest(question); }, [select, suggest]);
+  const investigate = useCallback((question: string) => { select(null); suggest(question); }, [select, suggest]);
+  const openView = useCallback((next: View) => { setView(next); setPanelOpen(true); }, []);
+  const turnContext = useMemo(() => ({ threadId: current, turns: thread?.turns || [], workloads, open: openView }),
+    [current, thread, workloads, openView]);
   const send = useCallback(async (text: string) => {
     setNotice(null);
     try {
@@ -232,7 +266,6 @@ export function App() {
     onAction: (type: string, payload: Record<string, unknown>) => {
       if (type === "open_file") { refreshThread(); setPanelOpen(true); setView({ tab: "files", turn: Number(payload.turn), path: String(payload.path) }); }
       if (type === "open_trace") { setPanelOpen(true); setView({ tab: "trace", turn: Number(payload.turn) }); }
-      if (type === "open_quotes") { setPanelOpen(true); setView({ tab: "files", turn: Number(payload.turn), path: "output/findings.json" }); }
       if (type === "investigate_issue" && payload.prompt) suggest(String(payload.prompt));
     },
   }), [refreshThread, suggest]);
@@ -245,6 +278,7 @@ export function App() {
   const days = config.memory_max_age_days;
   return (
     <CardActionsContext.Provider value={cardActions}>
+     <TurnContext.Provider value={turnContext}>
       <div className="ax-app">
         <header className="topbar">
           <button type="button" className="icon-button ax-menu" aria-label={sidebarOpen ? "Collapse history and memory" : "Expand history and memory"}
@@ -291,16 +325,18 @@ export function App() {
                 <button type="button" className="link-button" onClick={() => { settings.current!.open = false; about.current?.showModal(); }}>How this works</button>
               </div>
             </details>
-            <button type="button" className="icon-button panel-toggle" aria-label={panelOpen ? "Hide files and trace" : "Show files and trace"}
-              aria-expanded={panelOpen} onClick={() => setPanelOpen(!panelOpen)}>
-              <Icon path="M3 4h18v16H3zM14 4v16" />
-            </button>
+            {current ? (
+              <button type="button" className="chip panel-toggle" aria-label={panelOpen ? "Hide evidence and trace" : "Show evidence and trace"}
+                aria-expanded={panelOpen} onClick={() => setPanelOpen(!panelOpen)}>
+                <Icon path="M3 4h18v16H3zM14 4v16" size={16} /><span className="wide-only">Evidence</span>
+              </button>
+            ) : null}
           </div>
         </header>
 
         <main className="ax-main" data-panel={panelOpen ? "open" : "closed"} data-sidebar={sidebarOpen ? "open" : "closed"}>
           {sidebarOpen ? <Sidebar conversations={conversations} current={current} onSelect={select} onNew={() => select(null)}
-            tab={tab} onTab={chooseTab}
+            onInvestigate={investigate} tab={tab} onTab={chooseTab} health={config.health ? health : undefined}
             memory={config.memory ? <MemoryList idleMinutes={Math.round(((config.idle_close_s as number) || 300) / 60)}
               current={current} onOpen={(id) => select(id)}
               onCorrect={() => { select(null); suggest("Something you remember is wrong: "); }} /> : null} />
@@ -310,7 +346,7 @@ export function App() {
               conversation={conversation} prefill={prefill} send={send} stop={stop} suggest={suggest} openIssue={openIssue}
               followUps={followUps} notice={notice} onPrefilled={clearPrefill} />
           </section>
-          {panelOpen ? <Panel threadId={current} thread={thread} config={config} view={view} setView={setView}
+          {panelOpen && current ? <Panel threadId={current} thread={thread} config={config} view={view} setView={setView}
             onClose={() => setPanelOpen(false)} /> : null}
         </main>
 
@@ -331,6 +367,7 @@ export function App() {
           </form>
         </dialog>
       </div>
+     </TurnContext.Provider>
     </CardActionsContext.Provider>
   );
 }

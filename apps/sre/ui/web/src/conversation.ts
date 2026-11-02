@@ -98,23 +98,37 @@ export function useConversation(id: string | null, hooks: Hooks) {
   return { entries, streaming, running, error, loaded, setError };
 }
 
-/** The transcript as assistant-ui messages: each person's message, then one message of what the agent did. */
+/** A turn's entries in one part, so the page can put its verdict first and fold how the agent got there. */
+export type TurnPartData = { turn: number; entries: Entry[]; streaming: string[]; running: boolean };
+
+/** The transcript as assistant-ui messages: each person's message, then one message of what the agent did:
+ * a part per turn, and the harness's own cards (an issue opened or recovered) as they are. */
 export function toMessages(entries: Entry[], streaming: Record<string, string>, running: boolean): ThreadMessageLike[] {
   const messages: { role: "user" | "assistant"; id: string; createdAt: Date; content: any[] }[] = [];
   let current: (typeof messages)[number] | null = null;
+  let asked: number | null = null;
+  const turnPart = (message: (typeof messages)[number], turn: number) => {
+    let part = message.content.find((item) => item.type === "data-turn" && item.data.turn === turn);
+    if (!part) {
+      part = { type: "data-turn", data: { turn, entries: [], streaming: [], running: false } satisfies TurnPartData };
+      message.content.push(part);
+    }
+    return part.data as TurnPartData;
+  };
   for (const entry of entries) {
     if (entry.kind === "user") {
       messages.push({ role: "user", id: entry.id, createdAt: new Date(entry.at), content: [{ type: "text", text: entry.text }] });
       current = null;
+      asked = entry.turn;
       continue;
     }
     if (!current) {
       current = { role: "assistant", id: entry.id, createdAt: new Date(entry.at), content: [] };
       messages.push(current);
     }
-    if (entry.kind === "steps") current.content.push({ type: "data-steps", data: entry });
-    else if (entry.kind === "assistant") current.content.push({ type: "text", text: entry.text });
+    if (entry.turn != null) turnPart(current, entry.turn).entries.push(entry);
     else if (entry.kind === "card") current.content.push({ type: "data-card", data: entry.card });
+    else if (entry.kind === "assistant") current.content.push({ type: "text", text: entry.text });
   }
   const pending = Object.entries(streaming).filter(([id]) => !entries.some((entry) => entry.id === id));
   if (pending.length) {
@@ -122,7 +136,16 @@ export function toMessages(entries: Entry[], streaming: Record<string, string>, 
       current = { role: "assistant", id: `stream-${pending[0]![0]}`, createdAt: new Date(), content: [] };
       messages.push(current);
     }
-    for (const [, text] of pending) current.content.push({ type: "text", text });
+    const last = current.content.filter((item) => item.type === "data-turn").at(-1)?.data as TurnPartData | undefined;
+    const part = last || (asked !== null ? turnPart(current, asked) : null);
+    for (const [, text] of pending) {
+      if (part) part.streaming.push(text);
+      else current.content.push({ type: "text", text });
+    }
+  }
+  if (running) {
+    const part = messages.at(-1)?.content.filter((item) => item.type === "data-turn").at(-1)?.data as TurnPartData | undefined;
+    if (part) part.running = true;
   }
   return messages.map((message, index) => ({
     ...message,

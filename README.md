@@ -83,10 +83,13 @@ make ui
 ```
 
 You see each command as it runs, every one in its own MXC container. The agent
-writes `output/findings.md` and `output/findings.json`; the side panel shows the
-findings with their proposed fixes and the quotes the harness checked, the
-kubectl reads and log excerpts the worker recorded as evidence, and the turn's
-trace when tracing is on. Later messages continue in the same workspace. When a
+writes `output/findings.md` and `output/findings.json`. When the turn ends, the
+conversation leads with its verdict: whether the harness found every quote in the
+evidence, the agent's answer, and a card per finding with the workload's state now
+and the fix as steps to copy and run. Its steps fold to one line under them. A
+quote opens the kubectl read or log excerpt it came from in the side panel, which
+also shows the turn's trace when tracing is on. Later messages continue in the
+same workspace. When a
 conversation goes idle, the SDK distils what it learned into your memory,
 which your next conversation starts with; the Memory tab beside History
 lists what it remembers, to open or forget. `make loadtest` runs many conversations and users at once;

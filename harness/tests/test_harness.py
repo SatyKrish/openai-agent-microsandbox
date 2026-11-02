@@ -502,7 +502,10 @@ def test_the_harness_api_runs_conversations(worker, tmp_path):
         assert first["entries"][0]["id"] == started.json()["message"]
         assert first["entries"][0]["requested_by"] == "ana@example.com" and first["entries"][0]["turn"] == 1
         assert first["entries"][2]["text"] == "It is 42." and first["title"] == "What is 6 times 7?"
-        assert [item["id"] for item in client.get("/api/conversations", headers=ana).json()["conversations"]] == [thread_id]
+        listed = client.get("/api/conversations", headers=ana).json()["conversations"]
+        assert [item["id"] for item in listed] == [thread_id]
+        # A browser reads a time without a zone as its own local time.
+        assert datetime.fromisoformat(listed[0]["created_at"]).utcoffset() == timedelta(0)
         assert client.get(f"/api/conversations/{thread_id}", headers=bo).status_code == 404
         assert client.post(f"/api/conversations/{thread_id}/messages", json={"text": "Hijack"}, headers=bo).status_code == 404
         refused = client.post(f"/api/conversations/{thread_id}/messages", json={"text": "x"},

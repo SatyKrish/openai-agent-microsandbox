@@ -57,16 +57,22 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
 - **Top bar.** One button says what the agent reads and with which model, and
   turns amber when the worker is unreachable. It opens **How this works**: the
   worker, its containment and egress, and how the agent is contained, said once
-  here rather than on every view. Settings opens it too.
+  here rather than on every view. Settings opens it too. In a conversation,
+  **Evidence** opens the side panel.
 - **Left column.** History and Memory are two tabs beside the conversation. The
   menu button collapses the column to a stack of icons (new investigation, History,
   Memory) that open it where they lead; on a phone it opens over the conversation.
-- **History.** The History tab lists open issues first,
-  then your conversations, then recovered issues; a green dot marks a turn that
-  is running. A link to a conversation (`?c=ID`) opens it; a link to one
-  that was deleted, or that is someone else's, says so. Stop in the composer stops the running turn.
+- **History.** The History tab starts with **Health now**: each namespace's
+  unhealthy workloads, with readiness and what is wrong, read every 10 s and kept
+  while a conversation is open; each opens its issue, or puts a question in the
+  composer when it has none, and healthy ones are a count. Then your
+  conversations, then recovered issues, each with when it started and how many
+  turns it has; a green dot marks a turn that is running. A link to a
+  conversation (`?c=ID`) opens it; a link to one that was deleted, or that is
+  someone else's, says so. Stop in the composer stops the running turn.
 - **Issues.** The health board opens an issue for each unhealthy workload,
-  without a model call, and the conversation list shows it under Open issues.
+  without a model call, and Health now opens it from the workload's row (an open
+  issue whose workload is not listed there shows under Open issues).
   An issue is shared: everyone sees it and can investigate in it, and only an
   admin can delete it. It starts with a card of what the worker read (state,
   reasons, restarts, readiness, the latest warning and when it was read);
@@ -81,33 +87,41 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   **Open issue** opens a workload's issue with the question
   in the composer (**Investigate** starts a conversation when there is none);
   **Investigate all** asks about every unhealthy one. The worker builds this summary
-  with its own identity; it is not sent to the model. The side panel stays
-  closed until a conversation has output.
+  with its own identity; it is not sent to the model.
 - **Memory.** The left column's Memory tab, beside History, shows what the agent
   remembers the way History shows conversations: one entry per earlier
   conversation, grouped by day, while the conversation stays open beside it. Select one to open it, forget one, or forget
   everything. **Correct something** starts a conversation to tell the agent what
   is wrong; it is remembered when that conversation goes idle.
-- **Steps.** While the agent works, its steps show as they run; a finished
-  group folds to one line ("Worked for 8 s", with its step count) that opens again. Each
+- **A turn, verdict first.** While the agent works, its steps show as they run,
+  its narration muted between them; a finished group folds to one line ("Worked
+  for 8 s", with its step count). When the turn ends, the page scrolls to its
+  verdict: a line says whether the host check found every quote in what the worker
+  read (and that the causes are the agent's reasoning), a failed check is red,
+  and a correction after a failed first check is said. The agent's answer
+  follows, then the findings, then **How I got here** with the step count, time
+  and tokens, which opens the steps and narration; beside it, **Evidence** opens
+  the turn's reads in the side panel, with its other outputs and the trace. Each
   step is titled with what ran (`kubectl describe pod …`,
   `pod_logs payments-api -n payments match="timeout"`); its icon says where it
   ran. The title adds only what is unusual: a non-zero exit, or `harness` for a
   harness tool.
-- **Findings.** `output/findings.json` opens as one section per finding, titled
-  by its short problem label: the workload, the cause, the causes ruled out, and
-  the proposed fix as steps (check first, run, verify, undo, and its risk), where
-  Copy takes the commands to run. Each quote shows the read it came from and when,
-  and opens the file at that line. A line above says how many quotes the host
-  check found and that the causes are the agent's reasoning; a finding whose
-  quote was not found is marked Unverified, with that quote in red, and a
-  correction after a failed first check is said.
-- **Evidence.** The side panel names each evidence file by the read that
-  produced it (`kubectl get pods -n payments -o wide`, `pod_logs …`), with the
-  file name on hover; files from earlier turns are muted. A log excerpt says how
-  many lines it shows of how many, with errors and warnings highlighted and
-  masked values and collapsed repeats marked. A `kubectl get` read shows as a
-  table; only failing statuses are coloured.
+- **Findings.** Each finding in `output/findings.json` is a card titled by its
+  short problem label, with the workload and its state now as the worker reads
+  it (the card's edge takes the state's colour), the cause, and the fix: the
+  summary, then steps (check first, run, verify, undo) where each command block
+  has Copy and advice shows as text, and its risk. Evidence and Ruled out open
+  below it. Each quote shows the read it came from and when, and opens that read
+  in the side panel with the quote highlighted. A finding whose quote was not
+  found is marked Unverified, with its evidence open and that quote in red.
+- **Evidence.** The side panel opens only when asked: a quote, Evidence, a file
+  or the trace. It lists the turn's files as rows, the reads first, each named by
+  the command that produced it (`kubectl get pods -n payments -o wide`,
+  `pod_logs …`), with the file name on hover; files from earlier turns are
+  muted. A log excerpt says how many lines it shows of how many, with errors and
+  warnings highlighted and masked values and collapsed repeats marked. A
+  `kubectl get` read shows as a table; only failing statuses are coloured.
+  `findings.json` shows as the agent wrote it.
 - **Trace.** One line of totals (time, model calls, tokens, tool calls,
   failures), then each lane and step on one time axis. Bars take their lane's
   colour; failed commands are red.
@@ -168,10 +182,10 @@ agent/
   lib/findings.py           Host check of findings.json against the evidence
   spec.py                   AgentSpec for the harness
 ui/                         The UI: its page served beside the harness's API, the turn card and the launcher
-  web/                      The page (assistant-ui, React): History and Memory, chat, side panel;
-                            built into static/app and served at /
-  static/                   The views the page imports: sre.js (health board, findings, log excerpts,
-                            kubectl tables), the trace and file views, and the shared styles
+  web/                      The page (assistant-ui, React): health now, History and Memory, turns
+                            with their verdict and findings, side panel; built into static/app and served at /
+  static/                   The views the page imports: sre.js (health board, log excerpts, kubectl
+                            tables), the trace and file views, and the shared styles
 evals/                      Tests against the worker's real gRPC service
 verify.py                   In-cluster boundary probes and a scripted investigation
 loadtest.py                 Many conversations and users at once

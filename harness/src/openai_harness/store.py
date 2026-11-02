@@ -24,7 +24,7 @@ import secrets
 import sqlite3
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 SHARED = "@team"  # the owner of a conversation everyone may see
@@ -55,13 +55,15 @@ class Thread:
 
     @classmethod
     def new(cls, *, title: str | None = None, metadata: dict | None = None) -> "Thread":
-        return cls(id=f"thr_{secrets.token_hex(4)}", created_at=datetime.now(), title=title, metadata=metadata or {})
+        return cls(id=f"thr_{secrets.token_hex(4)}", created_at=datetime.now(timezone.utc), title=title, metadata=metadata or {})
 
     @classmethod
     def from_json(cls, data: str) -> "Thread":
         record = json.loads(data)
-        return cls(id=record["id"], created_at=datetime.fromisoformat(record["created_at"]), title=record.get("title"),
-                   metadata=record.get("metadata") or {})
+        created = datetime.fromisoformat(record["created_at"])
+        # Records written before the time carried its zone were written in the harness's clock, UTC in its image.
+        return cls(id=record["id"], created_at=created if created.tzinfo else created.replace(tzinfo=timezone.utc),
+                   title=record.get("title"), metadata=record.get("metadata") or {})
 
     def to_json(self) -> str:
         return json.dumps({"id": self.id, "created_at": self.created_at.isoformat(), "title": self.title,

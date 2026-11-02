@@ -1,9 +1,10 @@
 // Copyright 2026 openai-agent-mxc contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// The side panel: a turn's files (outputs, the evidence the worker recorded, the workspace's starting
-// files) and its trace. File bodies are drawn by the page's own views (../static: findings, log
-// excerpts, kubectl tables, Markdown and code), which build DOM from text and never parse HTML.
+// The side panel, opened from the conversation: a turn's evidence (each read the worker recorded) and its
+// other files (outputs, the workspace's starting files), and its trace. File bodies are drawn by the
+// page's own views (../static: log excerpts, kubectl tables, Markdown and code), which build DOM from
+// text and never parse HTML. Findings are in the conversation, so findings.json shows as it was written.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -17,17 +18,19 @@ import type { Config } from "./api";
 type File = { path: string; bytes?: number; turn?: number; changed?: boolean; evidence?: boolean; command?: string;
   recorded_at?: string; too_large?: boolean; start?: boolean; status?: { state: string; label: string } };
 type Turn = { number: number; status: string; files: File[]; file_status?: Record<string, { state: string; label: string }>;
-  check?: any; check_first?: any; otel_trace_id?: string };
+  otel_trace_id?: string };
 export type View = { tab: "files" | "trace"; turn?: number; path?: string; highlight?: string | null };
 
-const GROUPS: [string, string][] = [["output/", "Outputs"], ["inputs/", "Inputs"], ["evidence/", "Evidence"], ["work/", "Work"]];
+const GROUPS: [string, string][] = [["evidence/", "Evidence"], ["output/", "Outputs"], ["inputs/", "Inputs"], ["work/", "Work"]];
 const groupOf = (path: string) => GROUPS.findIndex(([prefix]) => path.startsWith(prefix));
 const time = (iso?: string) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "");
+// One empty list, so the start screen (no conversation yet) does not redraw, and refetch, on every render.
+const NO_TURNS: Turn[] = [];
 
 export function Panel({ threadId, thread, config, view, setView, onClose }: {
   threadId: string | null; thread: any; config: Config; view: View; setView: (view: View) => void; onClose: () => void;
 }) {
-  const turns: Turn[] = thread?.turns || [];
+  const turns: Turn[] = thread?.turns || NO_TURNS;
   const turn = turns.find((item) => item.number === view.turn) || turns.at(-1) || null;
   const starting: File[] = useMemo(() => ((config.starting_files as File[]) || []).map((file) => ({ ...file, start: true })), [config]);
   const files = useMemo(() => {
@@ -40,16 +43,9 @@ export function Panel({ threadId, thread, config, view, setView, onClose }: {
     const order = (path: string) => { const group = groupOf(path); return group < 0 ? GROUPS.length : group; };
     return [...latest.values()].sort((a, b) => order(a.path) - order(b.path) || a.path.localeCompare(b.path));
   }, [starting, turns, turn]);
-  const sources = useMemo(() => {
-    const map = new Map<string, { command?: string; recorded_at?: string }>();
-    for (const item of turns) for (const file of item.files || []) if (file.evidence) map.set(file.path, file);
-    return map;
-  }, [turns]);
-  const preferred = () => {
-    const changed = (turn?.files || []).filter((file) => file.changed && file.path.startsWith("output/") && !file.too_large);
-    const checked = changed.find((file) => turn?.file_status?.[file.path]?.state === "checked");
-    return checked?.path || changed[0]?.path || files.find((file) => file.path.startsWith("output/"))?.path || files[0]?.path;
-  };
+  // Opened without a file: the turn's first read, then its outputs.
+  const preferred = () => (turn?.files || []).find((file) => file.evidence)?.path
+    || (turn?.files || []).find((file) => file.changed && file.path.startsWith("output/") && !file.too_large)?.path || files[0]?.path;
   const path = view.path && files.some((file) => file.path === view.path) ? view.path : preferred();
   const file = files.find((item) => item.path === path) || null;
   const body = useRef<HTMLDivElement>(null);
@@ -94,10 +90,8 @@ export function Panel({ threadId, thread, config, view, setView, onClose }: {
     const url = file.start ? `/api/starting-files/${parts}`
       : `/api/threads/${encodeURIComponent(threadId || "")}/turns/${file.turn}/files/${parts}`;
     setDownload(`${url}?download=1`);
-    const open = (where: string, quote: string | null = null) => setView({ tab: "files", turn: turn?.number, path: where, highlight: quote });
     (async () => {
-      if (await renderSreFile({ file, body: target, url, highlight: view.highlight, open, check: turn?.check || null,
-        first: turn?.check_first || null, sources })) return;
+      if (await renderSreFile({ file, body: target, url, highlight: view.highlight })) return;
       target.replaceChildren(el("div", { class: "empty" }, el("p", {}, "Loading…")));
       const response = await fetch(url);
       const text = response.ok ? await response.text() : "";
@@ -116,14 +110,14 @@ export function Panel({ threadId, thread, config, view, setView, onClose }: {
       }
       target.replaceChildren(...nodes);
     })();
-  }, [threadId, turn, view.tab, view.highlight, path, file, config, sources, setView]);
+  }, [threadId, turn, view.tab, view.highlight, path, file, config]);
 
   let group = "";
   return (
-    <section className="side-panel" aria-label="Files and trace">
+    <section className="side-panel" aria-label="Evidence and trace">
       <div className="panel-head">
         <div className="panel-tabs" role="tablist" aria-label="Panel views">
-          <button type="button" role="tab" aria-selected={view.tab === "files"} onClick={() => setView({ ...view, tab: "files" })}>Files</button>
+          <button type="button" role="tab" aria-selected={view.tab === "files"} onClick={() => setView({ ...view, tab: "files" })}>Evidence</button>
           {threadId ? <button type="button" role="tab" aria-selected={view.tab === "trace"} onClick={() => setView({ ...view, tab: "trace" })}>
             Trace{turn?.status === "running" ? <span className="live-dot" /> : null}</button> : null}
         </div>

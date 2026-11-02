@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The conversation, on assistant-ui's primitives: messages, the composer (send, or stop the running
-// turn), and the follow-up questions after a turn. The runtime is an external store over the
-// harness's API: the page holds the transcript, the harness runs the turns.
+// turn), and the follow-up questions after a turn. Each of the agent's turns is one part, drawn by
+// ./Turn. The runtime is an external store over the harness's API: the page holds the transcript,
+// the harness runs the turns.
 
 import {
   AssistantRuntimeProvider, ComposerPrimitive, MessagePrimitive, ThreadPrimitive, useExternalStoreRuntime,
@@ -11,11 +12,12 @@ import {
 } from "@assistant-ui/react";
 import { useEffect, useMemo, type ReactNode } from "react";
 
-import { CardPart, Prose, StepsPart } from "./parts";
+import { CardPart, Prose } from "./parts";
+import { TurnPart } from "./Turn";
 
 const PARTS = {
   Text: ({ text }: { text: string }) => <Prose text={text} />,
-  data: { by_name: { steps: StepsPart as any, card: CardPart as any } },
+  data: { by_name: { turn: TurnPart as any, card: CardPart as any } },
 };
 
 function UserMessage() {

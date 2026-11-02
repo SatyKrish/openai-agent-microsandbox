@@ -1,10 +1,10 @@
 // Copyright 2026 openai-agent-mxc contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// The SRE views of the page: a health board of the workloads the worker can read,
-// findings with copyable fixes and checked quotes, and readable evidence: log
-// excerpts and kubectl tables. Colour marks state and failures only. Everything from
-// the cluster, the sandbox or the model is inserted as text, never as HTML.
+// The SRE views of the page: a health board of the workloads the worker can read, and
+// readable evidence: log excerpts and kubectl tables. Findings are drawn by the page
+// itself (web/src/Turn.tsx). Colour marks state and failures only. Everything from the
+// cluster, the sandbox or the model is inserted as text, never as HTML.
 
 import { el, getJSON, plural } from "./dom.js";
 
@@ -25,23 +25,10 @@ function ago(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
-function copyButton(text, label = "Copy") {
-  const button = el("button", { type: "button", class: "sre-copy" }, label);
-  button.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-      button.textContent = "Copied";
-    } catch {
-      button.textContent = "Select and copy";
-    }
-    setTimeout(() => { button.textContent = label; }, 1500);
-  });
-  return button;
-}
-
 /* ---------- Health board ---------- */
 
-async function loadHealth() {
+// The worker's health summary, read at most every 10 s however many views ask for it.
+export async function loadHealth() {
   if (health.pending) return health.pending;
   if (Date.now() - health.at < HEALTH_EVERY_MS && health.body) return health;
   health.pending = getJSON("/api/health").then(({ status, body }) => {
@@ -54,7 +41,8 @@ async function loadHealth() {
   return health.pending;
 }
 
-function prompt(workload, namespace) {
+// The question to ask about an unhealthy workload.
+export function question(workload, namespace) {
   const reasons = workload.reasons.length ? ` (${workload.reasons.join(", ")})` : "";
   return `Why is ${workload.kind.toLowerCase()} ${workload.name} in ${namespace} ${workload.state}${reasons}? `
     + "Find the cause from the evidence and propose a fix.";
@@ -82,11 +70,11 @@ function changed(workload) {
 
 // An unhealthy workload with an open issue opens that issue, shared by the team; without one, a new conversation.
 function workloadRow(suggest, openIssue, workload, namespace, issue) {
-  const question = prompt(workload, namespace);
+  const asked = question(workload, namespace);
   const action = workload.state === "healthy" ? el("span")
     : issue ? el("button", { type: "button", class: "sre-investigate", title: issue.title,
-      onclick: () => openIssue(issue.thread_id, question) }, "Open issue")
-      : el("button", { type: "button", class: "sre-investigate", onclick: () => suggest(question) }, "Investigate");
+      onclick: () => openIssue(issue.thread_id, asked) }, "Open issue")
+      : el("button", { type: "button", class: "sre-investigate", onclick: () => suggest(asked) }, "Investigate");
   return el("li", { class: `sre-workload ${workload.state}` },
     el("span", { class: "sre-dot", title: STATE_LABEL[workload.state] }),
     el("span", { class: "sre-name", title: workload.kind }, workload.name),
@@ -137,98 +125,6 @@ export async function renderHome({ container, suggest, openIssue, config, thread
   container.hidden = false;
 }
 
-/* ---------- Findings ---------- */
-
-function clock(iso) {
-  const when = iso ? new Date(iso) : null;
-  return when && !Number.isNaN(when.getTime()) ? when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
-}
-
-const FIX_STEPS = [["precheck", "Check first"], ["commands", "Run"], ["verify", "Verify"], ["rollback", "Undo"]];
-
-// A fix is commands for a person to run: what to check first, the change, how to verify it and how to undo it.
-// Copy takes the change's commands only. A fix the agent wrote as prose shows as it was written.
-function renderFix(fix) {
-  if (!fix) return null;
-  if (typeof fix !== "object") {
-    return el("div", { class: "sre-fix" }, el("div", { class: "sre-label" }, "Proposed fix", copyButton(String(fix))),
-      el("pre", {}, String(fix)));
-  }
-  const lines = (key) => (Array.isArray(fix[key]) ? fix[key] : fix[key] ? [fix[key]] : []).map(String);
-  return el("div", { class: "sre-fix" },
-    el("div", { class: "sre-label" }, "Proposed fix"),
-    fix.summary ? el("p", { class: "sre-fix-summary" }, String(fix.summary)) : null,
-    FIX_STEPS.filter(([key]) => lines(key).length).map(([key, label]) => el("div", { class: "sre-fix-step" },
-      el("div", { class: "sre-step-label" }, label, key === "commands" ? copyButton(lines(key).join("\n")) : null),
-      el("pre", {}, lines(key).join("\n")))),
-    !lines("commands").length ? el("p", { class: "note" }, "No command to run: see the summary.") : null,
-    fix.risk ? el("p", { class: "sre-risk" }, `Risk: ${fix.risk}`) : null);
-}
-
-function renderFindings({ body, open, check, first, sources, text }) {
-  let findings;
-  try {
-    findings = JSON.parse(text).findings;
-    if (!Array.isArray(findings)) throw new Error("no findings list");
-  } catch {
-    return false;
-  }
-  // The check's result for each finding and quote: what was found, and what was not.
-  const results = new Map((check?.results || []).map((result) => [result.index, result]));
-  const passed = check?.status === "evidence_passed";
-  const headline = passed ? `${plural(findings.length, "finding")}, ${plural(check.quotes, "quote")} found in the evidence`
-    : plural(findings.length, "finding");
-  const notes = [
-    first ? el("p", { class: "note" }, `First check: ${first.detail || "failed"}. The agent re-read its sources and `
-      + "corrected the findings; this is the second check.") : null,
-    passed ? el("p", { class: "note" }, "The check finds each quote in the read it cites; the causes are the agent's "
-      + "reasoning.") : null,
-    check?.status === "failed" ? el("p", { class: "note err" }, `Evidence check failed: ${check.detail || ""}`)
-      : !check || check.status === "no_findings" ? el("p", { class: "note" }, "Not checked against the evidence.") : null,
-  ];
-  const raw = el("pre", { class: "sre-json", hidden: true }, JSON.stringify(findings, null, 2));
-  const toggle = el("button", { type: "button", class: "sre-link" }, "View JSON");
-  toggle.addEventListener("click", () => {
-    raw.hidden = !raw.hidden;
-    toggle.textContent = raw.hidden ? "View JSON" : "Hide JSON";
-  });
-  const cards = findings.map((finding, index) => {
-    const result = results.get(index);
-    const outcome = (item) => result?.quotes?.find((quote) => quote.file === item.file
-      && String(item.quote || "").startsWith(String(quote.quote || "").replace(/…$/, "")));
-    const ruledOut = Array.isArray(finding.ruled_out) ? finding.ruled_out : [];
-    return el("article", { class: "sre-finding" },
-      // The problem is the finding's title: a short label, as the triage skill asks for.
-      el("h3", {}, String(finding.problem || "Finding"),
-        result && !result.verified ? el("span", { class: "sre-unverified" }, "Unverified") : null),
-      el("p", { class: "sre-resource" }, finding.resource || "resource",
-        finding.namespace ? el("span", { class: "muted" }, ` in ${finding.namespace}`) : null),
-      finding.cause ? el("p", { class: "sre-cause" }, finding.cause) : null,
-      ruledOut.length ? el("div", { class: "sre-ruled" }, el("div", { class: "sre-label" }, "Ruled out"),
-        el("ul", {}, ruledOut.map((item) => el("li", {}, String(item))))) : null,
-      renderFix(finding.fix),
-      Array.isArray(finding.evidence) && finding.evidence.length ? el("div", { class: "sre-evidence" },
-        el("div", { class: "sre-label" }, "Evidence"),
-        el("ul", { class: "sre-quotes" }, finding.evidence.map((item) => {
-          const found = outcome(item);
-          const source = sources?.get(item.file);
-          const read = clock(found?.recorded_at || source?.recorded_at);
-          return el("li", { class: found && !found.found ? "missing" : "" },
-            el("blockquote", {}, item.quote),
-            el("div", { class: "sre-source" },
-              found && !found.found ? el("span", { class: "sre-missing" }, found.reason === "not in the file"
-                ? "Not in this read:" : `Not checked: ${found.reason}.`) : null,
-              item.file ? el("button", { type: "button", class: "sre-link", title: item.file,
-                onclick: () => open(item.file, item.quote) }, source?.command || String(item.file).replace(/^evidence\//, ""))
-                : null,
-              read ? el("span", { class: "muted" }, `read ${read}`) : null));
-        }))) : null);
-  });
-  body.replaceChildren(el("div", { class: "sre-findings" },
-    el("div", { class: "sre-findings-head" }, el("span", {}, headline), toggle), ...notes, raw, cards));
-  return true;
-}
-
 /* ---------- Evidence ---------- */
 
 function renderLogExcerpt({ body, text }) {
@@ -275,18 +171,15 @@ function renderKubectlTable({ body, text }) {
   return true;
 }
 
-// Renders the file types this agent knows; returns false to leave a file to the page's own views.
-export async function renderFile({ file, body, url, highlight, open, check, first, sources }) {
+// Renders the evidence types this agent knows; returns false to leave a file to the page's own views.
+export async function renderFile({ file, body, url, highlight }) {
   const path = file.path || "";
-  const kind = path === "output/findings.json" ? "findings"
-    : /^evidence\/\d+-pod-logs-/.test(path) ? "logs"
-      : /^evidence\/\d+-kubectl-get-/.test(path) ? "table" : null;
+  const kind = /^evidence\/\d+-pod-logs-/.test(path) ? "logs" : /^evidence\/\d+-kubectl-get-/.test(path) ? "table" : null;
   // A quote opened in its source uses the page's own view, which highlights it.
-  if (!kind || (highlight && kind !== "findings")) return false;
+  if (!kind || highlight) return false;
   const response = await fetch(url);
   if (!response.ok) return false;
   const text = await response.text();
-  if (kind === "findings") return renderFindings({ body, open, check, first, sources, text });
   if (kind === "logs") return renderLogExcerpt({ body, text });
   return renderKubectlTable({ body, text });
 }
