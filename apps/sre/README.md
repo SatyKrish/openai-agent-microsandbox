@@ -58,7 +58,10 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   turns amber when the worker is unreachable. It opens **How this works**: the
   worker, its containment and egress, and how the agent is contained, said once
   here rather than on every view. Settings opens it too.
-- **Conversations.** The list beside the conversation has open issues first,
+- **Left column.** History and Memory are two tabs beside the conversation. The
+  menu button collapses the column to a stack of icons (new investigation, History,
+  Memory) that open it where they lead; on a phone it opens over the conversation.
+- **History.** The History tab lists open issues first,
   then your conversations, then recovered issues; a green dot marks a turn that
   is running. A link to a conversation (`?c=ID`) opens it; a link to one
   that was deleted, or that is someone else's, says so. Stop in the composer stops the running turn.
@@ -80,9 +83,9 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   **Investigate all** asks about every unhealthy one. The worker builds this summary
   with its own identity; it is not sent to the model. The side panel stays
   closed until a conversation has output.
-- **Memory.** The book button in the top bar shows what the agent remembers
-  the way the list shows conversations: one entry per earlier
-  conversation, grouped by day. Select one to open it, forget one, or forget
+- **Memory.** The left column's Memory tab, beside History, shows what the agent
+  remembers the way History shows conversations: one entry per earlier
+  conversation, grouped by day, while the conversation stays open beside it. Select one to open it, forget one, or forget
   everything. **Correct something** starts a conversation to tell the agent what
   is wrong; it is remembered when that conversation goes idle.
 - **Steps.** While the agent works, its steps show as they run; a finished
@@ -118,7 +121,8 @@ the evidence confirmed, fixes proposed, and which reads found the cause.
 `gpt-6-luna` extracts each conversation and `gpt-6.1-terra` consolidates; the
 rest are the SDK's defaults. Memory belongs to the user who started the
 conversation: the signed-in user, or the guest, whose memory everyone without
-sign-in shares. The harness keeps each user's memory on its volume
+sign-in shares. In an issue, which the team shares, it belongs to whoever's
+message opened that session. The harness keeps each user's memory on its volume
 (`/data/memory/users/`) and seeds it into that user's new conversations, where
 the agent reads it as a lead and checks it against fresh evidence.
 
@@ -164,7 +168,7 @@ agent/
   lib/findings.py           Host check of findings.json against the evidence
   spec.py                   AgentSpec for the harness
 ui/                         The UI: its page served beside the harness's API, the turn card and the launcher
-  web/                      The page (assistant-ui, React): conversation list, chat, side panel, memory view;
+  web/                      The page (assistant-ui, React): History and Memory, chat, side panel;
                             built into static/app and served at /
   static/                   The views the page imports: sre.js (health board, findings, log excerpts,
                             kubectl tables), the trace and file views, and the shared styles

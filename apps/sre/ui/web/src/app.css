@@ -34,6 +34,31 @@
 .ax-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--faint); }
 .ax-dot.failing { background: var(--err); }
 .ax-running { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--ok); animation: pulse 1.4s ease-in-out infinite; }
+.ax-list-empty.err { color: var(--err); }
+
+/* History and Memory, two tabs over the left column */
+.ax-tabs { display: flex; gap: 2px; margin: 0 0 4px; padding: 2px; border-radius: 8px; background: var(--sunken); }
+.ax-tabs button { flex: 1 1 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 30px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: inherit;
+  font-size: 13px; font-weight: 500; cursor: pointer; }
+.ax-tabs button[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+/* Collapsed, the column is a stack of its icons (wide screens; on a phone it is hidden until opened) */
+.ax-rail { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0 0 12px; }
+.ax-rail .icon-button { color: var(--ink-2); }
+.ax-memory-whose { margin: 8px 8px 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.ax-memory-entry { display: flex; align-items: center; border-radius: 6px; }
+.ax-memory-entry:hover, .ax-memory-entry:focus-within { background: var(--sunken); }
+.ax-memory-entry .ax-conversation { flex: 1 1 auto; min-width: 0; background: none; }
+.ax-memory-entry .ax-conversation:disabled { color: var(--muted); cursor: default; }
+.ax-forget { flex: none; margin-right: 6px; padding: 2px 4px; border: 0; background: none; color: var(--err); font: inherit;
+  font-size: 12px; cursor: pointer; opacity: 0; }
+.ax-memory-entry:hover .ax-forget, .ax-memory-entry:focus-within .ax-forget { opacity: 1; }
+@media (hover: none) { .ax-forget { opacity: 1; } }
+.ax-memory-more { display: grid; justify-items: start; gap: 8px; margin: 14px 8px 0; padding-top: 10px; border-top: 1px solid var(--border-soft);
+  font-size: 12.5px; }
+.ax-memory-more details { justify-self: stretch; }
+.ax-memory-more summary { cursor: pointer; font-weight: 500; }
+.ax-memory-more pre { margin: 6px 0 0; max-height: 240px; overflow: auto; padding: 8px; border-radius: 4px; background: var(--sunken);
+  font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
 .ax-title { margin: 0; padding: 12px 20px 10px; border-bottom: 1px solid var(--border-soft); font-size: 14px; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -117,6 +142,7 @@
 
 @media (max-width: 899px) {
   .ax-main { padding: 6px; }
+  .ax-rail { display: none; }
   .ax-sidebar { position: absolute; inset: 6px auto 6px 6px; z-index: 35; width: min(300px, calc(100% - 12px)); padding: 10px;
     border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 12px 32px rgba(0, 0, 0, .25); }
   .ax-chat-pane, .ax-main[data-panel="open"] .ax-chat-pane { min-width: 0; }

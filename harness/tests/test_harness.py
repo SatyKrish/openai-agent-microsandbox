@@ -21,7 +21,7 @@ from openai_harness import http
 from openai_harness.engine import Harness, preferred_file, running_elsewhere
 from openai_harness.memory import MemoryStore, UserMemory, user_key
 from openai_harness.spec import AgentSpec
-from openai_harness.store import NotFound, SQLiteStore
+from openai_harness.store import SHARED, NotFound, SQLiteStore, Thread
 from openai_harness.testing import Calls, ask, entries, shell, titles
 
 SPEC = AgentSpec(
@@ -341,6 +341,30 @@ async def test_each_signed_in_user_has_their_own_memory_and_guests_share_one(wor
         harness.model = Calls([shell("cat memories/MEMORY.md")], answer="I remember.")
         await new_thread(harness, "Anything known?", user="ana@example.com")
         assert "Ana prefers kubectl tables" in harness.model.outputs[0]
+    finally:
+        await harness.close_all()
+        harness.store.close()
+
+
+async def test_a_shared_conversation_is_remembered_by_whoever_opened_its_session(worker, tmp_path):
+    """An issue belongs to the team; what it teaches goes to the person whose message opened the session."""
+    memory = UserMemory(tmp_path / "memory")
+    harness = make_harness(worker, tmp_path, Calls([shell("echo looking")], answer="Found it."), memory=memory,
+                           idle_close_s=3600)
+    try:
+        issue = Thread.new(title="payments-ledger: ImagePullBackOff", metadata={"owner": SHARED, "issue": {"state": "open"}})
+        await harness.store.save_thread(issue, {})
+        await ask(harness, "Why is it failing?", conversation=issue.id, user="bo@example.com")
+        generates_memory(harness, issue.id, "ledger tags come from CI")
+        # Ana continues in Bo's open session: it is still Bo's memory that the session adds to.
+        await ask(harness, "And the fix?", conversation=issue.id, user="ana@example.com")
+        await harness.close_all()
+        assert b"ledger tags come from CI" in memory.for_user("bo@example.com").files()["MEMORY.md"]
+        assert memory.for_user("ana@example.com").files() == {} and memory.for_user(SHARED).files() == {}
+        # Deleting the issue forgets it from the memory of everyone who asked in it.
+        remember(memory.for_user("bo@example.com").root, issue.id, "lesson from the issue")
+        await harness.store.delete_thread(issue.id, {})
+        assert f"raw_memories/{issue.id}.md" not in memory.for_user("bo@example.com").files()
     finally:
         await harness.close_all()
         harness.store.close()

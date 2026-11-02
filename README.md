@@ -88,7 +88,7 @@ findings with their proposed fixes and the quotes the harness checked, the
 kubectl reads and log excerpts the worker recorded as evidence, and the turn's
 trace when tracing is on. Later messages continue in the same workspace. When a
 conversation goes idle, the SDK distils what it learned into your memory,
-which your next conversation starts with; the book button in the top bar
+which your next conversation starts with; the Memory tab beside History
 lists what it remembers, to open or forget. `make loadtest` runs many conversations and users at once;
 `make journal` prints the worker's audit journal; `make teardown` deletes the
 cluster and stops the VM.

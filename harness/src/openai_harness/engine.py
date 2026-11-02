@@ -21,7 +21,8 @@ What a turn shows is kept as the conversation's transcript, a list of entries a 
 The session stays open between turns, as the SDK expects for a multi-turn conversation, and
 closes after ``idle_close_s`` without a message. Closing is when the SDK's Memory capability
 distils the conversation into memory; with a ``UserMemory`` the harness seeds that memory from,
-and publishes it back to, the memory of the conversation's owner. Deleting a conversation deletes
+and publishes it back to, the memory of the conversation's owner, or in a shared conversation (an
+issue), of whoever's message opened the session. Deleting a conversation deletes
 its workspace, history and host copies, and it is not remembered; the worker keeps its journal.
 """
 
@@ -56,7 +57,7 @@ from agent_mxc.tracing import otel_trace_id, tracing_enabled
 from .memory import UserMemory, user_key
 from .spec import AgentSpec, Conversation, TurnContext
 from .steps import ICONS, clipped, describe_call, describe_output, fenced, headline, step_title
-from .store import SQLiteStore
+from .store import SHARED, SQLiteStore
 
 logger = logging.getLogger(__name__)
 _MAX_FILES = 40
@@ -115,6 +116,12 @@ def _added(earlier: dict | None, usage: dict) -> dict:
         return usage
     return {key: max(earlier[key], usage[key]) if key == "max_input_tokens" else earlier[key] + usage[key]
             for key in usage}
+
+
+def _memory_owner(meta: dict, turn: dict) -> str | None:
+    """Whose memory a session draws on and adds to: the conversation's owner, or in a shared conversation, whoever's
+    message opened the session. Later turns in the session add to the same memory, so no one's leaks into another's."""
+    return turn["requested_by"] if meta.get("owner") == SHARED else meta.get("owner")
 
 
 def _requested_by(session, who: str) -> None:
@@ -403,7 +410,7 @@ class Harness:
         requester = turn["requested_by"] or "guest"
         opened = self._open.pop(thread.id, None)
         if opened is not None:
-            session, closer, _ = opened
+            session, closer, owner = opened
             if closer is not None:
                 closer.cancel()
             _requested_by(session, requester)
@@ -414,8 +421,9 @@ class Harness:
             try:
                 await self._continue_turn(conversation, turn, text, session, steps)
             finally:
-                self._park(thread.id, session, meta.get("owner"))
+                self._park(thread.id, session, owner)
             return
+        owner = _memory_owner(meta, turn)
         created = meta.get("sandbox") is None
         entry, index = await steps.add("Creating the workspace" if created else "Reopening the workspace")
         began = time.monotonic()
@@ -441,7 +449,7 @@ class Harness:
                 boundary = await session.exec('test -z "${OPENAI_API_KEY:-}"')
                 if not boundary.ok():
                     raise RuntimeError("The sandbox must not contain the harness API key")
-            remembered = await self.memory.for_user(meta.get("owner")).seed(session) if self.memory is not None else 0
+            remembered = await self.memory.for_user(owner).seed(session) if self.memory is not None else 0
             seconds = time.monotonic() - began
             turn["start_s"] = round(seconds, 1)
             verb = "Created" if created else "Reopened"
@@ -453,7 +461,7 @@ class Harness:
                                status="done")
             await self._continue_turn(conversation, turn, text, session, steps)
         finally:
-            self._park(thread.id, session, meta.get("owner"))
+            self._park(thread.id, session, owner)
 
     async def _continue_turn(self, conversation: Conversation, turn: dict, text: str, session, steps: _Steps):
         """The turn itself, in an open session: the agent loop, evidence, outputs and the check."""
@@ -731,7 +739,9 @@ class Harness:
                 await worker
         thread = await self.store.load_thread(thread_id, _INTERNAL)
         state = thread.metadata.get("sandbox")
-        owner = thread.metadata.get("owner")
+        # Whose memory may hold it: the owner's, or in a shared conversation, any of the people who asked in it.
+        owners = ({turn.get("requested_by") for turn in thread.metadata.get("turns") or []}
+                  if thread.metadata.get("owner") == SHARED else {thread.metadata.get("owner")})
         async with self._locks[thread_id]:
             opened = self._open.pop(thread_id, None)
             if opened is not None and opened.closer is not None:
@@ -748,7 +758,8 @@ class Harness:
             finally:
                 history.close()
             shutil.rmtree(self.output_dir / thread_id, ignore_errors=True)
-            self.forget_memory(owner, thread_id)
+            for owner in owners:
+                self.forget_memory(owner, thread_id)
 
     def forget_memory(self, user: str | None, conversation: str | None = None) -> bool:
         """Forget one conversation from a user's memory, or with none named, everything they remember;

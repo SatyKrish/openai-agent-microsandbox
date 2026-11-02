@@ -215,9 +215,10 @@ or resuming the same workspace. Here each conversation has its own workspace,
 so evidence and logs stay apart, and the harness carries the directory between
 them instead ([`memory.py`](../harness/src/openai_harness/memory.py)):
 
-1. **Memory is per user.** A conversation belongs to the user who started it;
-   an issue the health board opened belongs to the team, whose memory is its own.
-   An authenticating proxy in front of the UI names the signed-in user in a
+1. **Memory is per user.** A conversation's memory is the user's who started
+   it. An issue the health board opened belongs to the team, so its memory is
+   the user's whose message opened the session; later messages in that session
+   add to the same memory, so no one's leaks into another's. An authenticating proxy in front of the UI names the signed-in user in a
    header (`SRE_USER_HEADER`). Without it, every user is the guest and shares
    the guest's memory. Each user's memory is a directory under
    `/data/memory/users/` on the harness's volume.
@@ -275,10 +276,9 @@ SDK's generation at close may do, and anything forgotten while the conversation
 was open, which its stale copy would otherwise publish back.
 
 **People see and manage their memory** the way they see their conversations.
-The book button in the top bar opens a Memory view in place of the
-conversation, laid out like the conversation list: one entry per remembered
-conversation, with the SDK's one-line
-description, grouped by day. Selecting an entry opens that conversation;
+The left column has two tabs, History and Memory, beside the open
+conversation. Memory is laid out like History: one entry per remembered
+conversation, with the SDK's one-line description, grouped by day. Selecting an entry opens that conversation;
 Forget appears on hover, and Forget everything below the list. It also shows the
 summary the agent starts with and `MEMORY.md` in full. A correction is made in
 a conversation ("Correct something" starts one), so it passes through the same

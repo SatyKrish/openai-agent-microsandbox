@@ -1,23 +1,24 @@
 // Copyright 2026 openai-agent-mxc contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// The SRE agent's page: the conversation list (issues the health board opened, shared by the team,
-// and your own conversations), the conversation in the middle, and a side panel of the turn's files
-// and trace. The start screen is the health board. How the agent is contained is said once, in the
-// How this works dialog. Everything comes from the harness's API.
+// The SRE agent's page: on the left, History (issues the health board opened, shared by the team, and
+// your own conversations) and Memory (what the agent remembers from them); the conversation in the
+// middle; and a side panel of the turn's files and trace. The start screen is the health board. How the
+// agent is contained is said once, in the How this works dialog. Everything comes from the harness's API.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { renderHome } from "../../static/sre.js";
 
 import { api, type Config, type Conversation } from "./api";
 import { Chat } from "./Chat";
 import { toMessages, useConversation } from "./conversation";
-import { MemoryView } from "./Memory";
+import { MemoryList } from "./Memory";
 import { Panel, type View } from "./Panel";
 import { CardActionsContext } from "./parts";
 
 type Theme = "system" | "light" | "dark";
+type Tab = "history" | "memory";
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const media = window.matchMedia("(prefers-color-scheme: dark)");
 const wide = window.matchMedia("(min-width: 900px)");
@@ -34,6 +35,14 @@ function initialConversation(): string | null {
   const id = linked || stored("conversation");
   return id && ID.test(id) ? id : null;
 }
+
+// The left column's icons: the same in its tabs and in the stack it collapses to.
+const ICONS = {
+  new: "M12 5v14M5 12h14",
+  history: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M12 7v5l4 2",
+  memory: "M2 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H2zM22 4h-7a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h8z",
+};
+const TABS: { name: Tab; label: string }[] = [{ name: "history", label: "History" }, { name: "memory", label: "Memory" }];
 
 function Icon({ path, size = 18 }: { path: string; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
@@ -55,8 +64,9 @@ function Board({ config, onSuggest, onOpenIssue }: {
   return <section className="agent-home ax-board" ref={ref} aria-live="polite" />;
 }
 
-function Sidebar({ conversations, current, onSelect, onNew }: {
+function Sidebar({ conversations, current, onSelect, onNew, tab, onTab, memory }: {
   conversations: Conversation[]; current: string | null; onSelect: (id: string) => void; onNew: () => void;
+  tab: Tab; onTab: (tab: Tab) => void; memory: ReactNode;
 }) {
   const open = conversations.filter((item) => item.issue?.state === "open");
   const mine = conversations.filter((item) => !item.issue);
@@ -72,12 +82,38 @@ function Sidebar({ conversations, current, onSelect, onNew }: {
     </li>
   );
   return (
-    <nav className="ax-sidebar" aria-label="Conversations">
-      <button type="button" className="ax-new" onClick={onNew}><Icon path="M12 5v14M5 12h14" size={16} />New investigation</button>
-      {open.length ? <><h2 className="ax-list-head">Open issues</h2><ul className="ax-list">{open.map(row)}</ul></> : null}
-      <h2 className="ax-list-head">Conversations</h2>
-      {mine.length ? <ul className="ax-list">{mine.map(row)}</ul> : <p className="ax-list-empty">None yet.</p>}
-      {recovered.length ? <><h2 className="ax-list-head">Recovered</h2><ul className="ax-list">{recovered.map(row)}</ul></> : null}
+    <nav className="ax-sidebar" aria-label="History and memory">
+      <button type="button" className="ax-new" onClick={onNew}><Icon path={ICONS.new} size={16} />New investigation</button>
+      {memory ? (
+        <div className="ax-tabs" role="tablist">
+          {TABS.map(({ name, label }) => (
+            <button key={name} type="button" role="tab" aria-selected={tab === name} onClick={() => onTab(name)}>
+              <Icon path={ICONS[name]} size={15} />{label}</button>
+          ))}
+        </div>
+      ) : null}
+      {memory && tab === "memory" ? memory : (
+        <div role={memory ? "tabpanel" : undefined} aria-label="History">
+          {open.length ? <><h2 className="ax-list-head">Open issues</h2><ul className="ax-list">{open.map(row)}</ul></> : null}
+          <h2 className="ax-list-head">Conversations</h2>
+          {mine.length ? <ul className="ax-list">{mine.map(row)}</ul> : <p className="ax-list-empty">None yet.</p>}
+          {recovered.length ? <><h2 className="ax-list-head">Recovered</h2><ul className="ax-list">{recovered.map(row)}</ul></> : null}
+        </div>
+      )}
+    </nav>
+  );
+}
+
+/** The left column collapsed: its actions as a stack of icons, each opening the column where it leads. */
+function Rail({ memory, onNew, onOpen }: { memory: boolean; onNew: () => void; onOpen: (tab: Tab) => void }) {
+  return (
+    <nav className="ax-rail" aria-label="History and memory">
+      <button type="button" className="icon-button" aria-label="New investigation" title="New investigation" onClick={onNew}>
+        <Icon path={ICONS.new} /></button>
+      {TABS.filter(({ name }) => memory || name === "history").map(({ name, label }) => (
+        <button key={name} type="button" className="icon-button" aria-label={label} title={label} onClick={() => onOpen(name)}>
+          <Icon path={ICONS[name]} /></button>
+      ))}
     </nav>
   );
 }
@@ -90,7 +126,7 @@ export function App() {
   const [panelOpen, setPanelOpen] = useState(false);
   const [view, setView] = useState<View>({ tab: "files" });
   const [prefill, setPrefill] = useState<{ text: string; nonce: number } | null>(null);
-  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [tab, setTab] = useState<Tab>(() => (stored("tab") === "memory" ? "memory" : "history"));
   const [sidebarOpen, setSidebarOpen] = useState(wide.matches);
   const [theme, setTheme] = useState<Theme>(() => (stored("theme") as Theme) || "system");
   const [worker, setWorker] = useState<any>(null);
@@ -159,11 +195,11 @@ export function App() {
   const suggest = useCallback((text: string) => setPrefill({ text, nonce: Date.now() }), []);
   const clearPrefill = useCallback(() => setPrefill(null), []);
   const select = useCallback((id: string | null) => {
-    setMemoryOpen(false);
     setNotice(null);
     setCurrent(id);
     if (!wide.matches) setSidebarOpen(false);
   }, []);
+  const chooseTab = useCallback((name: Tab) => { setTab(name); store("tab", name === "memory" ? name : null); }, []);
   const openIssue = useCallback((id: string, question: string) => { select(id); suggest(question); }, [select, suggest]);
   const send = useCallback(async (text: string) => {
     setNotice(null);
@@ -211,7 +247,7 @@ export function App() {
     <CardActionsContext.Provider value={cardActions}>
       <div className="ax-app">
         <header className="topbar">
-          <button type="button" className="icon-button ax-menu" aria-label={sidebarOpen ? "Hide conversations" : "Show conversations"}
+          <button type="button" className="icon-button ax-menu" aria-label={sidebarOpen ? "Collapse history and memory" : "Expand history and memory"}
             aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(!sidebarOpen)}>
             <Icon path="M4 6h16M4 12h16M4 18h16" />
           </button>
@@ -225,10 +261,6 @@ export function App() {
               <span className={`dot${workerDown ? "" : " ok"}`} />{scope}
               <span className="muted">{workerDown ? "worker unreachable" : config.model}</span>
             </button>
-            {config.memory ? <button type="button" className="icon-button" aria-label="Memory" aria-pressed={memoryOpen}
-              onClick={() => setMemoryOpen(!memoryOpen)}>
-              <Icon path="M2 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H2zM22 4h-7a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h8z" />
-            </button> : null}
             {current ? <details className="popover-host ax-menu-host">
               <summary className="icon-button" aria-label="Conversation actions">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" /></svg>
@@ -267,17 +299,16 @@ export function App() {
         </header>
 
         <main className="ax-main" data-panel={panelOpen ? "open" : "closed"} data-sidebar={sidebarOpen ? "open" : "closed"}>
-          {sidebarOpen ? <Sidebar conversations={conversations} current={current} onSelect={select} onNew={() => select(null)} /> : null}
+          {sidebarOpen ? <Sidebar conversations={conversations} current={current} onSelect={select} onNew={() => select(null)}
+            tab={tab} onTab={chooseTab}
+            memory={config.memory ? <MemoryList idleMinutes={Math.round(((config.idle_close_s as number) || 300) / 60)}
+              current={current} onOpen={(id) => select(id)}
+              onCorrect={() => { select(null); suggest("Something you remember is wrong: "); }} /> : null} />
+            : <Rail memory={Boolean(config.memory)} onNew={() => select(null)} onOpen={(name) => { chooseTab(name); setSidebarOpen(true); }} />}
           <section className="chat-pane ax-chat-pane" aria-label="Conversation">
-            {memoryOpen ? (
-              <MemoryView idleMinutes={Math.round(((config.idle_close_s as number) || 300) / 60)}
-                onOpen={(id) => select(id)} onClose={() => setMemoryOpen(false)}
-                onCorrect={() => { select(null); suggest("Something you remember is wrong: "); }} />
-            ) : (
-              <ChatColumn key={current || "new"} config={config} current={current} summary={summary} messages={messages}
-                conversation={conversation} prefill={prefill} send={send} stop={stop} suggest={suggest} openIssue={openIssue}
-                followUps={followUps} notice={notice} onPrefilled={clearPrefill} />
-            )}
+            <ChatColumn key={current || "new"} config={config} current={current} summary={summary} messages={messages}
+              conversation={conversation} prefill={prefill} send={send} stop={stop} suggest={suggest} openIssue={openIssue}
+              followUps={followUps} notice={notice} onPrefilled={clearPrefill} />
           </section>
           {panelOpen ? <Panel threadId={current} thread={thread} config={config} view={view} setView={setView}
             onClose={() => setPanelOpen(false)} /> : null}

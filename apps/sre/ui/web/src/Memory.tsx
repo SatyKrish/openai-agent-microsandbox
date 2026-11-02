@@ -1,10 +1,10 @@
 // Copyright 2026 openai-agent-mxc contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// What the agent remembers across this user's conversations, laid out like the conversation list:
-// one entry per remembered conversation, grouped by day. Open it, forget it, or forget everything.
+// What the agent remembers across this user's conversations, in the left column beside History and laid
+// out like it: one entry per remembered conversation, grouped by day. Open it, forget it, or forget everything.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type Remembered = { id: string; description?: string; updated_at: string; open: boolean };
 type Memory = { user: string; shared: boolean; remembered: Remembered[]; text?: string; index?: string };
@@ -19,14 +19,19 @@ function dayGroup(when: Date): string {
   return when.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
-export function MemoryView({ idleMinutes, onOpen, onCorrect, onClose }: {
-  idleMinutes: number; onOpen: (id: string) => void; onCorrect: () => void; onClose: () => void;
+export function MemoryList({ idleMinutes, current, onOpen, onCorrect }: {
+  idleMinutes: number; current: string | null; onOpen: (id: string) => void; onCorrect: () => void;
 }) {
   const [memory, setMemory] = useState<Memory | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const load = () => fetch("/api/memory?detail=1").then((response) => (response.ok ? response.json() : Promise.reject()))
-    .then(setMemory, () => setError("Memory is unavailable right now."));
-  useEffect(() => { load(); }, []);
+  const load = useCallback(() => fetch("/api/memory?detail=1").then((response) => (response.ok ? response.json() : Promise.reject()))
+    .then((body) => { setMemory(body); setError(null); }, () => setError("Memory is unavailable right now.")), []);
+  // A conversation is remembered once its session closes, so the list catches up while it is shown.
+  useEffect(() => {
+    load();
+    const timer = setInterval(() => { if (!document.hidden) load(); }, 30_000);
+    return () => clearInterval(timer);
+  }, [load]);
 
   const forget = async (item: Remembered | null) => {
     const what = item ? `"${item.description || item.id}" is removed from memory now; what the summary drew from it goes the `
@@ -45,49 +50,39 @@ export function MemoryView({ idleMinutes, onOpen, onCorrect, onClose }: {
     groups.set(group, [...(groups.get(group) || []), item]);
   }
   return (
-    <section className="memory-view" aria-labelledby="memory-title">
-      <header className="memory-view-head">
-        <button type="button" className="icon-button" aria-label="Back to the conversation" onClick={onClose}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
-        </button>
-        <h2 id="memory-title">Memory</h2>
-        <span className="memory-whose" title={memory?.shared ? "Everyone who isn't signed in shares this memory." : ""}>
-          {memory ? (memory.shared ? "Guest" : memory.user) : ""}</span>
-      </header>
-      <div className="memory-body">
-        {error ? <p className="memory-error">{error}</p> : null}
-        {memory && !memory.remembered.length ? (
-          <p className="memory-empty">Nothing remembered yet. A conversation is remembered once it has been idle for {idleMinutes} minute{idleMinutes === 1 ? "" : "s"}.</p>
-        ) : null}
-        {[...groups].map(([group, items]) => (
-          <div key={group}>
-            <div className="memory-group">{group}</div>
-            <ul className="memory-list">
-              {items.map((item) => (
-                <li key={item.id} className="memory-entry">
-                  <button type="button" className="memory-open" disabled={!item.open} onClick={() => onOpen(item.id)}
-                    title={`${item.description || item.id}\n${new Date(item.updated_at).toLocaleString()}${item.open ? "" : "\nThis conversation is no longer here."}`}>
-                    {item.description || item.id}
-                  </button>
-                  <button type="button" className="link-button danger memory-forget" aria-label="Forget this conversation"
-                    onClick={() => forget(item)}>Forget</button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-        {memory && memory.remembered.length ? (
-          <div className="memory-more">
-            {memory.text ? <details className="memory-section"><summary>Summary the agent starts with</summary><pre>{memory.text}</pre></details> : null}
-            {memory.index ? <details className="memory-section"><summary>Everything it remembers (MEMORY.md)</summary><pre>{memory.index}</pre></details> : null}
-            <div className="memory-actions">
-              <button type="button" className="link-button" onClick={onCorrect}
-                title="Tell the agent in a new conversation; it is remembered when that conversation goes idle.">Correct something</button>
-              <button type="button" className="link-button danger" onClick={() => forget(null)}>Forget everything…</button>
-            </div>
-          </div>
-        ) : null}
-      </div>
-    </section>
+    <div className="ax-memory" role="tabpanel" aria-label="Memory">
+      {memory ? <p className="ax-memory-whose">{memory.shared ? "Guest: shared by everyone who isn't signed in" : memory.user}</p> : null}
+      {error ? <p className="ax-list-empty err" role="alert">{error}</p> : null}
+      {memory && !memory.remembered.length ? (
+        <p className="ax-list-empty">Nothing remembered yet. A conversation is remembered once it has been idle for {idleMinutes} minute{idleMinutes === 1 ? "" : "s"}.</p>
+      ) : null}
+      {[...groups].map(([group, items]) => (
+        <div key={group}>
+          <h2 className="ax-list-head">{group}</h2>
+          <ul className="ax-list">
+            {items.map((item) => (
+              <li key={item.id} className="ax-memory-entry">
+                <button type="button" className="ax-conversation" disabled={!item.open} onClick={() => onOpen(item.id)}
+                  aria-current={item.id === current ? "page" : undefined}
+                  title={`${item.description || item.id}\n${new Date(item.updated_at).toLocaleString()}${item.open ? "" : "\nThis conversation is no longer here."}`}>
+                  <span className="ax-conversation-title">{item.description || item.id}</span>
+                </button>
+                <button type="button" className="ax-forget" aria-label={`Forget ${item.description || item.id}`}
+                  onClick={() => forget(item)}>Forget</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+      {memory && memory.remembered.length ? (
+        <div className="ax-memory-more">
+          {memory.text ? <details><summary>Summary the agent starts with</summary><pre>{memory.text}</pre></details> : null}
+          {memory.index ? <details><summary>Everything it remembers (MEMORY.md)</summary><pre>{memory.index}</pre></details> : null}
+          <button type="button" className="link-button" onClick={onCorrect}
+            title="Tell the agent in a new conversation; it is remembered when that conversation goes idle.">Correct something</button>
+          <button type="button" className="link-button danger" onClick={() => forget(null)}>Forget everything…</button>
+        </div>
+      ) : null}
+    </div>
   );
 }
