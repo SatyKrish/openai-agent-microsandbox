@@ -12,6 +12,9 @@ context carries its user under ``"user"``; such a request sees and changes that 
 and the shared ones, and deletes only its own, or any as one of ``admins``. The harness's own calls
 pass a context without ``"user"`` and see everything. Someone else's conversation reads as not found,
 so its existence is not revealed.
+
+A signed-in name is trimmed and lowercased (``user_name``), as memory keys users, so its case never
+makes two users; a name starting with ``@`` is refused, since ``SHARED`` is one.
 """
 
 from __future__ import annotations
@@ -25,6 +28,16 @@ from datetime import datetime
 from pathlib import Path
 
 SHARED = "@team"  # the owner of a conversation everyone may see
+
+
+def user_name(signed_in: str | None) -> str | None:
+    """The harness's name for a signed-in user: trimmed and lowercased; ``None`` (the guest) when empty.
+    A name starting with ``@`` raises ValueError: whoever signed in as ``SHARED`` would start conversations
+    everyone sees."""
+    name = (signed_in or "").strip()[:256].lower()
+    if name.startswith("@"):
+        raise ValueError("User names starting with @ are reserved.")
+    return name or None
 
 
 class NotFound(LookupError):
@@ -62,7 +75,7 @@ class SQLiteStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.on_delete_thread = on_delete_thread
-        self.admins = frozenset(admins)
+        self.admins = frozenset(name for name in map(user_name, admins) if name)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.executescript("""

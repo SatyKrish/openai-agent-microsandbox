@@ -90,7 +90,10 @@ example `X-Forwarded-Email`. The harness trusts that header, so the proxy must
 be the only way users reach the UI, and must set the header on every request,
 replacing any the browser sent. `kubectl port-forward` to the harness pod
 bypasses the proxy, so anyone allowed to use it can claim any user; keep that
-permission to operators.
+permission to operators. The harness trims and lowercases the name, so
+`Ana@Example.com` and `ana@example.com` are one user, with one set of
+conversations and one memory. A name starting with `@` is refused with 403:
+`@team` owns the shared conversations.
 
 With sign-in, each user sees and may delete only their own conversations;
 another user's reads as not found. Issues the health board opens are shared:

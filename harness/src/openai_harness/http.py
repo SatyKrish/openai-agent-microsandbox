@@ -29,13 +29,17 @@ from starlette.routing import Route
 
 from . import traces
 from .engine import Harness, running_elsewhere
-from .store import SHARED, NotFound, Thread
+from .store import SHARED, NotFound, Thread, user_name
 
 logger = logging.getLogger(__name__)
 _THREAD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _MAX_TEXT = 20_000
 _PING_S = 15
 FILE_HEADERS = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox", "Cache-Control": "no-store"}
+
+
+class RefusedUser(Exception):
+    """A signed-in name the harness does not accept; the request is answered with 403."""
 
 
 def api_routes(harness: Harness, *, config: dict, port: int, jaeger_url: str | None,
@@ -50,7 +54,8 @@ def api_routes(harness: Harness, *, config: dict, port: int, jaeger_url: str | N
     ``user_header`` names the header in which an authenticating proxy in front of the harness passes the
     signed-in user; it decides whose conversations a request sees and may delete (the store's admins see
     all), whose memory a conversation uses, and which memory ``/api/memory`` shows and forgets. Without it,
-    every user is the guest."""
+    every user is the guest. The name is trimmed and lowercased, so its case never makes two users, and a
+    name starting with ``@`` is refused with 403 (``store.user_name``)."""
     origins = {f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
     config = {"name": harness.spec.name, **config,
               "starting_files": [{"path": path, "bytes": len(data)} for path, data in (starting_files or {}).items()],
@@ -59,7 +64,10 @@ def api_routes(harness: Harness, *, config: dict, port: int, jaeger_url: str | N
               "preferred_output": harness.preferred_output}
 
     def user(request: Request) -> str | None:
-        return (request.headers.get(user_header, "").strip()[:256] or None) if user_header else None
+        try:
+            return user_name(request.headers.get(user_header)) if user_header else None
+        except ValueError as error:
+            raise RefusedUser(str(error)) from None
 
     def same_origin(request: Request) -> bool:
         origin = request.headers.get("origin")
@@ -284,9 +292,12 @@ def api_routes(harness: Harness, *, config: dict, port: int, jaeger_url: str | N
                 yield ": following\n\n"
                 while not stopping.is_set():
                     waits = [asyncio.ensure_future(events.get()), asyncio.ensure_future(stopping.wait())]
-                    done, pending = await asyncio.wait(waits, timeout=_PING_S, return_when=asyncio.FIRST_COMPLETED)
-                    for wait in pending:
-                        wait.cancel()
+                    try:
+                        done, _ = await asyncio.wait(waits, timeout=_PING_S, return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        # Also when the browser goes away mid-wait, so neither is left pending; a done one stays done.
+                        for wait in waits:
+                            wait.cancel()
                     if waits[0] in done:
                         yield f"data: {json.dumps(waits[0].result())}\n\n"
                     elif not done:
@@ -335,7 +346,10 @@ def application(routes: list, *, on_startup: Callable[[], Awaitable[None]] | Non
         if on_shutdown is not None:
             await on_shutdown()
 
-    app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
+    async def refused(request: Request, error: RefusedUser):
+        return JSONResponse({"error": str(error)}, status_code=403)
+
+    app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan, exception_handlers={RefusedUser: refused})
     app.state.stopping = asyncio.Event()
     return app
 

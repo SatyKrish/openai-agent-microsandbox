@@ -21,7 +21,7 @@ from openai_harness import http
 from openai_harness.engine import Harness, preferred_file, running_elsewhere
 from openai_harness.memory import MemoryStore, UserMemory, user_key
 from openai_harness.spec import AgentSpec
-from openai_harness.store import SHARED, NotFound, SQLiteStore, Thread
+from openai_harness.store import SHARED, NotFound, SQLiteStore, Thread, user_name
 from openai_harness.testing import Calls, ask, entries, shell, titles
 
 SPEC = AgentSpec(
@@ -573,6 +573,66 @@ def test_the_signed_in_user_comes_only_from_the_configured_header(worker, tmp_pa
     harness.store.close()
 
 
+def test_a_signed_in_name_is_one_user_whatever_its_case(worker, tmp_path):
+    """Conversations and memory key a user alike, so a name's case never reaches another user's memory."""
+    memory = UserMemory(tmp_path / "memory")
+    remember(memory.for_user("ana@example.com").root, "thr-ana", "Ana's lesson")
+    store = SQLiteStore(tmp_path / "threads.sqlite3", admins={" Lead@Example.COM "})
+    harness = Harness(SPEC, store, worker.client(), model=Calls([], answer="Hi."), output_dir=tmp_path / "threads",
+                      memory=memory)
+    ana = Thread.new(title="Ana's", metadata={"owner": "ana@example.com"})
+    asyncio.run(store.save_thread(ana, {}))
+    api = http.application(http.api_routes(harness, config={}, port=8009, jaeger_url=None, user_header="X-Forwarded-Email"))
+
+    def signed_in(name):
+        return {"X-Forwarded-Email": name}
+
+    with TestClient(api, base_url="http://localhost:8009") as client:
+        for name in ("ana@example.com", "ANA@EXAMPLE.COM", " Ana@Example.com "):
+            listed = client.get("/api/conversations", headers=signed_in(name)).json()["conversations"]
+            seen = client.get("/api/memory", headers=signed_in(name)).json()
+            assert [item["id"] for item in listed] == [ana.id] and (seen["user"], seen["conversations"]) == ("ana@example.com", 1)
+        assert client.get(f"/api/conversations/{ana.id}", headers=signed_in("bo@example.com")).status_code == 404
+        assert store.admins == {"lead@example.com"}
+        assert client.get(f"/api/conversations/{ana.id}", headers=signed_in("LEAD@example.com")).status_code == 200
+
+        # SHARED owns the conversations everyone sees, so no one signs in as it or any other @ name.
+        for method, path in (("POST", "/api/conversations"), ("GET", "/api/conversations"), ("GET", "/api/memory"),
+                             ("DELETE", "/api/memory"), ("GET", f"/api/conversations/{ana.id}/events")):
+            refused = client.request(method, path, headers=signed_in(SHARED.upper()),
+                                     json={"text": "For everyone"} if method == "POST" else None)
+            assert refused.status_code == 403 and "reserved" in refused.json()["error"]
+    assert [thread.id for thread in asyncio.run(store.load_threads({}))] == [ana.id]
+    assert memory.for_user("ana@example.com").files()
+    store.close()
+
+
+async def test_a_follower_that_goes_away_leaves_nothing_waiting(worker, tmp_path):
+    """A page closed while its event stream waits must not leave the stream's waits pending in the server."""
+    harness = make_harness(worker, tmp_path, Calls([], answer="Hi."))
+    thread = Thread.new(title="Followed")
+    await harness.store.save_thread(thread, {})
+    following, sent = asyncio.Event(), []
+
+    async def receive():
+        await following.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+        if message.get("body", b"").startswith(b": following"):
+            following.set()  # the page goes away while the stream waits for the next event
+
+    scope = {"type": "http", "method": "GET", "path": f"/api/conversations/{thread.id}/events", "raw_path": b"",
+             "query_string": b"", "root_path": "", "headers": [(b"host", b"localhost")], "http_version": "1.1",
+             "scheme": "http", "server": ("localhost", 8009), "client": ("127.0.0.1", 50000)}
+    await asyncio.wait_for(app_for(harness)(scope, receive, send), 5)
+    await asyncio.sleep(0)
+    assert sent[0]["status"] == 200 and following.is_set()
+    assert not [task for task in asyncio.all_tasks() if task.get_coro().__qualname__ in ("Queue.get", "Event.wait")]
+    harness.store.close()
+
+
 async def test_people_see_and_forget_their_memory_from_the_page(worker, tmp_path):
     memory = UserMemory(tmp_path / "memory")
     harness = make_harness(worker, tmp_path, Calls([shell("echo hi")], answer="Done."), memory=memory, idle_close_s=3600)
@@ -643,6 +703,9 @@ def test_users_get_distinct_safe_directories():
     assert user_key(None) == user_key("") == user_key("  ") == "guest"
     assert user_key("Ana@Example.com") == user_key("ana@example.com") != user_key("ana@example.org")
     assert re.fullmatch(r"[a-z0-9._-]+", user_key("../../etc/passwd")) and user_key("guest") != "guest"
+    assert user_name(" Ana@Example.com ") == "ana@example.com" and user_name("  ") is user_name(None) is None
+    with pytest.raises(ValueError):
+        user_name(SHARED)
 
 
 async def test_stopping_the_server_closes_open_sessions_and_keeps_their_memory(worker, tmp_path):

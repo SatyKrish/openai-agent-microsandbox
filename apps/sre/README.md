@@ -149,8 +149,8 @@ the harness pod restarts with them.
 | `SRE_MEMORY` | `on` | `off` turns memory off |
 | `MEMORY_EXTRACT_MODEL`, `MEMORY_CONSOLIDATE_MODEL` | `gpt-6-luna`, `gpt-6.1-terra` | The models that extract each conversation and consolidate a user's memory |
 | `SRE_MEMORY_MAX_AGE_DAYS` | `90` | Forget conversations this many days after their last message; `0` keeps them |
-| `SRE_USER_HEADER` | unset | The header in which an authenticating proxy passes the signed-in user; unset, everyone is the guest. See [signing users in](../../docs/deployment.md#signing-users-in) |
-| `SRE_ADMIN_USERS` | unset | Signed-in users, comma-separated, who see and may delete every conversation and issue |
+| `SRE_USER_HEADER` | unset | The header in which an authenticating proxy passes the signed-in user, compared without regard to case; names starting with `@` are refused. Unset, everyone is the guest. See [signing users in](../../docs/deployment.md#signing-users-in) |
+| `SRE_ADMIN_USERS` | unset | Signed-in users, comma-separated and compared without regard to case, who see and may delete every conversation and issue |
 | `SRE_ISSUES` | `on` | `off` stops the health board opening issues |
 | `SRE_ISSUE_EVERY_S` | `30` | Seconds between the health board's checks for issues |
 | `SRE_DATA_DIR` | `artifacts/sre` | Threads, history, host copies of outputs and evidence, and memory |
