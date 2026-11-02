@@ -26,7 +26,7 @@ def runbooks() -> dict[str, bytes]:
     return {f"runbooks/{path.name}": path.read_bytes() for path in sorted(RUNBOOKS.glob("*.md"))}
 
 
-def start(conversation, has_uploads: bool, root: str) -> Manifest:
+def start(conversation, root: str) -> Manifest:
     books = {Path(path).name: File(content=data) for path, data in runbooks().items()}
     return Manifest(root=root, entries={"evidence": Dir(), "output": Dir(), "work": Dir(),
                                         "runbooks": Dir(children=books)})

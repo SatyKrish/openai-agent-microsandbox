@@ -15,47 +15,46 @@ from agents import Runner
 from agents.sandbox import Manifest, SandboxAgent
 from agents.sandbox.capabilities import Shell
 from agents.sandbox.entries import Dir
-from chatkit.store import NotFoundError
 from starlette.testclient import TestClient
 
 from openai_harness import http
-from openai_harness.chat import HarnessChatServer, preferred_file, running_elsewhere
+from openai_harness.engine import Harness, preferred_file, running_elsewhere
 from openai_harness.memory import MemoryStore, UserMemory, user_key
 from openai_harness.spec import AgentSpec
-from openai_harness.store import SQLiteStore
-from openai_harness.testing import Calls, events, message, shell
+from openai_harness.store import NotFound, SQLiteStore
+from openai_harness.testing import Calls, ask, entries, shell, titles
 
 SPEC = AgentSpec(
     name="test_agent",
     build_agent=lambda manifest, model: SandboxAgent(name="Test", model=model, instructions="Answer.",
                                                      default_manifest=manifest, capabilities=[Shell()]),
-    start=lambda conversation, has_uploads, root: Manifest(root=root, entries={"output": Dir(), "work": Dir()}),
+    start=lambda conversation, root: Manifest(root=root, entries={"output": Dir(), "work": Dir()}),
     check=lambda conversation, turn, files: {"status": "checked", "files": sorted(files)},
 )
 STARTING = {"runbooks/notes.md": b"# Notes\n"}
 
 
-def make_chat(worker, tmp_path, model, **options):
+def make_harness(worker, tmp_path, model, **options):
     store = SQLiteStore(tmp_path / "threads.sqlite3")
-    return HarnessChatServer(SPEC, store, worker.client(), model=model, output_dir=tmp_path / "threads",
-                             model_label="scripted", **options)
+    return Harness(SPEC, store, worker.client(), model=model, output_dir=tmp_path / "threads", model_label="scripted",
+                   **options)
 
 
-def app_for(chat, worker=None, health=None, **config):
+def app_for(harness, worker=None, health=None, **config):
     """The harness's API alone, as a UI would mount it beside its own page."""
-    routes = http.api_routes(chat, config={"model": "scripted", **config}, port=8009, jaeger_url=None,
+    routes = http.api_routes(harness, config={"model": "scripted", **config}, port=8009, jaeger_url=None,
                              starting_files=STARTING, worker=worker, health=health)
-    return http.application(routes, on_shutdown=chat.close_all)
+    return http.application(routes, on_shutdown=harness.close_all)
 
 
-async def new_thread(chat, text="First question", user=None):
-    stream = await events(chat, {"type": "threads.create", "params": {"input": message(text)}}, user=user)
+async def new_thread(harness, text="First question", user=None):
+    thread_id, stream = await ask(harness, text, user=user)
     assert not [event for event in stream if event["type"] == "error"], stream
-    return next(event["thread"]["id"] for event in stream if event["type"] == "thread.created"), stream
+    return thread_id, stream
 
 
-async def user_messages(chat, thread_id):
-    history = chat.history(thread_id)
+async def user_messages(harness, thread_id):
+    history = harness.history(thread_id)
     try:
         return [item["content"] for item in await history.get_items() if item.get("role") == "user"]
     finally:
@@ -64,64 +63,61 @@ async def user_messages(chat, thread_id):
 
 async def test_a_conversation_keeps_one_workspace_and_deleting_it_removes_the_workspace(worker, tmp_path):
     model = Calls([shell("echo $((6*7)) > output/answer.txt && cat output/answer.txt")], answer="42.")
-    chat = make_chat(worker, tmp_path, model)
+    harness = make_harness(worker, tmp_path, model)
     try:
-        thread_id, stream = await new_thread(chat, "What is 6 times 7?")
-        thread = await chat.store.load_thread(thread_id, {})
+        thread_id, stream = await new_thread(harness, "What is 6 times 7?")
+        thread = await harness.store.load_thread(thread_id, {})
         meta, turn = thread.metadata, thread.metadata["turns"][0]
         workspace = meta["workspace"].split("/", 1)[1]
         assert meta["workspace"].startswith("test-worker/s-") and turn["lifecycle"] == "created"
         assert turn["check"] == {"status": "checked", "files": ["output/answer.txt"]}
         assert (tmp_path / "threads" / thread_id / "turn-1/output/answer.txt").read_text() == "42\n"
         assert [tool["where"] for tool in turn["tools"]] == ["sandbox"]
-        card = json.dumps([event for event in stream if event["type"] == "thread.item.done"
-                           and event["item"]["type"] == "widget"])
+        card = json.dumps(entries(stream, "card"))
         assert "Turn 1 \\u00b7" in card and "1 step" in card  # the card says the turn and its steps, not the workspace
 
-        stream = await events(chat, {"type": "threads.add_user_message", "params": {
-            "thread_id": thread_id, "input": message("Still there?")}})
+        _, stream = await ask(harness, "Still there?", conversation=thread_id)
         assert not [event for event in stream if event["type"] == "error"]
-        turns = (await chat.store.load_thread(thread_id, {})).metadata["turns"]
+        turns = (await harness.store.load_thread(thread_id, {})).metadata["turns"]
         assert turns[1]["lifecycle"] == "continued"  # the session stayed open between turns
         assert (worker.data_dir / "active" / workspace / "output/answer.txt").is_file()
 
-        await chat.store.delete_thread(thread_id, {})
+        await harness.store.delete_thread(thread_id, {})
         assert not (worker.data_dir / "active" / workspace).exists()
         assert not (tmp_path / "threads" / thread_id).exists()
         assert (worker.data_dir / "history" / workspace / "journal.jsonl").is_file()
-        assert await user_messages(chat, thread_id) == []
+        assert await user_messages(harness, thread_id) == []
     finally:
-        chat.store.close()
+        harness.store.close()
 
 
 async def test_messages_sent_at_once_are_answered_together_in_one_turn(worker, tmp_path):
-    chat = make_chat(worker, tmp_path, Calls(delay=0.2))
+    harness = make_harness(worker, tmp_path, Calls(delay=0.2))
     try:
-        thread_id, _ = await new_thread(chat)
-        sent = [{"type": "threads.add_user_message", "params": {"thread_id": thread_id, "input": message(text)}}
-                for text in ("Second question", "Third question")]
-        streams = await asyncio.gather(*(events(chat, payload) for payload in sent))
+        thread_id, _ = await new_thread(harness)
+        asked = await asyncio.gather(*(ask(harness, text, conversation=thread_id)
+                                       for text in ("Second question", "Third question")))
+        streams = [stream for _, stream in asked]
         assert not [event for stream in streams for event in stream if event["type"] == "error"]
-        # Both streams show the one turn that answered both messages.
-        assert all(any(event["type"] == "thread.item.done" and event["item"]["type"] == "widget" for event in stream)
-                   for stream in streams)
-        thread = await chat.store.load_thread(thread_id, {})
+        # Both see the one turn that answered both messages.
+        assert all(entries(stream, "card") for stream in streams)
+        thread = await harness.store.load_thread(thread_id, {})
         turns = thread.metadata["turns"]
         assert [turn["number"] for turn in turns] == [1, 2] and all(turn["status"] == "completed" for turn in turns)
-        entries = await chat.store.load_entries(thread_id, {})
-        users = [entry for entry in entries if entry["kind"] == "user"]
+        transcript = await harness.store.load_entries(thread_id, {})
+        users = [entry for entry in transcript if entry["kind"] == "user"]
         assert [entry["text"] for entry in users] == ["First question", "Second question", "Third question"]
         assert [entry["turn"] for entry in users] == [1, 2, 2] and turns[1]["messages"] == [users[1]["id"], users[2]["id"]]
-        assert await user_messages(chat, thread_id) == ["First question", "Second question\n\nThird question"]
+        assert await user_messages(harness, thread_id) == ["First question", "Second question\n\nThird question"]
     finally:
-        await chat.close_all()
-        chat.store.close()
+        await harness.close_all()
+        harness.store.close()
 
 
 async def test_a_failed_run_leaves_no_partial_turn_in_the_history(worker, tmp_path, monkeypatch):
-    chat = make_chat(worker, tmp_path, Calls())
+    harness = make_harness(worker, tmp_path, Calls())
     try:
-        thread_id, _ = await new_thread(chat)
+        thread_id, _ = await new_thread(harness)
         original = Runner.run_streamed
 
         def failing(*args, **kwargs):
@@ -136,40 +132,39 @@ async def test_a_failed_run_leaves_no_partial_turn_in_the_history(worker, tmp_pa
             return result
 
         monkeypatch.setattr(Runner, "run_streamed", failing)
-        stream = await events(chat, {"type": "threads.add_user_message", "params": {
-            "thread_id": thread_id, "input": message("This turn fails")}})
+        _, stream = await ask(harness, "This turn fails", conversation=thread_id)
         assert [event for event in stream if event["type"] == "error"]
-        assert await user_messages(chat, thread_id) == ["First question"]
+        assert await user_messages(harness, thread_id) == ["First question"]
     finally:
-        chat.store.close()
+        harness.store.close()
 
 
 async def test_an_unreachable_worker_fails_the_turn_with_a_clear_message(tmp_path):
     from agent_mxc import MXCSandboxClient
 
     client = MXCSandboxClient("127.0.0.1:9", worker="gone-worker")
-    chat = HarnessChatServer(SPEC, SQLiteStore(tmp_path / "threads.sqlite3"), client, model=Calls(),
-                             output_dir=tmp_path / "threads")
+    harness = Harness(SPEC, SQLiteStore(tmp_path / "threads.sqlite3"), client, model=Calls(),
+                      output_dir=tmp_path / "threads")
     try:
-        stream = await events(chat, {"type": "threads.create", "params": {"input": message("Hello")}})
+        _, stream = await ask(harness, "Hello")
         errors = [event for event in stream if event["type"] == "error"]
         assert errors and "sandbox worker gone-worker is unavailable" in errors[0]["message"]
     finally:
-        chat.store.close()
+        harness.store.close()
 
 
 def test_the_api_tells_a_ui_what_the_agent_has_and_shows_its_worker(worker, tmp_path):
-    chat = make_chat(worker, tmp_path, Calls())
+    harness = make_harness(worker, tmp_path, Calls())
 
     async def broken():
         raise RuntimeError("worker restarting")
 
-    with TestClient(app_for(chat, worker=chat.client.info, follow_ups=[{"label": "Next", "prompt": "Go on."}]),
+    with TestClient(app_for(harness, worker=harness.client.info, follow_ups=[{"label": "Next", "prompt": "Go on."}]),
                     base_url="http://localhost:8009") as client:
         # The harness serves no page of its own: a UI serves its page beside these routes.
         assert client.get("/").status_code == 404
         config = client.get("/api/config").json()
-        assert config["name"] == "test_agent" and config["uploads"] is None and config["worker"] is True
+        assert config["name"] == "test_agent" and config["worker"] is True
         assert config["follow_ups"] == [{"label": "Next", "prompt": "Go on."}] and config["model"] == "scripted"
         assert config["starting_files"] == [{"path": "runbooks/notes.md", "bytes": len(STARTING["runbooks/notes.md"])}]
         assert client.get("/api/starting-files/runbooks/notes.md").content == STARTING["runbooks/notes.md"]
@@ -177,14 +172,15 @@ def test_the_api_tells_a_ui_what_the_agent_has_and_shows_its_worker(worker, tmp_
             assert client.get(f"/api/starting-files/{path}").status_code == 404
         info = client.get("/api/worker").json()
         assert info["status"] == "ok" and info["domain"] == "payments" and "through the worker's proxy" in info["egress"]
-        # Only loopback hosts may reach the server, and only same-origin requests reach ChatKit.
+        # Only loopback hosts may reach the server, and only same-origin requests start a conversation.
         assert client.get("/api/config", headers={"host": "evil.example"}).status_code == 400
-        assert client.post("/chatkit", content=b"{}", headers={"origin": "http://evil.example"}).status_code == 403
-    with TestClient(app_for(chat, worker=broken), base_url="http://localhost:8009") as client:
+        assert client.post("/api/conversations", json={"text": "Hi"},
+                           headers={"origin": "http://evil.example"}).status_code == 403
+    with TestClient(app_for(harness, worker=broken), base_url="http://localhost:8009") as client:
         assert client.get("/api/worker").status_code == 503
-    with TestClient(app_for(chat), base_url="http://localhost:8009") as client:
+    with TestClient(app_for(harness), base_url="http://localhost:8009") as client:
         assert client.get("/api/worker").status_code == 404 and client.get("/api/config").json()["worker"] is False
-    chat.store.close()
+    harness.store.close()
 
 
 def test_a_turn_running_in_another_process_blocks_a_new_one_until_it_is_stale():
@@ -198,33 +194,32 @@ def test_a_turn_running_in_another_process_blocks_a_new_one_until_it_is_stale():
 
 
 async def test_steps_say_what_ran_and_where_by_icon(worker, tmp_path):
-    chat = make_chat(worker, tmp_path, Calls([shell("echo hi > output/a.txt")], answer="Done."))
-    _, stream = await new_thread(chat, "Write a file")
-    tasks = [event["update"]["task"] for event in stream if (event.get("update") or {}).get("type") == "workflow.task.updated"]
-    done = [task for task in tasks if task["title"].startswith("echo hi")]
+    harness = make_harness(worker, tmp_path, Calls([shell("echo hi > output/a.txt")], answer="Done."))
+    _, stream = await new_thread(harness, "Write a file")
+    steps = [step for entry in entries(stream, "steps") for step in entry["steps"]]
+    done = [step for step in steps if step["title"].startswith("echo hi")]
     # A sandbox command that exited 0 is just its command; the icon says where it ran.
     assert done[-1]["title"] == "echo hi > output/a.txt" and done[-1]["icon"] == "cube"
-    thread = (await chat.store.load_threads(10, None, "desc", {})).data[0]
+    thread = (await harness.store.load_threads({}))[0]
     # Each turn records what it used: two model requests here, the second carrying the first's output.
     usage = thread.metadata["turns"][0]["usage"]
     assert usage["requests"] == 2 and usage["total_tokens"] > 0 and usage["max_input_tokens"] > 0
     assert "tokens" in json.dumps(stream)
     assert thread.metadata["turns"][0]["tools"][0]["summary"] == "echo hi > output/a.txt"
-    assert any(task["title"].startswith("Created the workspace") for task in tasks)
-    effects = [event for event in stream if event["type"] == "client_effect"]
+    assert any(step["title"].startswith("Created the workspace") for step in steps)
+    effects = [event for event in stream if event["type"] == "effect"]
     assert effects[-1]["data"]["path"] == "output/a.txt"
-    chat.store.close()
+    harness.store.close()
 
 
 async def test_parallel_steps_each_keep_their_own_exit_status(worker, tmp_path):
-    chat = make_chat(worker, tmp_path, Calls([[shell("exit 3"), shell("echo ok")]], answer="Done."))
-    thread_id, stream = await new_thread(chat, "Run both")
-    turn = (await chat.store.load_thread(thread_id, {})).metadata["turns"][0]
+    harness = make_harness(worker, tmp_path, Calls([[shell("exit 3"), shell("echo ok")]], answer="Done."))
+    thread_id, stream = await new_thread(harness, "Run both")
+    turn = (await harness.store.load_thread(thread_id, {})).metadata["turns"][0]
     assert [(tool["summary"], tool["status"]) for tool in turn["tools"]] == [("exit 3", "exit 3"), ("echo ok", "exit 0")]
-    titles = [event["update"]["task"]["title"] for event in stream
-              if (event.get("update") or {}).get("type") == "workflow.task.updated"]
-    assert "exit 3 · exit 3" in titles and "echo ok" in titles
-    chat.store.close()
+    shown = titles(stream)
+    assert "exit 3 · exit 3" in shown and "echo ok" in shown
+    harness.store.close()
 
 
 def test_the_panel_opens_a_checked_output_before_the_agents_report():
@@ -238,7 +233,7 @@ def test_the_panel_opens_a_checked_output_before_the_agents_report():
 
 
 def test_the_page_serves_an_agents_health_summary(worker, tmp_path):
-    chat = make_chat(worker, tmp_path, Calls())
+    harness = make_harness(worker, tmp_path, Calls())
 
     async def health():
         return {"generated_at": "2026-11-01T06:00:00Z", "namespaces": [{"namespace": "payments", "error": "",
@@ -247,15 +242,15 @@ def test_the_page_serves_an_agents_health_summary(worker, tmp_path):
     async def broken():
         raise RuntimeError("worker restarting")
 
-    with TestClient(app_for(chat, health=health), base_url="http://localhost:8009") as client:
+    with TestClient(app_for(harness, health=health), base_url="http://localhost:8009") as client:
         assert client.get("/api/config").json()["health"] is True
         reply = client.get("/api/health").json()
         assert reply["status"] == "ok" and reply["namespaces"][0]["workloads"][0]["state"] == "failing"
-    with TestClient(app_for(chat, health=broken), base_url="http://localhost:8009") as client:
+    with TestClient(app_for(harness, health=broken), base_url="http://localhost:8009") as client:
         assert client.get("/api/health").status_code == 503
-    with TestClient(app_for(chat), base_url="http://localhost:8009") as client:
+    with TestClient(app_for(harness), base_url="http://localhost:8009") as client:
         assert client.get("/api/health").status_code == 404 and client.get("/api/config").json()["health"] is False
-    chat.store.close()
+    harness.store.close()
 
 
 def raw_memory(conversation: str, updated: datetime, text: str) -> str:
@@ -277,9 +272,9 @@ def remember(root, conversation: str, text: str, updated: datetime | None = None
     (root / "memory_summary.md").write_text("Payments: see MEMORY.md.\n")
 
 
-def generates_memory(chat, thread_id: str, text: str) -> None:
+def generates_memory(harness, thread_id: str, text: str) -> None:
     """Make closing the conversation's open session write memory, as the SDK's generation does in a pre-stop hook."""
-    session = chat._open[thread_id].session
+    session = harness._open[thread_id].session
 
     async def generate():
         files = {"MEMORY.md": f"{text}\n", "memory_summary.md": f"Payments: {text}\n",
@@ -295,83 +290,83 @@ async def test_memory_carries_across_conversations_through_the_harness(worker, t
     """The SDK distils memory into memories/ when a session closes; here the script writes it, as that step would."""
     memory = UserMemory(tmp_path / "memory")
     store = memory.for_user(None)
-    chat = make_chat(worker, tmp_path, Calls([shell("echo investigating")], answer="Noted."), memory=memory,
+    harness = make_harness(worker, tmp_path, Calls([shell("echo investigating")], answer="Noted."), memory=memory,
                      idle_close_s=0.4)
     try:
-        first, _ = await new_thread(chat, "Investigate payments")
-        generates_memory(chat, first, "payments-processor needs DATABASE_URL")
-        assert first in chat._open and store.files() == {}  # open, and nothing published while it is
+        first, _ = await new_thread(harness, "Investigate payments")
+        generates_memory(harness, first, "payments-processor needs DATABASE_URL")
+        assert first in harness._open and store.files() == {}  # open, and nothing published while it is
         await asyncio.sleep(0.8)
-        assert first not in chat._open  # closed when idle, and its memory published
+        assert first not in harness._open  # closed when idle, and its memory published
         assert store.files()["MEMORY.md"] == b"payments-processor needs DATABASE_URL\n"
         summary = memory.summary(None)
         assert summary["text"].startswith("Payments: payments-processor") and summary["conversations"] == 1
         assert summary["user"] == "guest" and summary["shared"] is True
 
-        chat.model = Calls([shell("cat memories/MEMORY.md")], answer="I remember.")
-        second, stream = await new_thread(chat, "Anything known about payments?")
-        assert "payments-processor needs DATABASE_URL" in chat.model.outputs[0]
+        harness.model = Calls([shell("cat memories/MEMORY.md")], answer="I remember.")
+        second, stream = await new_thread(harness, "Anything known about payments?")
+        assert "payments-processor needs DATABASE_URL" in harness.model.outputs[0]
         assert "Seeded with the agent's memory from earlier conversations (4 files)" in json.dumps(stream)
 
         # A deleted conversation is not remembered: deleting does not run the hooks where the SDK generates memory.
-        generates_memory(chat, second, "forget me")
-        await chat.store.delete_thread(second, {})
-        assert second not in chat._open
+        generates_memory(harness, second, "forget me")
+        await harness.store.delete_thread(second, {})
+        assert second not in harness._open
         assert store.files()["MEMORY.md"] == b"payments-processor needs DATABASE_URL\n"
     finally:
-        await chat.close_all()
-        chat.store.close()
+        await harness.close_all()
+        harness.store.close()
 
 
 async def test_each_signed_in_user_has_their_own_memory_and_guests_share_one(worker, tmp_path):
     memory = UserMemory(tmp_path / "memory")
-    chat = make_chat(worker, tmp_path, Calls([shell("echo investigating")], answer="Noted."), memory=memory,
+    harness = make_harness(worker, tmp_path, Calls([shell("echo investigating")], answer="Noted."), memory=memory,
                      idle_close_s=3600)
     try:
-        ana, _ = await new_thread(chat, "Investigate payments", user="ana@example.com")
-        assert (await chat.store.load_thread(ana, {})).metadata["owner"] == "ana@example.com"
-        generates_memory(chat, ana, "Ana prefers kubectl tables")
-        await chat.close_all()
+        ana, _ = await new_thread(harness, "Investigate payments", user="ana@example.com")
+        assert (await harness.store.load_thread(ana, {})).metadata["owner"] == "ana@example.com"
+        generates_memory(harness, ana, "Ana prefers kubectl tables")
+        await harness.close_all()
         assert b"Ana prefers" in memory.for_user("ana@example.com").files()["MEMORY.md"]
         assert memory.for_user(None).files() == {} and memory.for_user("bo@example.com").files() == {}
         assert memory.summary("ana@example.com")["shared"] is False
 
         # Another user, and the guest, start without Ana's memory.
         for user in ("bo@example.com", None):
-            chat.model = Calls([shell("cat memories/MEMORY.md || echo none")], answer="Checked.")
-            _, stream = await new_thread(chat, "Anything known?", user=user)
-            assert "Ana prefers" not in chat.model.outputs[0] and "Seeded" not in json.dumps(stream)
-            await chat.close_all()
+            harness.model = Calls([shell("cat memories/MEMORY.md || echo none")], answer="Checked.")
+            _, stream = await new_thread(harness, "Anything known?", user=user)
+            assert "Ana prefers" not in harness.model.outputs[0] and "Seeded" not in json.dumps(stream)
+            await harness.close_all()
         # Ana's next conversation starts with hers.
-        chat.model = Calls([shell("cat memories/MEMORY.md")], answer="I remember.")
-        await new_thread(chat, "Anything known?", user="ana@example.com")
-        assert "Ana prefers kubectl tables" in chat.model.outputs[0]
+        harness.model = Calls([shell("cat memories/MEMORY.md")], answer="I remember.")
+        await new_thread(harness, "Anything known?", user="ana@example.com")
+        assert "Ana prefers kubectl tables" in harness.model.outputs[0]
     finally:
-        await chat.close_all()
-        chat.store.close()
+        await harness.close_all()
+        harness.store.close()
 
 
 async def test_a_deleted_conversation_is_forgotten_after_its_memory_was_published(worker, tmp_path):
     memory = UserMemory(tmp_path / "memory")
-    chat = make_chat(worker, tmp_path, Calls([shell("echo hi")], answer="Done."), memory=memory, idle_close_s=3600)
+    harness = make_harness(worker, tmp_path, Calls([shell("echo hi")], answer="Done."), memory=memory, idle_close_s=3600)
     try:
-        kept, _ = await new_thread(chat, "First", user="ana@example.com")
-        gone, _ = await new_thread(chat, "Second", user="ana@example.com")
-        await chat.close_all()
+        kept, _ = await new_thread(harness, "First", user="ana@example.com")
+        gone, _ = await new_thread(harness, "Second", user="ana@example.com")
+        await harness.close_all()
         store = memory.for_user("ana@example.com")
         remember(store.root, kept, "kept lesson")
         remember(store.root, gone, "lesson from the deleted conversation")
-        await chat.store.delete_thread(gone, {})
+        await harness.store.delete_thread(gone, {})
         files = store.files()
         assert f"raw_memories/{kept}.md" in files and f"raw_memories/{gone}.md" not in files
         assert not any(name.startswith(f"rollout_summaries/{gone}") for name in files)
         assert b"deleted conversation" not in files["raw_memories.md"]  # what the agent may read is rebuilt
         assert memory.summary("ana@example.com")["conversations"] == 1
-        await chat.store.delete_thread(kept, {})
+        await harness.store.delete_thread(kept, {})
         assert store.files() == {} and not store.root.exists()  # nothing left to remember
     finally:
-        await chat.close_all()
-        chat.store.close()
+        await harness.close_all()
+        harness.store.close()
 
 
 def test_memory_forgets_conversations_by_age_and_beyond_the_newest(tmp_path):
@@ -415,56 +410,55 @@ async def test_memory_over_the_limit_is_not_published(tmp_path):
 
 
 async def test_people_see_and_delete_only_their_own_conversations(worker, tmp_path):
-    chat = make_chat(worker, tmp_path, Calls([shell("echo hi")], answer="Done."))
+    harness = make_harness(worker, tmp_path, Calls([shell("echo hi")], answer="Done."))
     try:
-        ana, _ = await new_thread(chat, "Investigate payments", user="ana@example.com")
-        bo, _ = await new_thread(chat, "Investigate payments too", user="bo@example.com")
-        guest, _ = await new_thread(chat, "And as the guest")
+        ana, _ = await new_thread(harness, "Investigate payments", user="ana@example.com")
+        bo, _ = await new_thread(harness, "Investigate payments too", user="bo@example.com")
+        guest, _ = await new_thread(harness, "And as the guest")
         async def ids(user):
-            return [thread.id for thread in (await chat.store.load_threads(10, None, "asc", {"user": user})).data]
+            return [thread.id for thread in await harness.store.load_threads({"user": user}, newest_first=False)]
         assert await ids("ana@example.com") == [ana] and await ids("bo@example.com") == [bo] and await ids(None) == [guest]
 
-        # Someone else's conversation reads as not found, through ChatKit and the page's API, and cannot be deleted.
-        with pytest.raises(NotFoundError):
-            await chat.store.load_thread(ana, {"user": "bo@example.com"})
-        with pytest.raises(NotFoundError):
-            await events(chat, {"type": "threads.add_user_message",
-                                "params": {"thread_id": ana, "input": message("Hijack")}}, user="bo@example.com")
-        with pytest.raises(NotFoundError):
-            await chat.store.delete_thread(ana, {"user": "bo@example.com"})
-        thread = await chat.store.load_thread(ana, {})
+        # Someone else's conversation reads as not found, here and through the API, and cannot be deleted.
+        with pytest.raises(NotFound):
+            await harness.store.load_thread(ana, {"user": "bo@example.com"})
+        with pytest.raises(NotFound):
+            await ask(harness, "Hijack", conversation=ana, user="bo@example.com")
+        with pytest.raises(NotFound):
+            await harness.store.delete_thread(ana, {"user": "bo@example.com"})
+        thread = await harness.store.load_thread(ana, {})
         assert thread.metadata["owner"] == "ana@example.com" and len(thread.metadata["turns"]) == 1
         assert thread.metadata["turns"][0]["requested_by"] == "ana@example.com"
 
         # The worker's journal names who asked for each command of a turn; the guest's are the guest's.
         async def requesters(thread_id):
-            session = (await chat.store.load_thread(thread_id, {})).metadata["workspace"].split("/", 1)[1]
+            session = (await harness.store.load_thread(thread_id, {})).metadata["workspace"].split("/", 1)[1]
             journal = (worker.data_dir / "history" / session / "journal.jsonl").read_text().splitlines()
             return {json.loads(line).get("requester") for line in journal if '"event":"exec"' in line}
         assert await requesters(ana) == {"ana@example.com"} and await requesters(guest) == {"guest"}
 
-        api = http.application(http.api_routes(chat, config={}, port=8009, jaeger_url=None,
+        api = http.application(http.api_routes(harness, config={}, port=8009, jaeger_url=None,
                                                user_header="X-Forwarded-Email"))
         with TestClient(api, base_url="http://localhost:8009") as client:
             assert client.get(f"/api/threads/{ana}", headers={"X-Forwarded-Email": "bo@example.com"}).status_code == 404
             assert client.get(f"/api/threads/{ana}", headers={"X-Forwarded-Email": "ana@example.com"}).status_code == 200
 
         # An admin sees and deletes everyone's.
-        chat.store.admins = frozenset({"lead@example.com"})
+        harness.store.admins = frozenset({"lead@example.com"})
         assert set(await ids("lead@example.com")) == {ana, bo, guest}
-        await chat.store.delete_thread(bo, {"user": "lead@example.com"})
+        await harness.store.delete_thread(bo, {"user": "lead@example.com"})
         assert await ids("bo@example.com") == []
     finally:
-        await chat.close_all()
-        chat.store.close()
+        await harness.close_all()
+        harness.store.close()
 
 
-def test_the_harness_api_runs_conversations_without_chatkit(worker, tmp_path):
+def test_the_harness_api_runs_conversations(worker, tmp_path):
     import time
 
-    chat = make_chat(worker, tmp_path, Calls([shell("mkdir -p output && echo 42 > output/answer.txt")], answer="It is 42."))
-    api = http.application(http.api_routes(chat, config={}, port=8009, jaeger_url=None, user_header="X-Forwarded-Email"),
-                           on_shutdown=chat.close_all)
+    harness = make_harness(worker, tmp_path, Calls([shell("mkdir -p output && echo 42 > output/answer.txt")], answer="It is 42."))
+    api = http.application(http.api_routes(harness, config={}, port=8009, jaeger_url=None, user_header="X-Forwarded-Email"),
+                           on_shutdown=harness.close_all)
     ana, bo = {"X-Forwarded-Email": "ana@example.com"}, {"X-Forwarded-Email": "bo@example.com"}
 
     def settled(client, thread_id, turns):
@@ -481,6 +475,7 @@ def test_the_harness_api_runs_conversations_without_chatkit(worker, tmp_path):
         thread_id = started.json()["id"]
         first = settled(client, thread_id, 1)
         assert [entry["kind"] for entry in first["entries"]] == ["user", "steps", "assistant", "card"]
+        assert first["entries"][0]["id"] == started.json()["message"]
         assert first["entries"][0]["requested_by"] == "ana@example.com" and first["entries"][0]["turn"] == 1
         assert first["entries"][2]["text"] == "It is 42." and first["title"] == "What is 6 times 7?"
         assert [item["id"] for item in client.get("/api/conversations", headers=ana).json()["conversations"]] == [thread_id]
@@ -493,8 +488,8 @@ def test_the_harness_api_runs_conversations_without_chatkit(worker, tmp_path):
         # Follow the conversation while a second message is answered: the turn's events arrive as they happen.
         seen = []
         with client.stream("GET", f"/api/conversations/{thread_id}/events", headers=ana) as events:
-            assert client.post(f"/api/conversations/{thread_id}/messages", json={"text": "And 6 times 8?"},
-                               headers=ana).status_code == 202
+            sent = client.post(f"/api/conversations/{thread_id}/messages", json={"text": "And 6 times 8?"}, headers=ana)
+            assert sent.status_code == 202 and sent.json()["message"].startswith("msg_")
             for line in events.iter_lines():
                 if line.startswith("data: "):
                     seen.append(json.loads(line[6:]))
@@ -508,12 +503,8 @@ def test_the_harness_api_runs_conversations_without_chatkit(worker, tmp_path):
         later = client.get(f"/api/conversations/{thread_id}?after={first['entries'][-1]['seq']}", headers=ana).json()
         assert [entry["kind"] for entry in later["entries"]] == ["user", "steps", "assistant", "card"]
 
-        # ChatKit shows the same transcript.
-        page = asyncio.run(chat.store.load_thread_items(thread_id, None, 20, "asc", {"user": "ana@example.com"}))
-        assert [item.type for item in page.data] == ["user_message", "workflow", "assistant_message", "widget"] * 2
-
         # A turn can be stopped from the API; the conversation says so.
-        chat.model = Calls([shell("sleep 5")], answer="Too late.")
+        harness.model = Calls([shell("sleep 5")], answer="Too late.")
         client.post(f"/api/conversations/{thread_id}/messages", json={"text": "Take your time"}, headers=ana)
         for _ in range(50):
             if client.get(f"/api/conversations/{thread_id}", headers=ana).json()["state"] == "running":
@@ -521,7 +512,7 @@ def test_the_harness_api_runs_conversations_without_chatkit(worker, tmp_path):
             time.sleep(0.1)
         assert client.post(f"/api/conversations/{thread_id}/stop", headers=ana).json() == {"stopped": True}
         for _ in range(50):
-            turns = asyncio.run(chat.store.load_thread(thread_id, {})).metadata["turns"]
+            turns = asyncio.run(harness.store.load_thread(thread_id, {})).metadata["turns"]
             if turns[-1]["status"] != "running":
                 break
             time.sleep(0.1)
@@ -536,75 +527,16 @@ def test_the_harness_api_runs_conversations_without_chatkit(worker, tmp_path):
         assert client.delete(f"/api/conversations/{thread_id}", headers=bo).status_code == 404
         assert client.delete(f"/api/conversations/{thread_id}", headers=ana).json() == {"deleted": True}
         assert client.get("/api/conversations", headers=ana).json()["conversations"] == []
-    chat.store.close()
-
-
-async def test_chatkit_items_from_before_the_engine_become_the_transcript(tmp_path):
-    import sqlite3
-
-    path = tmp_path / "threads.sqlite3"
-    db = sqlite3.connect(path)
-    db.executescript("""
-        CREATE TABLE threads (id TEXT PRIMARY KEY, data TEXT NOT NULL, owner TEXT);
-        CREATE TABLE items (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, data TEXT NOT NULL);
-    """)
-    db.execute("INSERT INTO threads VALUES ('thr_old', ?, NULL)", (json.dumps(
-        {"id": "thr_old", "created_at": "2026-10-01T00:00:00", "status": {"type": "active"}, "metadata": {}}),))
-    old = [
-        {"id": "msg_u", "thread_id": "thr_old", "created_at": "2026-10-01T00:00:01", "type": "user_message",
-         "content": [{"type": "input_text", "text": "Why?"}], "attachments": [], "inference_options": {}},
-        {"id": "wf_1", "thread_id": "thr_old", "created_at": "2026-10-01T00:00:02", "type": "workflow",
-         "workflow": {"type": "custom", "tasks": [{"type": "custom", "title": "kubectl get pods", "status_indicator": "complete"}],
-                      "summary": {"duration": 3}, "expanded": False}},
-        {"id": "msg_a", "thread_id": "thr_old", "created_at": "2026-10-01T00:00:03", "type": "assistant_message",
-         "content": [{"type": "output_text", "text": "Because.", "annotations": []}]},
-        {"id": "msg_w", "thread_id": "thr_old", "created_at": "2026-10-01T00:00:04", "type": "widget",
-         "widget": {"type": "Card", "children": [{"type": "Text", "value": "Turn 1"}]}},
-    ]
-    for item in old:
-        db.execute("INSERT INTO items VALUES (?, 'thr_old', ?)", (item["id"], json.dumps(item)))
-    db.commit()
-    db.close()
-    store = SQLiteStore(path)
-    try:
-        entries = await store.load_entries("thr_old", {})
-        assert [(entry["kind"], entry["seq"]) for entry in entries] == [("user", 1), ("steps", 2), ("assistant", 3),
-                                                                        ("card", 4)]
-        assert entries[1]["steps"][0]["title"] == "kubectl get pods" and entries[1]["duration_s"] == 3
-        page = await store.load_thread_items("thr_old", None, 10, "asc", {})
-        assert [item.id for item in page.data] == ["msg_u", "wf_1", "msg_a", "msg_w"]
-        assert page.data[2].content[0].text == "Because."
-    finally:
-        store.close()
-
-
-def test_conversations_from_before_owners_keep_theirs(tmp_path):
-    import sqlite3
-    path = tmp_path / "threads.sqlite3"
-    db = sqlite3.connect(path)
-    db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
-    for thread_id, owner in (("thr_ana", "ana@example.com"), ("thr_guest", None)):
-        db.execute("INSERT INTO threads VALUES (?, ?)", (thread_id, json.dumps(
-            {"id": thread_id, "created_at": "2026-10-01T00:00:00", "status": {"type": "active"},
-             "metadata": {"owner": owner}})))
-    db.commit()
-    db.close()
-    store = SQLiteStore(path)
-    try:
-        page = asyncio.run(store.load_threads(10, None, "asc", {"user": "ana@example.com"}))
-        assert [thread.id for thread in page.data] == ["thr_ana"]
-        assert [thread.id for thread in asyncio.run(store.load_threads(10, None, "asc", {"user": None})).data] == ["thr_guest"]
-    finally:
-        store.close()
+    harness.store.close()
 
 
 def test_the_signed_in_user_comes_only_from_the_configured_header(worker, tmp_path):
     memory = UserMemory(tmp_path / "memory")
     remember(memory.for_user("ana@example.com").root, "thr-ana", "Ana's lesson")
-    chat = make_chat(worker, tmp_path, Calls([], answer="Hi."), memory=memory)
+    harness = make_harness(worker, tmp_path, Calls([], answer="Hi."), memory=memory)
 
     def app(user_header):
-        return http.application(http.api_routes(chat, config={}, port=8009, jaeger_url=None, user_header=user_header))
+        return http.application(http.api_routes(harness, config={}, port=8009, jaeger_url=None, user_header=user_header))
 
     with TestClient(app("X-Forwarded-Email"), base_url="http://localhost:8009") as client:
         ana = client.get("/api/memory", headers={"X-Forwarded-Email": " ana@example.com "}).json()
@@ -614,19 +546,19 @@ def test_the_signed_in_user_comes_only_from_the_configured_header(worker, tmp_pa
     assert (ana["user"], ana["shared"], ana["conversations"]) == ("ana@example.com", False, 1)
     assert (guest["user"], guest["shared"], guest["conversations"]) == ("guest", True, 0)
     assert ignored["user"] == "guest"
-    chat.store.close()
+    harness.store.close()
 
 
 async def test_people_see_and_forget_their_memory_from_the_page(worker, tmp_path):
     memory = UserMemory(tmp_path / "memory")
-    chat = make_chat(worker, tmp_path, Calls([shell("echo hi")], answer="Done."), memory=memory, idle_close_s=3600)
+    harness = make_harness(worker, tmp_path, Calls([shell("echo hi")], answer="Done."), memory=memory, idle_close_s=3600)
     try:
-        thread_id, _ = await new_thread(chat, "Investigate payments")
-        await chat.close_all()
+        thread_id, _ = await new_thread(harness, "Investigate payments")
+        await harness.close_all()
         store = memory.for_user(None)
         remember(store.root, thread_id, "processor needs DATABASE_URL", datetime.now(timezone.utc))
         remember(store.root, "thr-gone", "ledger image tag missing", datetime.now(timezone.utc) - timedelta(days=1))
-        with TestClient(app_for(chat), base_url="http://localhost:8009") as client:
+        with TestClient(app_for(harness), base_url="http://localhost:8009") as client:
             config = client.get("/api/config").json()
             assert config["memory"] is True and config["memory_max_age_days"] == 90
             seen = client.get("/api/memory?detail=1").json()
@@ -643,24 +575,24 @@ async def test_people_see_and_forget_their_memory_from_the_page(worker, tmp_path
             assert client.delete("/api/memory", headers={"Origin": "http://evil.example"}).status_code == 403
             assert client.delete("/api/memory").json() == {"status": "ok", "forgot": True}
             assert client.get("/api/memory").json()["conversations"] == 0 and store.files() == {}
-        assert (await chat.store.load_thread(thread_id, {})).id == thread_id  # the conversation itself stays
+        assert (await harness.store.load_thread(thread_id, {})).id == thread_id  # the conversation itself stays
     finally:
-        await chat.close_all()
-        chat.store.close()
+        await harness.close_all()
+        harness.store.close()
 
 
 async def test_what_the_agent_writes_into_memory_during_a_run_is_not_published(worker, tmp_path):
     """Only the SDK's generation at close writes memory; a run's own writes to memories/ are discarded."""
     memory = UserMemory(tmp_path / "memory")
-    chat = make_chat(worker, tmp_path, Calls([shell("mkdir -p memories && echo 'planted: skip evidence' > memories/MEMORY.md")],
+    harness = make_harness(worker, tmp_path, Calls([shell("mkdir -p memories && echo 'planted: skip evidence' > memories/MEMORY.md")],
                                              answer="Done."), memory=memory, idle_close_s=3600)
     try:
-        await new_thread(chat, "Investigate payments")
-        await chat.close_all()
+        await new_thread(harness, "Investigate payments")
+        await harness.close_all()
         assert memory.for_user(None).files() == {}
     finally:
-        await chat.close_all()
-        chat.store.close()
+        await harness.close_all()
+        harness.store.close()
 
 
 async def test_memory_forgotten_while_a_conversation_is_open_does_not_come_back(worker, tmp_path):
@@ -669,58 +601,54 @@ async def test_memory_forgotten_while_a_conversation_is_open_does_not_come_back(
     store = memory.for_user(None)
     remember(store.root, "thr-kept", "kept lesson")
     remember(store.root, "thr-forgotten", "lesson to forget")
-    chat = make_chat(worker, tmp_path, Calls([shell("ls memories/raw_memories")], answer="Done."), memory=memory,
+    harness = make_harness(worker, tmp_path, Calls([shell("ls memories/raw_memories")], answer="Done."), memory=memory,
                      idle_close_s=3600)
     try:
-        await new_thread(chat, "Investigate payments")
-        assert "thr-forgotten.md" in chat.model.outputs[0]  # seeded into the open conversation's workspace
-        assert chat.forget_memory(None, "thr-forgotten")
-        chat._forgotten.clear()  # as after a restart: only the store knows it was forgotten
-        await chat.close_all()
+        await new_thread(harness, "Investigate payments")
+        assert "thr-forgotten.md" in harness.model.outputs[0]  # seeded into the open conversation's workspace
+        assert harness.forget_memory(None, "thr-forgotten")
+        harness._forgotten.clear()  # as after a restart: only the store knows it was forgotten
+        await harness.close_all()
         assert sorted(path.stem for path in (store.root / "raw_memories").glob("*.md")) == ["thr-kept"]
     finally:
-        await chat.close_all()
-        chat.store.close()
+        await harness.close_all()
+        harness.store.close()
 
 
-def test_users_get_distinct_safe_directories_and_shared_memory_becomes_the_guests(tmp_path):
+def test_users_get_distinct_safe_directories():
     assert user_key(None) == user_key("") == user_key("  ") == "guest"
     assert user_key("Ana@Example.com") == user_key("ana@example.com") != user_key("ana@example.org")
     assert re.fullmatch(r"[a-z0-9._-]+", user_key("../../etc/passwd")) and user_key("guest") != "guest"
-    remember(tmp_path / "memory", "thr-1", "from before memory was per user")
-    memory = UserMemory(tmp_path / "memory")
-    assert sorted(path.name for path in (tmp_path / "memory").iterdir()) == ["users"]
-    assert b"from before" in memory.for_user(None).files()["MEMORY.md"]
 
 
 async def test_stopping_the_server_closes_open_sessions_and_keeps_their_memory(worker, tmp_path):
     memory = UserMemory(tmp_path / "memory")
-    chat = make_chat(worker, tmp_path, Calls([shell("echo investigating")], answer="Noted."), memory=memory,
+    harness = make_harness(worker, tmp_path, Calls([shell("echo investigating")], answer="Noted."), memory=memory,
                      idle_close_s=3600)
     try:
-        thread_id, _ = await new_thread(chat, "Investigate payments")
-        assert thread_id in chat._open
-        generates_memory(chat, thread_id, "remembered at shutdown")
-        app = app_for(chat)
+        thread_id, _ = await new_thread(harness, "Investigate payments")
+        assert thread_id in harness._open
+        generates_memory(harness, thread_id, "remembered at shutdown")
+        app = app_for(harness)
         async with app.router.lifespan_context(app):
             pass
-        assert thread_id not in chat._open
+        assert thread_id not in harness._open
         assert memory.for_user(None).files()["MEMORY.md"] == b"remembered at shutdown\n"
     finally:
-        await chat.close_all()
-        chat.store.close()
+        await harness.close_all()
+        harness.store.close()
 
 
 async def test_a_turn_that_runs_out_of_steps_ends_with_a_message_instead_of_failing(worker, tmp_path):
-    chat = make_chat(worker, tmp_path, Calls([shell("echo one"), shell("echo two"), shell("echo three")], answer="Done."),
+    harness = make_harness(worker, tmp_path, Calls([shell("echo one"), shell("echo two"), shell("echo three")], answer="Done."),
                      max_turns=2)
     try:
-        thread_id, stream = await new_thread(chat, "Do three things")
-        turn = (await chat.store.load_thread(thread_id, {})).metadata["turns"][0]
+        thread_id, stream = await new_thread(harness, "Do three things")
+        turn = (await harness.store.load_thread(thread_id, {})).metadata["turns"][0]
         assert turn["status"] == "completed" and turn["step_limit"] is True
         assert "limit of 2 model steps" in json.dumps(stream) and "ask me to continue" in json.dumps(stream)
         # The partial turn stays in the history, so "continue" picks up from it.
-        assert await user_messages(chat, thread_id) == ["Do three things"]
+        assert await user_messages(harness, thread_id) == ["Do three things"]
     finally:
-        await chat.close_all()
-        chat.store.close()
+        await harness.close_all()
+        harness.store.close()

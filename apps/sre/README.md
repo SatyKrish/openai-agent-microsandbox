@@ -60,8 +60,8 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   here rather than on every view. Settings opens it too.
 - **Conversations.** The list beside the conversation has open issues first,
   then your conversations, then recovered issues; a green dot marks a turn that
-  is running. A link to a conversation (`?c=ID`, or the ChatKit page's
-  `?thread=ID`) opens it. Stop in the composer stops the running turn.
+  is running. A link to a conversation (`?c=ID`) opens it; a link to one
+  that was deleted, or that is someone else's, says so. Stop in the composer stops the running turn.
 - **Issues.** The health board opens an issue for each unhealthy workload,
   without a model call, and the conversation list shows it under Open issues.
   An issue is shared: everyone sees it and can investigate in it, and only an
@@ -166,9 +166,8 @@ agent/
 ui/                         The UI: its page served beside the harness's API, the turn card and the launcher
   web/                      The page (assistant-ui, React): conversation list, chat, side panel, memory view;
                             built into static/app and served at /
-  static/                   The views both pages share: sre.js (health board, findings, log excerpts,
-                            kubectl tables), styles, the trace and file views; and the ChatKit page
-                            (index.html, app.js) at /chatkit-ui
+  static/                   The views the page imports: sre.js (health board, findings, log excerpts,
+                            kubectl tables), the trace and file views, and the shared styles
 evals/                      Tests against the worker's real gRPC service
 verify.py                   In-cluster boundary probes and a scripted investigation
 loadtest.py                 Many conversations and users at once

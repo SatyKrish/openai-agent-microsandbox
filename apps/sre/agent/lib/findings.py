@@ -41,7 +41,7 @@ def check(conversation, files: dict[str, bytes]) -> dict:
     evidence = {entry["path"]: entry for entry in conversation.evidence}
     texts: dict[str, str] = {}
     results, failures, resources = [], [], []
-    for finding in findings:
+    for index, finding in enumerate(findings):
         if not isinstance(finding, dict):
             failures.append({"resource": None, "reason": "A finding is not an object."})
             continue
@@ -73,8 +73,9 @@ def check(conversation, files: dict[str, bytes]) -> dict:
             quotes.append(entry)
         verified = bool(quotes) and all(item["found"] for item in quotes)
         resources.append(resource)
-        results.append({"resource": resource, "problem": str(finding.get("problem") or "")[:60], "verified": verified,
-                        "quotes": quotes})
+        # ``index`` is the finding's place in findings.json: two findings may name the same resource.
+        results.append({"index": index, "resource": resource, "problem": str(finding.get("problem") or "")[:60],
+                        "verified": verified, "quotes": quotes})
     found = sum(item["found"] for result in results for item in result["quotes"])
     total = sum(len(result["quotes"]) for result in results)
     summary = [{"resource": result["resource"], "problem": result["problem"], "verified": result["verified"]}

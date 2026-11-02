@@ -1,6 +1,6 @@
 # Copyright 2026 openai-agent-mxc contributors
 # SPDX-License-Identifier: Apache-2.0
-"""The SRE agent's UI: its own page (``static/``), served beside the harness's API."""
+"""The SRE agent's UI: its own page (built from ``web/`` into ``static/app``), served beside the harness's API."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ import contextlib
 import logging
 
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from openai_harness import http
-from openai_harness.chat import HarnessChatServer
+from openai_harness.engine import Harness
 
 STATIC = Path(__file__).resolve().parent / "static"
 logger = logging.getLogger(__name__)
@@ -52,24 +52,26 @@ class _Revalidated(StaticFiles):
         return response
 
 
-def _page(path: Path):
-    async def page(request: Request):
-        return FileResponse(path, media_type="text/html", headers={"Cache-Control": "no-store"})
-    return page
+async def _page(request: Request):
+    # The page is built from web/ (assistant-ui) into static/app: in the image, or with make page.
+    page = STATIC / "app" / "index.html"
+    if not page.is_file():
+        return PlainTextResponse("The page is not built. Run make page, then reload.", status_code=503)
+    return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 async def _icon(request: Request):
     return FileResponse(STATIC / "favicon.svg", media_type="image/svg+xml")
 
 
-def create_app(server: HarnessChatServer, *, config: dict, port: int, jaeger_url: str | None, worker=None,
+def create_app(harness: Harness, *, config: dict, port: int, jaeger_url: str | None, worker=None,
                health=None, user_header: str | None = None, starting_files: dict[str, bytes] | None = None,
                issues=None):
     """``health`` is the worker's summary of its namespaces, shown on the start screen and never sent to the
     model. ``user_header`` carries the signed-in user from an authenticating proxy, whose memory the page
     shows; without it everyone is the guest. ``issues`` (an ``Issues``) opens an issue for each unhealthy
     workload while the server runs; ``/api/issues`` lists them."""
-    api = http.api_routes(server, config={**UI, **config, "issues": issues is not None}, port=port,
+    api = http.api_routes(harness, config={**UI, **config, "issues": issues is not None}, port=port,
                           jaeger_url=jaeger_url, worker=worker, health=health, user_header=user_header,
                           starting_files=starting_files)
     running: list[asyncio.Task] = []
@@ -88,16 +90,11 @@ def create_app(server: HarnessChatServer, *, config: dict, port: int, jaeger_url
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        await server.close_all()
+        await harness.close_all()
 
-    # The page is built from web/ (assistant-ui) into static/app/; the ChatKit page stays at /chatkit-ui. A
-    # checkout that has not built the page serves the ChatKit page at / too.
-    page = STATIC / "app" / "index.html"
-    if not page.is_file():
-        logger.warning("The page is not built (make page); serving the ChatKit page at /")
-        page = STATIC / "index.html"
-    return http.application([Route("/", _page(page)), Route("/chatkit-ui", _page(STATIC / "index.html")),
-                             Route("/favicon.svg", _icon), Route("/favicon.ico", _icon),
+    if not (STATIC / "app" / "index.html").is_file():
+        logger.warning("The page is not built: run make page")
+    return http.application([Route("/", _page), Route("/favicon.svg", _icon), Route("/favicon.ico", _icon),
                              Route("/api/issues", listing), *api,
                              Mount("/static", _Revalidated(directory=STATIC), name="static")],
                             on_startup=start, on_shutdown=stop)

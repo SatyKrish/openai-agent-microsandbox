@@ -86,7 +86,7 @@ def main(argv=None):
     from agent_mxc import MXCSandboxClient
     from agent_mxc.tracing import configure_tracing, tracing_enabled
     from openai_harness import http
-    from openai_harness.chat import HarnessChatServer
+    from openai_harness.engine import Harness
     from openai_harness.memory import UserMemory
     from openai_harness.store import SQLiteStore
 
@@ -105,15 +105,14 @@ def main(argv=None):
     max_age = timedelta(days=args.memory_max_age_days) if args.memory_max_age_days > 0 else None
     memory = UserMemory(args.data_dir / "memory", memories_dir=spec.memory_dir, max_age=max_age,
                         max_conversations=REMEMBERED_CONVERSATIONS) if spec.memory_dir else None
-    server = HarnessChatServer(spec, store, client, model=args.model, output_dir=args.data_dir / "threads",
-                               base_url=f"http://localhost:{args.port}", card=check_rows, file_status=file_status,
-                               preferred_output=REPORT, memory=memory, idle_close_s=args.idle_close,
-                               max_turns=args.max_turns)
+    harness = Harness(spec, store, client, model=args.model, output_dir=args.data_dir / "threads", card=check_rows,
+                      file_status=file_status, preferred_output=REPORT, memory=memory, idle_close_s=args.idle_close,
+                      max_turns=args.max_turns)
     scope = ", ".join(sorted(args.namespaces))
     config = {"model": args.model, "tracing": tracing_enabled(), "namespaces": sorted(args.namespaces),
               "idle_close_s": args.idle_close, "placeholder": f"Ask about workloads in {scope}…"}
-    issues = Issues(server, client.health, every_s=args.issue_every) if args.issues == "on" else None
-    app = create_app(server, config=config, port=args.port, jaeger_url=args.jaeger_url if tracing_enabled() else None,
+    issues = Issues(harness, client.health, every_s=args.issue_every) if args.issues == "on" else None
+    app = create_app(harness, config=config, port=args.port, jaeger_url=args.jaeger_url if tracing_enabled() else None,
                      worker=client.info, health=client.health, starting_files=runbooks(),
                      user_header=args.user_header, issues=issues)
     remembering = (f"{' → '.join(args.memory_models)}, kept {f'{args.memory_max_age_days:g} days' if max_age else 'forever'}"

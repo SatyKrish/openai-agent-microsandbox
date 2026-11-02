@@ -30,9 +30,7 @@ function store(key: string, value: string | null) {
 }
 
 function initialConversation(): string | null {
-  // ?thread= is the ChatKit page's link to a conversation.
-  const query = new URLSearchParams(location.search);
-  const linked = query.get("c") || query.get("thread");
+  const linked = new URLSearchParams(location.search).get("c");
   const id = linked || stored("conversation");
   return id && ID.test(id) ? id : null;
 }
@@ -99,6 +97,7 @@ export function App() {
   const [workerDown, setWorkerDown] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const about = useRef<HTMLDialogElement>(null);
+  const linked = useRef(new URLSearchParams(location.search).get("c"));
   const settings = useRef<HTMLDetailsElement>(null);
 
   useEffect(() => { api.config().then(setConfig, () => setNotice("The harness did not answer. Reload when it is back.")); }, []);
@@ -125,7 +124,6 @@ export function App() {
   useEffect(() => {
     refreshThread();
     const url = new URL(location.href);
-    url.searchParams.delete("thread");
     if (current) url.searchParams.set("c", current); else url.searchParams.delete("c");
     history.replaceState(null, "", url);
     store("conversation", current);
@@ -149,6 +147,11 @@ export function App() {
       }
     },
     onTitle: () => refreshList(),
+    // A remembered conversation that is gone opens the start screen; a link to one says why.
+    onMissing: (id) => {
+      setCurrent(null);
+      if (id === linked.current) setNotice("That conversation isn't here: it was deleted, or it isn't yours.");
+    },
   });
   const messages = useMemo(() => toMessages(conversation.entries, conversation.streaming, conversation.running),
     [conversation.entries, conversation.streaming, conversation.running]);
@@ -157,6 +160,7 @@ export function App() {
   const clearPrefill = useCallback(() => setPrefill(null), []);
   const select = useCallback((id: string | null) => {
     setMemoryOpen(false);
+    setNotice(null);
     setCurrent(id);
     if (!wide.matches) setSidebarOpen(false);
   }, []);
@@ -200,7 +204,8 @@ export function App() {
   if (!config) return <div className="ax-loading">{notice || "Loading…"}</div>;
   const summary = conversations.find((item) => item.id === current);
   const scope = (config.namespaces || []).join(", ");
-  const followUps = !conversation.running && messages.length && current ? config.follow_ups || [] : [];
+  // Follow-ups after the agent has answered: not under an issue's opening card.
+  const followUps = !conversation.running && summary?.turns && current ? config.follow_ups || [] : [];
   const days = config.memory_max_age_days;
   return (
     <CardActionsContext.Provider value={cardActions}>
@@ -252,7 +257,6 @@ export function App() {
                   ))}
                 </div>
                 <button type="button" className="link-button" onClick={() => { settings.current!.open = false; about.current?.showModal(); }}>How this works</button>
-                <a className="link-button" href="/chatkit-ui">Open the ChatKit page</a>
               </div>
             </details>
             <button type="button" className="icon-button panel-toggle" aria-label={panelOpen ? "Hide files and trace" : "Show files and trace"}

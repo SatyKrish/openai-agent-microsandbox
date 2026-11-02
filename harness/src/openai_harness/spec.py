@@ -6,21 +6,22 @@ from __future__ import annotations
 
 import hashlib
 import io
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from agents.sandbox import Manifest, SandboxAgent
-from chatkit.types import ThreadMetadata
+
+from .store import Thread
 
 MIB = 1024 * 1024
 
 
 @dataclass
 class Conversation:
-    """One ChatKit thread: its metadata and the host folder that keeps trusted copies."""
+    """A conversation's record and the host folder that keeps trusted copies."""
 
-    thread: ThreadMetadata
+    thread: Thread
     root: Path
 
     @property
@@ -32,10 +33,6 @@ class Conversation:
         return self.thread.metadata
 
     @property
-    def uploads(self) -> list[dict]:
-        return self.metadata.get("uploads", [])
-
-    @property
     def evidence(self) -> list[dict]:
         return self.metadata.get("evidence", [])
 
@@ -43,7 +40,7 @@ class Conversation:
         return self.root / f"turn-{number}"
 
     def host_copy(self, entry: dict) -> Path:
-        """The host's copy of a recorded upload or evidence file, taken before the model could change it."""
+        """The host's copy of a recorded evidence file, taken before the model could change it."""
         return self.turn_dir(entry["turn"]) / entry["path"]
 
 
@@ -76,39 +73,15 @@ class TurnContext:
 
 
 @dataclass(frozen=True)
-class Processor:
-    """Runs on an upload inside the sandbox before the model; its result is stored on the upload under ``key``."""
-
-    key: str
-    run: Callable[[Any, Conversation, dict], Awaitable[dict]]
-    describe: Callable[[dict, dict], str]
-    listing: Callable[[dict, dict], dict] = lambda info, entry: info
-
-
-@dataclass(frozen=True)
-class Uploads:
-    """Accepted upload types: extension to MIME type, with limits and optional processors."""
-
-    types: dict[str, str]
-    hint: str
-    max_bytes: int = 10 * MIB
-    max_count: int = 5
-    # Binary types must start with their signature; every other type must be UTF-8 text.
-    signatures: dict[str, tuple[bytes, str]] = field(default_factory=dict)
-    processors: dict[str, Processor] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class AgentSpec:
     """The agent app's part of a turn. The agent itself is the SandboxAgent ``build_agent`` returns."""
 
     name: str
     build_agent: Callable[[Manifest, Any], SandboxAgent]
-    # (conversation, first message has uploads, workspace root) -> the new workspace's manifest
-    start: Callable[[Conversation, bool, str], Manifest]
+    # (conversation, workspace root) -> the new workspace's manifest
+    start: Callable[[Conversation, str], Manifest]
     instructions: Callable[[Conversation], str] = lambda conversation: ""
     tools: Callable[[TurnContext], list] = lambda turn: []
-    uploads: Uploads | None = None
     check: Callable[[Conversation, dict, dict[str, bytes]], dict | None] = lambda conversation, turn, files: None
     # A failed check -> what the agent is asked, once in the same turn, to correct it; None: no second pass.
     # The first check's result is kept with the turn, so a correction is never shown as a first-time pass.

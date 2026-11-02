@@ -44,7 +44,6 @@ button, select { font: inherit; color: inherit; }
 code, pre { font-family: var(--mono); }
 .mono { font-family: var(--mono); font-size: 12px; }
 .muted { color: var(--muted); }
-.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 :focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
 
 /* Header */
@@ -65,21 +64,11 @@ code, pre { font-family: var(--mono); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: 0 0 8px; }
 .dot.ok { background: var(--ok); }
 .chip.warn .dot { background: var(--warn); }
-#context-chip { max-width: 360px; }
-#context-chip span { overflow: hidden; text-overflow: ellipsis; }
 .icon-button {
   position: relative; width: 36px; height: 36px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
   border: 1px solid transparent; border-radius: 6px; color: var(--ink); background: none; cursor: pointer;
 }
 .icon-button:hover, .icon-button[aria-expanded="true"] { background: var(--sunken); }
-.panel-toggle .count {
-  position: absolute; top: -4px; right: -4px; min-width: 16px; padding: 0 4px; border-radius: 8px; font-size: 11px; font-weight: 600;
-  line-height: 16px; text-align: center; background: var(--accent); color: #FFFFFF;
-}
-.primary {
-  display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 12px; white-space: nowrap;
-  border: 0; border-radius: 6px; background: var(--primary-bg); color: var(--primary-ink); font-size: 13px; font-weight: 500; cursor: pointer;
-}
 .popover-host { position: relative; }
 .popover {
   position: absolute; right: 0; top: calc(100% + 6px); z-index: 40; width: max-content; max-width: min(320px, calc(100vw - 32px));
@@ -98,7 +87,7 @@ code, pre { font-family: var(--mono); }
 .link-button:hover { text-decoration: underline; }
 .link-button.danger { color: var(--err); }
 
-/* Memory: shown over the chat like ChatKit's history, one entry per remembered conversation, grouped by day. */
+/* Memory: shown in place of the conversation, one entry per remembered conversation, grouped by day. */
 .memory-view { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; background: var(--surface); }
 .memory-view-head { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 6px 12px; }
 .memory-view-head h2 { flex: 1 1 auto; margin: 0; font-size: 15px; font-weight: 500; }
@@ -121,19 +110,14 @@ code, pre { font-family: var(--mono); }
   white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.5; color: var(--ink-2); }
 .memory-actions { display: flex; flex-wrap: wrap; gap: 8px 20px; }
 
-/* Layout: the chat alone, centered, until the panel opens beside it */
-.workspace { position: relative; flex: 1 1 auto; display: flex; gap: 12px; padding: 12px; min-height: 0; }
+
+/* The conversation and the side panel: the page's own layout (web/src/app.css) places them */
 .chat-pane, .side-panel {
   min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface);
   border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
 }
 .chat-pane { position: relative; flex: 1 1 auto; max-width: 880px; margin: 0 auto; width: 100%; }
-.workspace[data-panel="open"] .chat-pane { flex: 0 1 46%; max-width: none; margin: 0; min-width: 360px; }
 .side-panel { flex: 1 1 54%; }
-/* ChatKit keeps room for its greeting and composer; the start screen's board below shrinks and scrolls. */
-.chat-host { flex: 1 1 auto; min-height: 240px; }
-.chat-host openai-chatkit { display: block; width: 100%; height: 100%; }
-.chat-error { margin: 16px; color: var(--err); }
 .banner { margin: 0; padding: 10px 16px; border-top: 1px solid var(--warn-border); background: var(--warn-bg); color: var(--warn); font-size: 13px; }
 .banner.err { border-top-color: var(--err-border); background: var(--err-bg); color: var(--err); }
 .suggestions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 8px 16px; border-top: 1px solid var(--border-soft); font-size: 12.5px; }
@@ -262,7 +246,6 @@ code, pre { font-family: var(--mono); }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .confirm-actions button { min-height: 36px; padding: 0 14px; border-radius: 6px; cursor: pointer; font-weight: 500; }
 .confirm-actions .secondary { border: 1px solid var(--border); background: var(--surface); }
-.confirm-actions .danger-button { border: 0; background: #B42318; color: #FFFFFF; }
 .about { max-width: 560px; }
 .about-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0 0 14px; font-size: 13px; }
 .about-facts dt { color: var(--muted); }
@@ -276,10 +259,7 @@ code, pre { font-family: var(--mono); }
   .brand-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .suggestions { padding: 6px 12px; flex-wrap: nowrap; overflow-x: auto; }
   .suggestions button { white-space: nowrap; }
-  .primary span { display: none; }
-  .primary { padding: 0 10px; }
-  .workspace { padding: 6px; }
-  .chat-pane, .workspace[data-panel="open"] .chat-pane { flex: 1 1 auto; max-width: none; min-width: 0; margin: 0; }
+  .chat-pane { flex: 1 1 auto; max-width: none; min-width: 0; margin: 0; }
   .side-panel { position: absolute; inset: 6px; z-index: 30; box-shadow: 0 12px 32px rgba(0, 0, 0, .25); }
   .doc { padding: 20px 16px 36px; }
 }

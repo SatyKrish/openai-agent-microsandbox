@@ -15,9 +15,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from chatkit.types import ThreadMetadata
-
-from openai_harness.store import SHARED
+from openai_harness.store import SHARED, Thread
 
 logger = logging.getLogger(__name__)
 _INTERNAL: dict = {}  # the harness's own context: it sees every conversation
@@ -50,10 +48,9 @@ def _time(iso: str) -> str:
 class Issues:
     """Keeps one issue open per unhealthy workload, from the worker's health summary every ``every_s``."""
 
-    def __init__(self, server, health, *, every_s: float = 30):
-        """``server`` is the harness's engine, or a server that reads through to it."""
-        self.server = server
-        self.store = server.store
+    def __init__(self, harness, health, *, every_s: float = 30):
+        self.harness = harness
+        self.store = harness.store
         self.health = health
         self.every_s = every_s
         self._lock = asyncio.Lock()
@@ -68,15 +65,10 @@ class Issues:
                 logger.warning("Checking for issues failed: %s", error)
             await asyncio.sleep(self.every_s)
 
-    async def all(self) -> list[ThreadMetadata]:
+    async def all(self) -> list[Thread]:
         """Every issue, oldest first."""
-        found, after = [], None
-        while True:
-            page = await self.store.load_threads(100, after, "asc", _INTERNAL)
-            found += [thread for thread in page.data if thread.metadata.get("issue")]
-            if not page.has_more:
-                return found
-            after = page.after
+        return [thread for thread in await self.store.load_threads(_INTERNAL, newest_first=False)
+                if thread.metadata.get("issue")]
 
     async def sync(self, summary: dict) -> None:
         async with self._lock:
@@ -100,13 +92,12 @@ class Issues:
                  "name": workload["name"], "state": "open", "state_seen": workload["state"], "reasons": reasons,
                  "opened_by": "health board", "opened_at": read_at}
         title = f"{workload['name']}: {reasons[0] if reasons else workload['state']}"
-        thread = ThreadMetadata(id=self.store.generate_thread_id(_INTERNAL), created_at=datetime.now(),
-                                title=title[:60], metadata={"owner": SHARED, "issue": issue})
+        thread = Thread.new(title=title[:60], metadata={"owner": SHARED, "issue": issue})
         await self.store.save_thread(thread, _INTERNAL)
         await self._post(thread, self._opened_card(issue, workload, read_at))
         logger.info("Opened issue %s for %s", thread.id, issue["fingerprint"])
 
-    async def _recover(self, thread: ThreadMetadata, workload: dict, read_at: str) -> None:
+    async def _recover(self, thread: Thread, workload: dict, read_at: str) -> None:
         thread = await self.store.load_thread(thread.id, _INTERNAL)
         issue = thread.metadata["issue"]
         issue.update(state="recovered", recovered_at=read_at)
@@ -150,8 +141,8 @@ class Issues:
                      "value": f"Opened by the health board · read by the sandbox worker at {_time(read_at)}"})
         return {"type": "Card", "size": "full", "children": rows}
 
-    async def _post(self, thread: ThreadMetadata, card: dict) -> None:
-        await self.server.post_card(thread.id, card)
+    async def _post(self, thread: Thread, card: dict) -> None:
+        await self.harness.post_card(thread.id, card)
 
     async def listing(self) -> list[dict]:
         """Issues for the page: which workload, its state, and the conversation to open."""

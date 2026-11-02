@@ -186,9 +186,9 @@ async def evidence_rpcs(client, ids) -> None:
 
 async def harness_check(client, namespaces) -> list[str]:
     """Check 4: the findings check rejects another conversation's evidence. Returns the conversations' workspaces."""
-    from openai_harness.chat import HarnessChatServer
+    from openai_harness.engine import Harness
     from openai_harness.store import SQLiteStore
-    from openai_harness.testing import Calls, events, message, shell
+    from openai_harness.testing import Calls, ask, shell
 
     from .agent.spec import REPORT, make_spec
     from .ui.card import check_rows, file_status
@@ -204,34 +204,33 @@ async def harness_check(client, namespaces) -> list[str]:
 
     async def conversation(name, model, text="Investigate payments."):
         store = SQLiteStore(data / name / "threads.sqlite3")
-        chat = HarnessChatServer(make_spec(namespaces), store, client, model=model, output_dir=data / name / "threads",
-                                 model_label="scripted", card=check_rows, file_status=file_status, preferred_output=REPORT)
-        stream = await events(chat, {"type": "threads.create", "params": {"input": message(text)}})
-        thread_id = next(event["thread"]["id"] for event in stream if event["type"] == "thread.created")
-        return chat, thread_id
+        harness = Harness(make_spec(namespaces), store, client, model=model, output_dir=data / name / "threads",
+                          model_label="scripted", card=check_rows, file_status=file_status, preferred_output=REPORT)
+        thread_id, _ = await ask(harness, text)
+        return harness, thread_id
 
-    async def last_check(chat, thread_id):
-        thread = await chat.store.load_thread(thread_id, {})
+    async def last_check(harness, thread_id):
+        thread = await harness.store.load_thread(thread_id, {})
         return thread, thread.metadata["turns"][-1].get("check") or {}
 
     model_b = Calls([shell("kubectl get pods -n payments -o wide"),
                      ("pod_logs", {"pod": "deploy/payments-processor", "namespace": "payments"}),
                      shell("kubectl get events -n payments")], answer="Read.")
-    chat_b, thread_b = await conversation("B", model_b)
-    thread, _ = await last_check(chat_b, thread_b)
+    harness_b, thread_b = await conversation("B", model_b)
+    thread, _ = await last_check(harness_b, thread_b)
     workspaces.append(thread.metadata["workspace"].split("/", 1)[1])
     events_copy = (data / "B" / "threads" / thread_b / "turn-1" / EVENTS).read_text()
     pods_copy = (data / "B" / "threads" / thread_b / "turn-1" / PODS).read_text()
     # A line only B's events evidence holds: pods output never has an event's columns.
     quote = next(line.strip() for line in events_copy.splitlines()[1:] if line.strip() and line.strip() not in pods_copy)
     model_b.calls = [shell(write_findings(EVENTS, quote))]
-    await events(chat_b, {"type": "threads.add_user_message", "params": {"thread_id": thread_b, "input": message("Write it up.")}})
-    _, check = await last_check(chat_b, thread_b)
+    await ask(harness_b, "Write it up.", conversation=thread_b)
+    _, check = await last_check(harness_b, thread_b)
     report(check.get("status") == "evidence_passed", "B's findings citing its own events evidence pass", check.get("status"))
 
     model_a1 = Calls([shell("kubectl get pods -n payments -o wide"), shell(write_findings(EVENTS, quote))], answer="Done.")
-    chat_a1, thread_a1 = await conversation("A1", model_a1)
-    thread, check = await last_check(chat_a1, thread_a1)
+    harness_a1, thread_a1 = await conversation("A1", model_a1)
+    thread, check = await last_check(harness_a1, thread_a1)
     workspaces.append(thread.metadata["workspace"].split("/", 1)[1])
     reasons = [failure["reason"] for failure in check.get("failures") or []]
     report(check.get("status") == "failed" and any("never recorded" in reason for reason in reasons),
@@ -240,8 +239,8 @@ async def harness_check(client, namespaces) -> list[str]:
     planted = base64.b64encode(quote.encode()).decode()
     model_a2 = Calls([shell("kubectl get pods -n payments -o wide"),
                       shell(f"echo {planted} | base64 -d >> {PODS} && {write_findings(PODS, quote)}")], answer="Done.")
-    chat_a2, thread_a2 = await conversation("A2", model_a2)
-    thread, check = await last_check(chat_a2, thread_a2)
+    harness_a2, thread_a2 = await conversation("A2", model_a2)
+    thread, check = await last_check(harness_a2, thread_a2)
     workspace = thread.metadata["workspace"].split("/", 1)[1]
     workspaces.append(workspace)
     tampered = (await client.transport.read_file(workspace, f"{client.workspace_root(workspace)}/{PODS}")).content
@@ -250,9 +249,9 @@ async def harness_check(client, namespaces) -> list[str]:
            "A quoting B's text from its own tampered copy fails the check",
            f"workspace copy tampered: {quote.encode() in tampered}; {'; '.join(reasons)[:80]}")
 
-    for chat, thread_id in ((chat_b, thread_b), (chat_a1, thread_a1), (chat_a2, thread_a2)):
-        await chat.store.delete_thread(thread_id, {})
-        chat.store.close()
+    for harness, thread_id in ((harness_b, thread_b), (harness_a1, thread_a1), (harness_a2, thread_a2)):
+        await harness.store.delete_thread(thread_id, {})
+        harness.store.close()
     return workspaces
 
 

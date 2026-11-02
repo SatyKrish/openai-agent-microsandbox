@@ -8,8 +8,7 @@ one runs are answered together in the next turn, and every page, terminal or oth
 listens sees the same events.
 
 Each turn continues the conversation's open sandbox session or opens it (creating the workspace on
-its MXC sandbox worker the first time), copies uploads into it, runs the agent loop with the
-conversation's SDK session history (every command in a fresh MXC container), fetches the cluster
+its MXC sandbox worker the first time), runs the agent loop with the conversation's SDK session history (every command in a fresh MXC container), fetches the cluster
 reads the worker recorded as evidence, copies the agent's output folders to the host and runs the
 agent's host check.
 
@@ -31,9 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import io
 import itertools
-import json
 import logging
 import re
 import secrets
@@ -59,7 +56,7 @@ from agent_mxc.tracing import otel_trace_id, tracing_enabled
 from .memory import UserMemory, user_key
 from .spec import AgentSpec, Conversation, TurnContext
 from .steps import ICONS, clipped, describe_call, describe_output, fenced, headline, step_title
-from .uploads import UploadRejected, UploadStore, upload_name
+from .store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 _MAX_FILES = 40
@@ -156,8 +153,13 @@ class _Message:
     entry_id: str
     text: str
     requester: str | None
-    attachments: list
     done: asyncio.Future = field(default_factory=lambda: asyncio.get_running_loop().create_future())
+
+
+class Sent(NamedTuple):
+    """A message sent to a conversation."""
+    message: str          # its transcript entry
+    turn: asyncio.Future  # the turn that answers it
 
 
 class _Steps:
@@ -190,10 +192,9 @@ class _Steps:
 
 
 class Harness:
-    """Runs an agent's conversations. ``store`` keeps conversations and transcripts (``SQLiteStore``)."""
+    """Runs an agent's conversations. ``store`` keeps conversations and transcripts."""
 
-    def __init__(self, spec: AgentSpec, store, client, *, model, output_dir: Path, uploads: UploadStore | None = None,
-                 model_label: str | None = None, max_turns: int = 25,
+    def __init__(self, spec: AgentSpec, store: SQLiteStore, client, *, model, output_dir: Path, model_label: str | None = None, max_turns: int = 25,
                  card: Callable[[Conversation, dict, set[str]], list[dict]] | None = None,
                  file_status: Callable[[Conversation, dict], dict[str, dict]] | None = None,
                  preferred_output: str | None = None, memory: UserMemory | None = None, idle_close_s: float = 300):
@@ -203,7 +204,6 @@ class Harness:
         self.model = model
         self.model_label = model_label or str(model)
         self.output_dir = Path(output_dir)
-        self.uploads = uploads
         self.max_turns = max_turns
         self.card = card
         # path -> {"state": "checked" | "unchecked" | "source", "label": ...}: what the host check covered.
@@ -227,6 +227,8 @@ class Harness:
         self._workers: dict[str, asyncio.Task] = {}
         self._listeners: defaultdict[str, set[asyncio.Queue]] = defaultdict(set)
         self._seq = itertools.count(1)
+        # Deleting a conversation deletes its workspace first.
+        store.on_delete_thread = self.delete_workspace
 
     def conversation(self, thread) -> Conversation:
         return Conversation(thread, self.output_dir / thread.id)
@@ -268,30 +270,18 @@ class Harness:
 
     # ---------- Messages and turns ----------
 
-    async def send(self, thread_id: str, text: str, *, requester: str | None = None, attachments=(),
-                   entry_id: str | None = None) -> asyncio.Future:
-        """Queue a message for the conversation and return a future of the turn that answers it.
-
-        The message is added to the transcript unless ``entry_id`` names one already there. Messages
-        that arrive while a turn runs are answered together, in one turn, once it ends.
-        """
-        if entry_id is None:
-            entry = {"id": new_id("msg"), "kind": "user", "turn": None, "at": _now(), "text": text,
-                     "requested_by": requester}
-            await self.save_entry(thread_id, entry)
-            entry_id = entry["id"]
-        else:
-            # Stored by a UI protocol's own path (ChatKit's): other listeners hear of it here.
-            entry = await self.store.load_entry(thread_id, entry_id)
-            if entry is not None:
-                self.publish(thread_id, {"type": "entry", "turn": None, "entry": entry})
-        message = _Message(entry_id, text, requester, list(attachments))
+    async def send(self, thread_id: str, text: str, *, requester: str | None = None) -> Sent:
+        """Add a message to the conversation's transcript and queue it for the next turn. Messages that
+        arrive while a turn runs are answered together, in one turn, once it ends."""
+        entry = {"id": new_id("msg"), "kind": "user", "turn": None, "at": _now(), "text": text, "requested_by": requester}
+        await self.save_entry(thread_id, entry)
+        message = _Message(entry["id"], text, requester)
         message.done.add_done_callback(_settled)
         self._queues[thread_id].append(message)
         worker = self._workers.get(thread_id)
         if worker is None or worker.done():
             self._workers[thread_id] = asyncio.get_running_loop().create_task(self._work(thread_id))
-        return message.done
+        return Sent(entry["id"], message.done)
 
     def stop(self, thread_id: str) -> bool:
         """Stop the conversation's running turn and drop its waiting messages; returns whether anything stopped."""
@@ -334,7 +324,6 @@ class Harness:
         messages = [message.entry_id for message in batch]
         text = "\n\n".join(message.text for message in batch)
         requester = batch[-1].requester
-        attachments = [item for message in batch for item in message.attachments]
         async with self._locks[thread_id]:
             thread = await self.store.load_thread(thread_id, _INTERNAL)
             if running_elsewhere(thread.metadata, self.running, thread_id):
@@ -343,11 +332,11 @@ class Harness:
                 raise error
             self.running.add(thread_id)
             try:
-                return await self._run(thread, text, attachments, requester, messages)
+                return await self._run(thread, text, requester, messages)
             finally:
                 self.running.discard(thread_id)
 
-    async def _run(self, thread, text: str, attachments: list, requester: str | None, messages: list[str]) -> dict:
+    async def _run(self, thread, text: str, requester: str | None, messages: list[str]) -> dict:
         conversation = self.conversation(thread)
         meta = thread.metadata
         if not thread.title:
@@ -360,7 +349,7 @@ class Harness:
             "sdk_trace_id": sdk_trace_id if traced else None,
             "otel_trace_id": otel_trace_id(sdk_trace_id) if traced else None,
             "lifecycle": "reopened" if meta.get("sandbox") else "created",
-            "model": self.model_label, "tools": [], "files": [], "uploads": [], "check": None,
+            "model": self.model_label, "tools": [], "files": [], "check": None,
             "requested_by": requester, "messages": messages,
         }
         turns.append(turn)
@@ -375,7 +364,7 @@ class Harness:
         try:
             with trace(f"{self.spec.name} turn", trace_id=sdk_trace_id, group_id=thread.id, disabled=not traced):
                 with operation(turn_operation):
-                    await self._run_turn(conversation, turn, text, attachments, steps)
+                    await self._run_turn(conversation, turn, text, steps)
             turn["status"] = "completed"
         except asyncio.CancelledError:
             turn["status"] = "stopped"
@@ -383,9 +372,7 @@ class Harness:
         except Exception as error:
             turn["status"] = "failed"
             turn["error"] = type(error).__name__
-            if isinstance(error, UploadRejected):
-                failure = TurnError(str(error), retry=False)
-            elif isinstance(error, TurnError):
+            if isinstance(error, TurnError):
                 logger.warning("Turn %s of %s failed: %s", turn["number"], thread.id, error)
                 failure = error
             else:
@@ -411,7 +398,7 @@ class Harness:
         self.publish(thread.id, {"type": "turn", "turn": turn["number"], "status": "shown", "messages": messages})
         return turn
 
-    async def _run_turn(self, conversation: Conversation, turn: dict, text: str, attachments: list, steps: _Steps):
+    async def _run_turn(self, conversation: Conversation, turn: dict, text: str, steps: _Steps):
         thread, meta = conversation.thread, conversation.metadata
         requester = turn["requested_by"] or "guest"
         opened = self._open.pop(thread.id, None)
@@ -425,7 +412,7 @@ class Harness:
             await steps.add("Continued in the open workspace", status="done",
                             detail=f"Same session `{meta['workspace']}`, still open from the last turn.")
             try:
-                await self._continue_turn(conversation, turn, text, attachments, session, steps)
+                await self._continue_turn(conversation, turn, text, session, steps)
             finally:
                 self._park(thread.id, session, meta.get("owner"))
             return
@@ -434,7 +421,7 @@ class Harness:
         began = time.monotonic()
         if created:
             workspace_id = self.client.new_workspace_id()
-            manifest = self.spec.start(conversation, bool(attachments), self.client.workspace_root(workspace_id))
+            manifest = self.spec.start(conversation, self.client.workspace_root(workspace_id))
             session = await self.client.create(manifest=manifest, options=MXCSandboxOptions(workspace_id=workspace_id))
             # Save immediately: a failed first turn must still be deletable.
             meta["sandbox"] = self.client.serialize_session_state(session.state)
@@ -464,30 +451,13 @@ class Harness:
                 detail += f" Seeded with the agent's memory from earlier conversations ({remembered} files)."
             await steps.update(entry, index, title=f"{verb} the workspace · {seconds:.1f} s", detail=detail,
                                status="done")
-            await self._continue_turn(conversation, turn, text, attachments, session, steps)
+            await self._continue_turn(conversation, turn, text, session, steps)
         finally:
             self._park(thread.id, session, meta.get("owner"))
 
-    async def _continue_turn(self, conversation: Conversation, turn: dict, text: str, attachments: list, session,
-                             steps: _Steps):
-        """The turn itself, in an open session: uploads, the agent loop, evidence, outputs and the check."""
+    async def _continue_turn(self, conversation: Conversation, turn: dict, text: str, session, steps: _Steps):
+        """The turn itself, in an open session: the agent loop, evidence, outputs and the check."""
         thread, meta = conversation.thread, conversation.metadata
-        if attachments:
-            noun = "upload" if len(attachments) == 1 else "uploads"
-            entry, index = await steps.add(f"Copying {len(attachments)} {noun} into the workspace")
-            added = await self._store_uploads(session, conversation, turn, attachments)
-            described = [(item, self._describe_upload(item)) for item in added]
-            listing = "\n".join(f"{item['path']}  {item['bytes']} bytes  sha256 {item['sha256'][:12]}…"
-                                + (f"  {summary}" if summary else "") for item, summary in described)
-            await steps.update(entry, index, title=f"Copied {len(added)} {noun} to inputs/uploads/",
-                               detail=fenced(listing), status="done")
-            # Show what the sandbox made of the first upload while the model reads it.
-            self.publish(thread.id, {"type": "effect", "turn": turn["number"], "name": "open_file",
-                                     "data": {"thread_id": thread.id, "turn": turn["number"], "path": added[0]["path"]}})
-            text += "\n\n[Uploaded to the workspace this turn: " + ", ".join(
-                f"{item['path']} ({item['bytes']} bytes" + (f"; {summary}" if summary else "") + ")"
-                for item, summary in described) + "]"
-
         harness_tools = list(self.spec.tools(TurnContext(conversation, turn, session)))
         agent = self.spec.build_agent(session.state.manifest, self.model)
         extra = self.spec.instructions(conversation)
@@ -626,66 +596,6 @@ class Harness:
                                   "changed": True, "evidence": True, "command": entry["command"],
                                   "recorded_at": entry.get("recorded_at")})
 
-    def _describe_upload(self, entry: dict) -> str:
-        processors = self.spec.uploads.processors if self.spec.uploads else {}
-        return "; ".join(processor.describe(entry[processor.key], entry)
-                         for processor in processors.values() if processor.key in entry)
-
-    async def _store_uploads(self, session, conversation: Conversation, turn: dict, attachments: list) -> list[dict]:
-        """Stage new uploads once; retries restore the original bytes under the same name."""
-        policy = self.uploads.policy()
-        uploads = conversation.metadata.setdefault("uploads", [])
-        by_id = {item["attachment_id"]: item for item in uploads if item.get("attachment_id")}
-        taken = {item["name"] for item in uploads}
-        destination = conversation.turn_dir(turn["number"])
-        added = []
-        for attachment in attachments:
-            entry = by_id.get(attachment.id)
-            is_new = entry is None
-            if is_new:
-                data = self.uploads.read_file(attachment.id)
-                name = upload_name(attachment.name, policy)
-                stem, extension = Path(name).stem, Path(name).suffix
-                counter = 2
-                while name in taken:
-                    name, counter = f"{stem}-{counter}{extension}", counter + 1
-                taken.add(name)
-                entry = {"attachment_id": attachment.id, "name": name, "path": f"inputs/uploads/{name}",
-                         "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "turn": turn["number"]}
-            else:
-                try:
-                    data = conversation.host_copy(entry).read_bytes()
-                except FileNotFoundError:
-                    raise UploadRejected("The retained upload is unavailable; attach the file again.") from None
-                if len(data) != entry["bytes"] or hashlib.sha256(data).hexdigest() != entry["sha256"]:
-                    raise UploadRejected("The retained upload changed; attach the file again.")
-            await session.write(Path(entry["path"]), io.BytesIO(data))
-            target = destination / entry["path"]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            processor = policy.processors.get(Path(entry["name"]).suffix)
-            if processor is not None:
-                entry[processor.key] = await processor.run(session, conversation, entry)
-            if is_new:
-                uploads.append(entry)
-                by_id[attachment.id] = entry
-            added.append(entry)
-            turn["uploads"].append(entry["name"])
-            turn["files"].append({"path": entry["path"], "bytes": entry["bytes"], "sha256": entry["sha256"],
-                                  "new": is_new, "changed": is_new, "upload": True,
-                                  **({processor.key: entry[processor.key]} if processor else {})})
-        listing = {"files": []}
-        for item in uploads:
-            processor = policy.processors.get(Path(item["name"]).suffix)
-            info = {processor.key: processor.listing(item[processor.key], item)} if processor and processor.key in item else {}
-            listing["files"].append({**{key: item[key] for key in ("name", "bytes", "sha256")}, **info})
-        await session.write(Path("inputs/uploads/MANIFEST.json"), io.BytesIO(json.dumps(listing, indent=2).encode()))
-        # Persist the attachment-to-host-copy mapping before removing temporary bytes.
-        await self.store.save_thread(conversation.thread, _INTERNAL)
-        for attachment in attachments:
-            await self.uploads.delete_attachment(attachment.id, {})
-        return added
-
     async def _collect(self, session, conversation: Conversation, turn: dict, *, again: bool = False) -> dict[str, bytes]:
         """Copy the agent's output folders to the host while the sandbox is still running; ``again`` replaces the
         turn's earlier copies, after a corrective pass."""
@@ -698,7 +608,7 @@ class Harness:
                     for item in earlier["files"]}
         destination = conversation.turn_dir(turn["number"])
         if again:
-            turn["files"] = [item for item in turn["files"] if item.get("evidence") or item.get("upload")]
+            turn["files"] = [item for item in turn["files"] if item.get("evidence")]
         collected = {}
         for name in names[:_MAX_FILES]:
             try:
@@ -721,8 +631,6 @@ class Harness:
         thread = conversation.thread
         changed = {item["path"] for item in turn["files"] if item.get("changed")}
         children = []
-        if turn["uploads"]:
-            children.append({"type": "Text", "size": "sm", "value": "Uploaded to inputs/uploads/: " + ", ".join(turn["uploads"])})
         rows = self.card(conversation, turn, changed) if self.card is not None else []
         if (not any(_has_badge(row) for row in rows) and turn["status"] == "completed"
                 and any(path.startswith("output/") for path in changed)):

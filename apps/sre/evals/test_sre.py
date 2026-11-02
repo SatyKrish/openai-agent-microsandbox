@@ -8,18 +8,16 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from chatkit.types import ThreadMetadata
-
 from agents.sandbox import MemoryGenerateConfig
 
 from apps.sre.agent.agent import CONSOLIDATE_MODEL, EXTRACT_MODEL
 from apps.sre.agent.lib import findings
 from apps.sre.agent.spec import REPORT, make_spec, runbooks
 from apps.sre.ui.card import check_rows, file_status
-from openai_harness.chat import HarnessChatServer
+from openai_harness.engine import Harness
 from openai_harness.spec import Conversation
-from openai_harness.store import SQLiteStore
-from openai_harness.testing import Calls, events, message, shell
+from openai_harness.store import SQLiteStore, Thread
+from openai_harness.testing import Calls, ask, shell, titles
 
 TRIAGE = Path(__file__).resolve().parents[1] / "agent/skills/kubernetes-triage/scripts/triage.py"
 LOGS = "[FATAL] Payments startup failed: Missing required env var DATABASE_URL\n"
@@ -42,7 +40,7 @@ def test_triage_script_lists_unhealthy_pods(tmp_path):
 def test_every_workspace_starts_with_the_runbooks(tmp_path):
     books = runbooks()
     assert "runbooks/payments.md" in books and b"DATABASE_URL" in books["runbooks/payments.md"]
-    manifest = make_spec({"payments"}).start(None, False, "/sandboxes/active/s-x")
+    manifest = make_spec({"payments"}).start(None, "/sandboxes/active/s-x")
     assert set(manifest.entries) == {"evidence", "output", "work", "runbooks"}
 
 
@@ -51,7 +49,7 @@ def conversation_with(tmp_path, text):
     host = tmp_path / "thr" / "turn-1" / entry["path"]
     host.parent.mkdir(parents=True)
     host.write_text(text)
-    thread = ThreadMetadata(id="thr", created_at=datetime.now(), metadata={"evidence": [entry]})
+    thread = Thread(id="thr", created_at=datetime.now(), metadata={"evidence": [entry]})
     return Conversation(thread, tmp_path / "thr")
 
 
@@ -78,6 +76,10 @@ def test_findings_quotes_are_checked_against_the_journal_copy(tmp_path):
     # A long label is cut to 80 characters and says so.
     long = findings.check(conversation, findings_file(quote, resource="deployment/payments-processor · " + "x" * 80))
     assert len(long["results"][0]["resource"]) == 80 and long["results"][0]["resource"].endswith("x…")
+    # Each result names its finding's place, since two findings may name the same resource.
+    listed = {"output/findings.json": json.dumps({"findings": ["not an object", {"resource": "deployment/a", "evidence": [quote]},
+                                                               {"resource": "deployment/a", "evidence": [quote]}]}).encode()}
+    assert [result["index"] for result in findings.check(conversation, listed)["results"]] == [1, 2]
     assert findings.check(conversation, {"output/findings.md": b"x"})["status"] == "no_findings"
     # A failed check asks the agent once to re-read the file it cited.
     prompt = findings.retry_prompt(checked)
@@ -103,15 +105,12 @@ async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(
               f"&& echo forged > {LOGS_FILE}"),
     ], answer="payments-processor crashes: DATABASE_URL is not set.")
     store = SQLiteStore(tmp_path / "threads.sqlite3")
-    chat = HarnessChatServer(make_spec({"payments"}), store, worker.client(), model=model,
-                             output_dir=tmp_path / "threads", model_label="scripted", card=check_rows,
-                             file_status=file_status, preferred_output=REPORT)
+    harness = Harness(make_spec({"payments"}), store, worker.client(), model=model, output_dir=tmp_path / "threads",
+                      model_label="scripted", card=check_rows, file_status=file_status, preferred_output=REPORT)
     try:
-        stream = await events(chat, {"type": "threads.create", "params": {
-            "input": message("Why is payments-processor crashing?")}})
+        thread_id, stream = await ask(harness, "Why is payments-processor crashing?")
         assert not [event for event in stream if event["type"] == "error"], stream
         assert "[mxc-worker] saved as evidence/001" in model.outputs[0]
-        thread_id = next(event["thread"]["id"] for event in stream if event["type"] == "thread.created")
         thread = await store.load_thread(thread_id, {})
         turn = thread.metadata["turns"][0]
         assert [item["path"] for item in thread.metadata["evidence"]] == [PODS_FILE, LOGS_FILE, API_LOGS_FILE]
@@ -131,10 +130,9 @@ async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(
         assert "1 finding, 2 quotes found in the evidence" in card
         assert '"value": "CrashLoopBackOff"' in card and '"value": "deployment/payments-processor"' in card
         # Steps name only what is unusual: here, the harness tool.
-        titles = [event["update"]["task"]["title"] for event in stream
-                  if (event.get("update") or {}).get("type") == "workflow.task.updated"]
-        assert any(title.startswith("pod_logs ") and title.endswith(" · harness") for title in titles)
-        assert "kubectl get pods -n payments -o wide" in titles
+        shown = titles(stream)
+        assert any(title.startswith("pod_logs ") and title.endswith(" · harness") for title in shown)
+        assert "kubectl get pods -n payments -o wide" in shown
         assert turn["check"]["summary"] == [{"resource": "deployment/payments-processor", "problem": "CrashLoopBackOff",
                                              "verified": True}]
         assert "the causes are the agent's reasoning" in card
@@ -142,8 +140,7 @@ async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(
                                                             "sandbox", "sandbox"]
         # A second turn picks up only the new reads.
         model.calls = [shell("kubectl get events -n payments")]
-        stream = await events(chat, {"type": "threads.add_user_message", "params": {
-            "thread_id": thread_id, "input": message("Any events?")}})
+        _, stream = await ask(harness, "Any events?", conversation=thread_id)
         assert not [event for event in stream if event["type"] == "error"]
         thread = await store.load_thread(thread_id, {})
         assert [item["seq"] for item in thread.metadata["evidence"]] == [1, 2, 3, 4]
@@ -159,26 +156,23 @@ def test_the_ui_serves_its_own_page_and_the_health_summary(worker, tmp_path):
 
     store = SQLiteStore(tmp_path / "threads.sqlite3")
     client = worker.client()
-    chat = HarnessChatServer(make_spec({"payments"}), store, client, model=Calls(), output_dir=tmp_path / "threads")
-    app = create_app(chat, config={"model": "scripted"}, port=8001, jaeger_url=None, worker=client.info,
+    harness = Harness(make_spec({"payments"}), store, client, model=Calls(), output_dir=tmp_path / "threads")
+    app = create_app(harness, config={"model": "scripted"}, port=8001, jaeger_url=None, worker=client.info,
                      health=client.health)
     try:
         with TestClient(app, base_url="http://localhost:8001") as browser:
-            # The page is the SRE UI's own, built from web/ into static/app; a checkout that has not built it serves
-            # the ChatKit page at / as well. The ChatKit page is always at /chatkit-ui. The harness serves the API.
-            chatkit = browser.get("/chatkit-ui")
-            assert chatkit.status_code == 200 and "<title>SRE agent</title>" in chatkit.text
-            assert "/static/app.js" in chatkit.text and chatkit.headers["cache-control"] == "no-store"
+            # The page is the SRE UI's own, built from web/ into static/app (make page); a checkout that has not
+            # built it says so. The harness serves the API.
             page = browser.get("/")
-            assert page.status_code == 200 and "<title>SRE agent</title>" in page.text
             built = Path(__file__).resolve().parents[1] / "ui" / "static" / "app" / "index.html"
             if built.is_file():
-                assert '<div id="root"></div>' in page.text and "/static/app.js" not in page.text
+                assert page.status_code == 200 and "<title>SRE agent</title>" in page.text
+                assert '<div id="root"></div>' in page.text and page.headers["cache-control"] == "no-store"
                 script = page.text.split('src="', 1)[1].split('"', 1)[0]
                 assert script.startswith("/static/app/assets/") and browser.get(script).status_code == 200
             else:
-                assert page.text == chatkit.text
-            assert 'from "./sre.js"' in browser.get("/static/app.js").text
+                assert page.status_code == 503 and "make page" in page.text
+            assert browser.get("/chatkit-ui").status_code == 404 and browser.get("/chatkit").status_code == 404
             assert "export async function renderHome" in browser.get("/static/sre.js").text
             assert browser.get("/static/app.css").status_code == 200 and browser.get("/harness/app.js").status_code == 404
             config = browser.get("/api/config").json()
@@ -216,15 +210,14 @@ def test_the_agent_keeps_compaction_and_memory_when_asked():
 async def test_a_memory_enabled_agent_runs_before_any_memory_exists(worker, tmp_path):
     """The first conversation has no memory_summary.md yet; the SDK's Memory capability must treat that as empty."""
     store = SQLiteStore(tmp_path / "threads.sqlite3")
-    chat = HarnessChatServer(make_spec({"payments"}, memory_models=(EXTRACT_MODEL, CONSOLIDATE_MODEL)), store,
-                             worker.client(),
-                             model=Calls([shell("ls")], answer="Done."), output_dir=tmp_path / "threads")
+    harness = Harness(make_spec({"payments"}, memory_models=(EXTRACT_MODEL, CONSOLIDATE_MODEL)), store, worker.client(),
+                      model=Calls([shell("ls")], answer="Done."), output_dir=tmp_path / "threads")
     try:
-        stream = await events(chat, {"type": "threads.create", "params": {"input": message("Hello")}})
+        _, stream = await ask(harness, "Hello")
         assert not [event for event in stream if event["type"] == "error"], stream
     finally:
         # Closing would run the SDK's memory generation with a live model; drop the session instead.
-        for opened in chat._open.values():
+        for opened in harness._open.values():
             opened.closer.cancel()
         store.close()
 
@@ -249,9 +242,9 @@ async def test_the_health_board_opens_one_shared_issue_per_unhealthy_workload(wo
     from openai_harness.store import SHARED
 
     store = SQLiteStore(tmp_path / "threads.sqlite3", admins=frozenset({"lead@example.com"}))
-    chat = HarnessChatServer(make_spec({"payments"}), store, worker.client(), model=Calls([shell("echo looking")]),
-                             output_dir=tmp_path / "threads")
-    issues = Issues(chat, None)
+    harness = Harness(make_spec({"payments"}), store, worker.client(), model=Calls([shell("echo looking")]),
+                      output_dir=tmp_path / "threads")
+    issues = Issues(harness, None)
     try:
         failing = workload("payments-ledger", "failing", ["ImagePullBackOff"])
         await issues.sync(health_summary(failing, workload("payments-api", "healthy", ready=1)))
@@ -261,8 +254,7 @@ async def test_the_health_board_opens_one_shared_issue_per_unhealthy_workload(wo
         assert opened["title"] == "payments-ledger: ImagePullBackOff"
 
         # Opened without a model: a card of what the worker read, with the question to investigate it.
-        items = (await store.load_thread_items(opened["thread_id"], None, 10, "asc", {})).data
-        card = json.dumps(items[0].widget.model_dump())
+        card = json.dumps((await store.load_entries(opened["thread_id"], {}))[0]["card"])
         assert "ImagePullBackOff, 3 restarts" in card and "\x1b" not in card and "investigate_issue" in card
         assert "Why is deployment payments-ledger in payments failing (ImagePullBackOff)?" in card
 
@@ -270,12 +262,11 @@ async def test_the_health_board_opens_one_shared_issue_per_unhealthy_workload(wo
         thread = await store.load_thread(opened["thread_id"], {"user": "bo@example.com"})
         assert thread.metadata["owner"] == SHARED
         for user in ("ana@example.com", "bo@example.com", None):
-            assert opened["thread_id"] in [item.id for item in (await store.load_threads(10, None, "asc", {"user": user})).data]
+            assert opened["thread_id"] in [item.id for item in await store.load_threads({"user": user})]
         with pytest.raises(PermissionError):
             await store.delete_thread(opened["thread_id"], {"user": "bo@example.com"})
-        assert "issue the health board opened" in issue_context(chat.conversation(thread))
-        stream = await events(chat, {"type": "threads.add_user_message", "params": {
-            "thread_id": opened["thread_id"], "input": message("Why?")}}, user="bo@example.com")
+        assert "issue the health board opened" in issue_context(harness.conversation(thread))
+        _, stream = await ask(harness, "Why?", conversation=opened["thread_id"], user="bo@example.com")
         assert not [event for event in stream if event["type"] == "error"], stream
         turn = (await store.load_thread(opened["thread_id"], {})).metadata["turns"][0]
         assert turn["requested_by"] == "bo@example.com"
@@ -289,14 +280,13 @@ async def test_the_health_board_opens_one_shared_issue_per_unhealthy_workload(wo
 
         async def unchanged():
             return health_summary(failing, at="2026-11-01T13:00:00Z")
-        app = create_app(chat, config={"model": "scripted"}, port=8001, jaeger_url=None, issues=Issues(chat, unchanged))
+        app = create_app(harness, config={"model": "scripted"}, port=8001, jaeger_url=None, issues=Issues(harness, unchanged))
         with TestClient(app, base_url="http://localhost:8001") as browser:
             assert browser.get("/api/config").json()["issues"] is True
             assert len(browser.get("/api/issues").json()["issues"]) == 2
-            refused = browser.post("/chatkit", json={"type": "threads.delete", "params": {"thread_id": opened["thread_id"]}})
-            assert refused.status_code == 403
+            assert browser.delete(f"/api/conversations/{opened['thread_id']}").status_code == 403
     finally:
-        await chat.close_all()
+        await harness.close_all()
         store.close()
 
 
@@ -309,13 +299,12 @@ async def test_a_failed_check_gets_one_corrective_pass_and_the_card_says_so(work
              f"> output/findings.json; else printf '%s' '{findings_json('OOMKilled')}' > output/findings.json; "
              "touch work/attempt; fi")
     store = SQLiteStore(tmp_path / "threads.sqlite3")
-    chat = HarnessChatServer(make_spec({"payments"}), store, worker.client(), card=check_rows, file_status=file_status,
-                             model=Calls([shell("kubectl get pods -n payments -o wide"), shell(write)], answer="Done."),
-                             output_dir=tmp_path / "threads")
+    harness = Harness(make_spec({"payments"}), store, worker.client(), card=check_rows, file_status=file_status,
+                      model=Calls([shell("kubectl get pods -n payments -o wide"), shell(write)], answer="Done."),
+                      output_dir=tmp_path / "threads")
     try:
-        stream = await events(chat, {"type": "threads.create", "params": {"input": message("Why is it crashing?")}})
+        thread_id, stream = await ask(harness, "Why is it crashing?")
         assert not [event for event in stream if event["type"] == "error"], stream
-        thread_id = next(event["thread"]["id"] for event in stream if event["type"] == "thread.created")
         turn = (await store.load_thread(thread_id, {})).metadata["turns"][0]
         assert turn["check_first"]["status"] == "failed" and turn["check_first"]["detail"] == "1 of 1 quotes not found"
         assert turn["check"]["status"] == "evidence_passed" and turn["check"]["results"][0]["verified"] is True
@@ -325,7 +314,7 @@ async def test_a_failed_check_gets_one_corrective_pass_and_the_card_says_so(work
         assert "The host check failed: 1 of 1 quotes not found" in shown
         assert "First check: 1 of 1 quotes not found" in shown and "found in the evidence" in shown
     finally:
-        await chat.close_all()
+        await harness.close_all()
         store.close()
 
 

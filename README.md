@@ -88,7 +88,7 @@ findings with their proposed fixes and the quotes the harness checked, the
 kubectl reads and log excerpts the worker recorded as evidence, and the turn's
 trace when tracing is on. Later messages continue in the same workspace. When a
 conversation goes idle, the SDK distils what it learned into your memory,
-which your next conversation starts with; the book button beside history
+which your next conversation starts with; the book button in the top bar
 lists what it remembers, to open or forget. `make loadtest` runs many conversations and users at once;
 `make journal` prints the worker's audit journal; `make teardown` deletes the
 cluster and stops the VM.
@@ -154,7 +154,7 @@ pyproject.toml              uv workspace root: dev tools and test settings, no p
 proto/mxc/sandbox/v1/       The harness/worker gRPC contract
 worker/                     MXC sandbox worker (Node 24, TypeScript), its unit tests and a host runner for tests
 sandbox/                    The provider (openai-agent-mxc): MXCSandboxClient, gRPC transport, tracing
-harness/                    The agent harness (openai-harness): turn engine, memory, HTTP API and a ChatKit adapter, adapted from openai-agent-substrate
+harness/                    The agent harness (openai-harness): turn engine, memory and HTTP API, adapted from openai-agent-substrate
 apps/sre/                   The SRE agent: SandboxAgent, skill, runbooks, findings check, its UI, verify and load test
 deploy/docker/              Worker and harness images
 deploy/kubernetes/          Kustomize base (the pair, RBAC, NetworkPolicies) and kind and AKS overlays

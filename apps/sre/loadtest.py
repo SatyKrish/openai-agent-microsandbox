@@ -27,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -39,44 +40,57 @@ LIVE_QUESTIONS = [
 ]
 
 
-def message(text: str) -> dict:
-    return {"content": [{"type": "input_text", "text": text}], "attachments": [], "inference_options": {}}
-
-
 class Harness:
     """One user's view of a harness: plain HTTP, as the UI page uses it."""
 
     def __init__(self, base: str):
         self.base = base.rstrip("/")
 
-    def chatkit(self, payload: dict) -> list[dict]:
-        request = urllib.request.Request(self.base + "/chatkit", data=json.dumps(payload).encode(), method="POST",
-                                         headers={"content-type": "application/json", "origin": self.base})
-        with urllib.request.urlopen(request, timeout=900) as response:
-            body = response.read().decode()
-        return [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
+    def request(self, method: str, path: str, payload: dict | None = None) -> dict:
+        request = urllib.request.Request(self.base + path, method=method, headers={
+            "content-type": "application/json", "origin": self.base},
+            data=json.dumps(payload).encode() if payload is not None else None)
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
 
     def get(self, path: str):
         with urllib.request.urlopen(self.base + path, timeout=30) as response:
             body = response.read()
         return json.loads(body) if path.startswith("/api/") and "/files/" not in path else body.decode()
 
+    def wait(self, thread_id: str, message: str, timeout: float = 900) -> list[str]:
+        """Wait for the turn that answers ``message`` to end; returns what went wrong, if anything."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            entries = self.get(f"/api/conversations/{thread_id}")["entries"]
+            number = next((entry["turn"] for entry in entries if entry["id"] == message), None)
+            if number:
+                turn = self.get(f"/api/threads/{thread_id}")["turns"][number - 1]
+                if turn["status"] != "running":
+                    return [] if turn["status"] == "completed" else [f"turn {number} {turn['status']} {turn.get('error', '')}"]
+            time.sleep(0.5)
+        return ["no answer in time"]
+
     def start(self, text: str) -> dict:
         began = time.monotonic()
-        events = self.chatkit({"type": "threads.create", "params": {"input": message(text)}})
-        thread_id = next((event["thread"]["id"] for event in events if event["type"] == "thread.created"), None)
-        errors = [event.get("message") for event in events if event["type"] == "error"]
-        return {"thread_id": thread_id, "errors": errors, "wall_s": time.monotonic() - began}
+        try:
+            sent = self.request("POST", "/api/conversations", {"text": text})
+        except urllib.error.URLError as error:
+            return {"thread_id": None, "errors": [str(error)], "wall_s": time.monotonic() - began}
+        errors = self.wait(sent["id"], sent["message"])
+        return {"thread_id": sent["id"], "errors": errors, "wall_s": time.monotonic() - began}
 
     def send(self, thread_id: str, text: str) -> dict:
         began = time.monotonic()
-        events = self.chatkit({"type": "threads.add_user_message",
-                               "params": {"thread_id": thread_id, "input": message(text)}})
-        errors = [event.get("message") for event in events if event["type"] == "error"]
+        try:
+            sent = self.request("POST", f"/api/conversations/{thread_id}/messages", {"text": text})
+        except urllib.error.URLError as error:
+            return {"thread_id": thread_id, "errors": [str(error)], "wall_s": time.monotonic() - began}
+        errors = self.wait(thread_id, sent["message"])
         return {"thread_id": thread_id, "errors": errors, "wall_s": time.monotonic() - began}
 
     def delete(self, thread_id: str) -> None:
-        self.chatkit({"type": "threads.delete", "params": {"thread_id": thread_id}})
+        self.request("DELETE", f"/api/conversations/{thread_id}")
 
 
 def parallel(tasks):
@@ -119,7 +133,7 @@ def serve_scripted(port: int, data: Path) -> None:
     import uvicorn
 
     from agent_mxc import MXCSandboxClient
-    from openai_harness.chat import HarnessChatServer
+    from openai_harness.engine import Harness as Engine
     from openai_harness.store import SQLiteStore
     from openai_harness.testing import Calls, shell
 
@@ -141,10 +155,9 @@ def serve_scripted(port: int, data: Path) -> None:
                               token=Path(token_file).read_text().strip() if token_file else None,
                               workspace_base=os.environ.get("MXC_WORKSPACE_BASE", "/sandboxes/active"))
     spec = make_spec({"payments"})
-    server = HarnessChatServer(spec, SQLiteStore(data / "threads.sqlite3"), client, model=model,
-                               output_dir=data / "threads", base_url=f"http://127.0.0.1:{port}", model_label="scripted",
-                               card=check_rows, file_status=file_status, preferred_output=REPORT)
-    app = create_app(server, config={"model": "scripted"}, port=port, jaeger_url=None, worker=client.info)
+    engine = Engine(spec, SQLiteStore(data / "threads.sqlite3"), client, model=model, output_dir=data / "threads",
+                    model_label="scripted", card=check_rows, file_status=file_status, preferred_output=REPORT)
+    app = create_app(engine, config={"model": "scripted"}, port=port, jaeger_url=None, worker=client.info)
     uvicorn_server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     threading.Thread(target=uvicorn_server.run, daemon=True).start()
     while not uvicorn_server.started:

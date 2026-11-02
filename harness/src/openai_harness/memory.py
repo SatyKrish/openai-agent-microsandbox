@@ -219,7 +219,6 @@ class UserMemory:
     def __init__(self, root: Path, **options):
         self.root = Path(root)
         self.options = options
-        self._migrate()
 
     def for_user(self, user: str | None) -> MemoryStore:
         return MemoryStore(self.root / "users" / user_key(user), **self.options)
@@ -231,17 +230,6 @@ class UserMemory:
         if detail:
             summary |= {"remembered": store.conversations(), "index": store.index()}
         return summary
-
-    def _migrate(self) -> None:
-        """Memory kept before it was per user becomes the guest's, which is whose it was."""
-        legacy = [path for path in self.root.iterdir() if path.name != "users"] if self.root.is_dir() else []
-        guest = self.root / "users" / GUEST
-        if not legacy or guest.exists():
-            return
-        guest.mkdir(parents=True)
-        for path in legacy:
-            path.rename(guest / path.name)
-        logger.info("Moved the shared memory to the guest's (%d entries)", len(legacy))
 
 
 def _header(path: Path) -> dict[str, str]:

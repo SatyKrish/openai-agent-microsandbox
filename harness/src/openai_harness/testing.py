@@ -1,6 +1,6 @@
 # Copyright 2026 openai-agent-substrate contributors
 # SPDX-License-Identifier: Apache-2.0
-"""Test helpers for agents on the harness: a scripted streaming model and ChatKit request helpers."""
+"""Test helpers for agents on the harness: a scripted streaming model, and asking a harness a question."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from openai.types.responses import (
     ResponseOutputItemDoneEvent, ResponseOutputMessage, ResponseOutputText, ResponseUsage,
 )
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+
+from .store import Thread
 
 
 def shell(command: str) -> tuple[str, dict]:
@@ -85,28 +87,37 @@ class Calls(Model):
             id=f"resp_{uuid.uuid4().hex}", output=list(response.output), usage=usage, object="response", model="scripted"))
 
 
-def message(text: str, attachments=()) -> dict:
-    """A ChatKit user message input."""
-    return {"content": [{"type": "input_text", "text": text}], "attachments": list(attachments), "inference_options": {}}
+async def ask(harness, text: str, *, conversation: str | None = None, user: str | None = None) -> tuple[str, list[dict]]:
+    """Send ``text`` as ``user`` (the guest by default), as a UI request would, in a new conversation unless
+    ``conversation`` names one; returns the conversation and the events of the turn that answered it.
+
+    A turn that fails ends with an ``error`` event; someone else's conversation raises ``NotFound``."""
+    context = {"user": user}
+    if conversation is None:
+        thread = Thread.new()
+        await harness.store.save_thread(thread, context)
+        conversation = thread.id
+    else:
+        await harness.store.load_thread(conversation, context)
+    with harness.listen(conversation) as queue:
+        sent = await harness.send(conversation, text, requester=user)
+        await asyncio.wait({sent.turn})
+        collected = []
+        while not queue.empty():
+            collected.append(queue.get_nowait())
+    return conversation, collected
 
 
-async def events(chat, payload: dict, user: str | None = None) -> list[dict]:
-    """Send one ChatKit request to a harness server, as ``user`` (the guest by default), and collect its events."""
-    result = await chat.process(json.dumps(payload), {"user": user})
-    collected = []
-    async for chunk in result:
-        collected += [json.loads(line[6:]) for line in chunk.decode().splitlines() if line.startswith("data: ")]
-    return collected
+def entries(events: list[dict], kind: str) -> list[dict]:
+    """The transcript entries of one kind in a list of events, each as it last was, in order."""
+    found: dict[str, dict] = {}
+    for event in events:
+        entry = event.get("entry") or {}
+        if entry.get("kind") == kind:
+            found[entry["id"]] = entry
+    return list(found.values())
 
 
-def titles(stream: list[dict]) -> list[str]:
-    """The titles of every workflow step in a stream, in order."""
-    found = []
-    for event in stream:
-        item = event.get("item") or {}
-        if item.get("type") == "workflow":
-            found += [task.get("title") for task in item["workflow"]["tasks"]]
-        task = (event.get("update") or {}).get("task")
-        if task:
-            found.append(task.get("title"))
-    return found
+def titles(events: list[dict]) -> list[str]:
+    """The titles of every step in a list of events, in order."""
+    return [step["title"] for entry in entries(events, "steps") for step in entry["steps"]]

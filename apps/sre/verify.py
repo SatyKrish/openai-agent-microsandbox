@@ -103,9 +103,9 @@ async def probes(client) -> bool:
 
 
 async def investigation(client, namespaces) -> bool:
-    from openai_harness.chat import HarnessChatServer
+    from openai_harness.engine import Harness
     from openai_harness.store import SQLiteStore
-    from openai_harness.testing import Calls, events, message, shell
+    from openai_harness.testing import Calls, ask, shell
 
     from .agent.spec import REPORT, make_spec
     from .ui.card import check_rows, file_status
@@ -118,25 +118,22 @@ async def investigation(client, namespaces) -> bool:
     ], answer="payments-processor crashes at startup: DATABASE_URL is not set.")
     with tempfile.TemporaryDirectory() as data:
         store = SQLiteStore(Path(data) / "threads.sqlite3")
-        chat = HarnessChatServer(make_spec(namespaces), store, client, model=model, output_dir=Path(data) / "threads",
-                                 model_label="scripted", card=check_rows, file_status=file_status, preferred_output=REPORT)
+        harness = Harness(make_spec(namespaces), store, client, model=model, output_dir=Path(data) / "threads",
+                          model_label="scripted", card=check_rows, file_status=file_status, preferred_output=REPORT)
         try:
             began = time.monotonic()
-            stream = await events(chat, {"type": "threads.create", "params": {
-                "input": message("Why is payments-processor crashing?")}})
+            thread_id, stream = await ask(harness, "Why is payments-processor crashing?")
             errors = [event for event in stream if event["type"] == "error"]
-            thread_id = next((event["thread"]["id"] for event in stream if event["type"] == "thread.created"), None)
-            thread = await store.load_thread(thread_id, {}) if thread_id else None
-            turn = thread.metadata["turns"][0] if thread else {}
-            evidence = [entry["label"] for entry in (thread.metadata.get("evidence", []) if thread else [])]
+            thread = await store.load_thread(thread_id, {})
+            turn = (thread.metadata.get("turns") or [{}])[0]
+            evidence = [entry["label"] for entry in thread.metadata.get("evidence", [])]
             passed = report(not errors and turn.get("status") == "completed", "scripted turn completed",
                             f"{time.monotonic() - began:.1f} s" + (f": {errors[0].get('message')}" if errors else ""))
             passed &= report(len(evidence) == 2, "kubectl read and log excerpt recorded as evidence", "; ".join(evidence))
             check = turn.get("check") or {}
             passed &= report(check.get("status") == "evidence_passed", "findings quotes match the journal copy",
                              check.get("detail") or f"{check.get('quotes', 0)} quotes")
-            if thread_id:
-                await store.delete_thread(thread_id, {})
+            await store.delete_thread(thread_id, {})
         finally:
             store.close()
     return passed

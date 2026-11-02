@@ -164,10 +164,10 @@ The harness serves this as its own API, for any UI:
 | Route | What it does |
 | --- | --- |
 | `GET /api/conversations` | The requesting user's conversations and the shared ones |
-| `POST /api/conversations` | Starts a conversation with a message |
+| `POST /api/conversations` | Starts a conversation with a message; returns the conversation and the message's entry |
 | `GET /api/conversations/ID` | The conversation and its transcript (`?after=SEQ` for later entries) |
 | `PATCH`, `DELETE /api/conversations/ID` | Renames or deletes it |
-| `POST /api/conversations/ID/messages` | Sends a message |
+| `POST /api/conversations/ID/messages` | Sends a message; returns its entry, which the turn that answers it is set on |
 | `POST /api/conversations/ID/stop` | Stops the running turn |
 | `GET /api/conversations/ID/events` | The conversation's events, as server-sent events; the stream ends when the server stops, and the page reconnects |
 
@@ -178,14 +178,8 @@ turns. Steps and cards are the transcript's own entries, drawn as message
 parts; composer stop is `POST …/stop`. It is served from the harness, so the
 page has no third-party script and no CDN.
 
-ChatKit is one adapter over the engine
-([`chat.py`](../harness/src/openai_harness/chat.py)), kept with its page at
-`/chatkit-ui`: `/chatkit` hands a message
-to the engine and streams that turn's events as ChatKit events, and the store
-serves ChatKit's items from the transcript, so ChatKit and the harness's API
-show the same conversation. Stopping a ChatKit stream stops the turn, as
-ChatKit's stop button expects. A store from before the engine had its ChatKit
-items converted into the transcript once, at start.
+The harness has no other UI protocol, and takes no file uploads: an agent
+that needs them would add an upload route to this API.
 
 ## The agent loop
 

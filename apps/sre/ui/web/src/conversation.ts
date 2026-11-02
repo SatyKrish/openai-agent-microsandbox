@@ -14,6 +14,8 @@ export type Hooks = {
   onTurnEnd?: (turn: number, status: string) => void;
   onEffect?: (name: string, data: Record<string, unknown>) => void;
   onTitle?: (title: string) => void;
+  // The conversation is not there: deleted, or someone else's.
+  onMissing?: (id: string) => void;
 };
 
 export function useConversation(id: string | null, hooks: Hooks) {
@@ -82,8 +84,10 @@ export function useConversation(id: string | null, hooks: Hooks) {
       });
       setRunning(body.state === "running");
       setLoaded(true);
-    }, (failure: Error) => {
-      if (!closed) setError(failure.message);
+    }, (failure: Error & { status?: number }) => {
+      if (closed) return;
+      if (failure.status === 404) hooksRef.current.onMissing?.(id);
+      else setError(failure.message);
     });
     return () => {
       closed = true;

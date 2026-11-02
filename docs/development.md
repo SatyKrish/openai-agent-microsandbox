@@ -6,8 +6,8 @@
 | --- | --- | --- |
 | `proto/` | The gRPC contract | Nothing |
 | `worker/` | `mxc-sandbox-worker` (Node 24, TypeScript) | `@microsoft/mxc-sdk`, `@grpc/grpc-js` |
-| `sandbox/` | `openai-agent-mxc`, imported as `agent_mxc` | `openai-agents==0.24.0`, `grpcio`; never the harness or ChatKit |
-| `harness/` | `openai-harness`, imported as `openai_harness` | The provider; ChatKit only in its adapter, store view and uploads |
+| `sandbox/` | `openai-agent-mxc`, imported as `agent_mxc` | `openai-agents==0.24.0`, `grpcio`; never the harness |
+| `harness/` | `openai-harness`, imported as `openai_harness` | The provider, Starlette and uvicorn; no UI protocol |
 | `apps/sre/` | The SRE agent, its UI and its in-cluster checks | The harness |
 | `apps/sre/ui/web/` | `sre-agent-ui`, the UI's page (React, TypeScript) | `@assistant-ui/react`; the views in `ui/static/` |
 
@@ -70,7 +70,7 @@ needs no Node at run time.
 To work on the page, `npm run dev` in `apps/sre/ui/web` serves it with
 Vite and sends `/api` to the harness on `localhost:8001` (`make ui`).
 `make page` builds it into `apps/sre/ui/static/app` (not committed); a
-harness run from a checkout without it serves the ChatKit page at `/`.
+harness run from a checkout without it answers `/` with a note to build it.
 
 ## Adding an agent
 

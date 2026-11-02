@@ -147,7 +147,7 @@ function clock(iso) {
 const FIX_STEPS = [["precheck", "Check first"], ["commands", "Run"], ["verify", "Verify"], ["rollback", "Undo"]];
 
 // A fix is commands for a person to run: what to check first, the change, how to verify it and how to undo it.
-// Copy takes the change's commands only. A fix written as prose (older findings) shows as it was written.
+// Copy takes the change's commands only. A fix the agent wrote as prose shows as it was written.
 function renderFix(fix) {
   if (!fix) return null;
   if (typeof fix !== "object") {
@@ -174,7 +174,7 @@ function renderFindings({ body, open, check, first, sources, text }) {
     return false;
   }
   // The check's result for each finding and quote: what was found, and what was not.
-  const results = new Map((check?.results || []).map((result) => [result.resource, result]));
+  const results = new Map((check?.results || []).map((result) => [result.index, result]));
   const passed = check?.status === "evidence_passed";
   const headline = passed ? `${plural(findings.length, "finding")}, ${plural(check.quotes, "quote")} found in the evidence`
     : plural(findings.length, "finding");
@@ -192,8 +192,8 @@ function renderFindings({ body, open, check, first, sources, text }) {
     raw.hidden = !raw.hidden;
     toggle.textContent = raw.hidden ? "View JSON" : "Hide JSON";
   });
-  const cards = findings.map((finding) => {
-    const result = results.get(String(finding.resource || "a finding").slice(0, 80));
+  const cards = findings.map((finding, index) => {
+    const result = results.get(index);
     const outcome = (item) => result?.quotes?.find((quote) => quote.file === item.file
       && String(item.quote || "").startsWith(String(quote.quote || "").replace(/…$/, "")));
     const ruledOut = Array.isArray(finding.ruled_out) ? finding.ruled_out : [];
