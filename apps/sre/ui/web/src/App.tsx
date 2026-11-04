@@ -49,14 +49,15 @@ function initialConversation(): string | null {
   return id && ID.test(id) ? id : null;
 }
 
-// The left column's icons: the same in its tabs and in the stack it collapses to.
+// The left column's icons, the same whether it is open or collapsed.
 const ICONS = {
+  collapse: "M3 4h18v16H3zM9 4v16M16 10l-2 2 2 2",
+  expand: "M3 4h18v16H3zM9 4v16M14 10l2 2-2 2",
   new: "M12 5v14M5 12h14",
   history: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M12 7v5l4 2",
   memory: "M2 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H2zM22 4h-7a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h8z",
 };
 const NO_TURNS: TurnRecord[] = [];
-const TABS: { name: Tab; label: string }[] = [{ name: "history", label: "History" }, { name: "memory", label: "Memory" }];
 
 function Icon({ path, size = 18 }: { path: string; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
@@ -78,18 +79,23 @@ function Board({ config, onSuggest, onOpenIssue }: {
   return <section className="agent-home ax-board" ref={ref} aria-live="polite" />;
 }
 
-function Sidebar({ conversations, current, onSelect, onNew, onInvestigate, tab, onTab, memory, health }: {
-  conversations: Conversation[]; current: string | null; onSelect: (id: string) => void; onNew: () => void;
-  onInvestigate: (question: string) => void; tab: Tab; onTab: (tab: Tab) => void; memory: ReactNode;
+/** The left column: its actions as icons with their names, and under them History (health now, the issues and
+ * your conversations) or Memory. Collapsed, it is the same icons in the same places, each named on hover, and
+ * History keeps its count of unhealthy workloads in view. On a phone it opens over the conversation. */
+function Sidebar({ collapsed, onToggle, conversations, current, onSelect, onNew, onInvestigate, tab, onTab, memory, health }: {
+  collapsed: boolean; onToggle: () => void; conversations: Conversation[]; current: string | null; onSelect: (id: string) => void;
+  onNew: () => void; onInvestigate: (question: string) => void; tab: Tab; onTab: (tab: Tab) => void; memory: ReactNode;
   health: Health | null | undefined;
 }) {
   const issues = new Map(conversations.filter((item) => item.issue?.state === "open").map((item) => [item.issue!.fingerprint, item]));
   // Open issues show under Health now, by their workload; the rest (the health board unread, say) are listed here.
-  const shown = new Set((health?.namespaces || []).flatMap(({ namespace, workloads }) => workloads
-    .filter((workload) => workload.state !== "healthy").map((workload) => workloadKey(namespace, workload.kind, workload.name))));
+  const unhealthy = (health?.namespaces || []).flatMap(({ namespace, workloads }) => workloads
+    .filter((workload) => workload.state !== "healthy").map((workload) => workloadKey(namespace, workload.kind, workload.name)));
+  const shown = new Set(unhealthy);
   const open = [...issues.values()].filter((item) => !shown.has(item.issue!.fingerprint));
   const mine = conversations.filter((item) => !item.issue);
   const recovered = conversations.filter((item) => item.issue && item.issue.state !== "open");
+  const running = conversations.some((item) => item.state === "running");
   const row = (item: Conversation) => (
     <li key={item.id}>
       <button type="button" className="ax-conversation" aria-current={item.id === current ? "page" : undefined}
@@ -105,19 +111,35 @@ function Sidebar({ conversations, current, onSelect, onNew, onInvestigate, tab, 
       </button>
     </li>
   );
+  // A section's icon opens it, and opens the column when it is collapsed.
+  const show = (name: Tab) => { onTab(name); if (collapsed) onToggle(); };
+  const item = (key: string, icon: string, label: string, onClick: () => void, selected = false, badge: ReactNode = null, hint = label) => (
+    <button key={key} type="button" className={`ax-nav-item ${key}`} aria-current={selected ? "true" : undefined}
+      aria-label={collapsed ? hint : undefined} data-tip={hint} onClick={onClick}>
+      <span className="ax-nav-icon"><Icon path={icon} size={key === "new" ? 14 : 18} /></span>
+      <span className="ax-nav-label">{label}</span>
+      {badge}
+    </button>
+  );
+  const issuesHint = unhealthy.length ? `History: ${unhealthy.length} unhealthy workload${unhealthy.length === 1 ? "" : "s"}` : "History";
   return (
-    <nav className="ax-sidebar" aria-label="History and memory">
-      <button type="button" className="ax-new" onClick={onNew}><Icon path={ICONS.new} size={16} />New investigation</button>
-      {memory ? (
-        <div className="ax-tabs" role="tablist">
-          {TABS.map(({ name, label }) => (
-            <button key={name} type="button" role="tab" aria-selected={tab === name} onClick={() => onTab(name)}>
-              <Icon path={ICONS[name]} size={15} />{label}</button>
-          ))}
-        </div>
-      ) : null}
-      {memory && tab === "memory" ? memory : (
-        <div role={memory ? "tabpanel" : undefined} aria-label="History">
+    <nav className="ax-sidebar" data-collapsed={collapsed} aria-label="History and memory">
+      <div className="ax-sidebar-head">
+        <button type="button" className="icon-button ax-sidebar-toggle" aria-expanded={!collapsed}
+          aria-label={collapsed ? "Expand the sidebar" : "Collapse the sidebar"} data-tip={collapsed ? "Expand the sidebar" : "Collapse the sidebar"}
+          onClick={onToggle}>
+          <Icon path={collapsed ? ICONS.expand : ICONS.collapse} />
+        </button>
+      </div>
+      <div className="ax-nav">
+        {item("new", ICONS.new, "New investigation", onNew)}
+        {item("history", ICONS.history, "History", () => show("history"), !collapsed && (tab === "history" || !memory),
+          unhealthy.length ? <span className="ax-nav-badge" aria-hidden="true">{unhealthy.length}</span>
+            : running ? <span className="ax-running ax-nav-badge" aria-hidden="true" /> : null, issuesHint)}
+        {memory ? item("memory", ICONS.memory, "Memory", () => show("memory"), !collapsed && tab === "memory") : null}
+      </div>
+      {collapsed ? null : memory && tab === "memory" ? <div className="ax-sidebar-body">{memory}</div> : (
+        <div className="ax-sidebar-body" aria-label="History">
           <HealthList health={health} issues={issues} current={current} onOpen={onSelect} onInvestigate={onInvestigate} />
           {open.length ? <><h2 className="ax-list-head">Open issues</h2><ul className="ax-list">{open.map(row)}</ul></> : null}
           <h2 className="ax-list-head">Conversations</h2>
@@ -125,20 +147,6 @@ function Sidebar({ conversations, current, onSelect, onNew, onInvestigate, tab, 
           {recovered.length ? <><h2 className="ax-list-head">Recovered</h2><ul className="ax-list">{recovered.map(row)}</ul></> : null}
         </div>
       )}
-    </nav>
-  );
-}
-
-/** The left column collapsed: its actions as a stack of icons, each opening the column where it leads. */
-function Rail({ memory, onNew, onOpen }: { memory: boolean; onNew: () => void; onOpen: (tab: Tab) => void }) {
-  return (
-    <nav className="ax-rail" aria-label="History and memory">
-      <button type="button" className="icon-button" aria-label="New investigation" title="New investigation" onClick={onNew}>
-        <Icon path={ICONS.new} /></button>
-      {TABS.filter(({ name }) => memory || name === "history").map(({ name, label }) => (
-        <button key={name} type="button" className="icon-button" aria-label={label} title={label} onClick={() => onOpen(name)}>
-          <Icon path={ICONS[name]} /></button>
-      ))}
     </nav>
   );
 }
@@ -152,7 +160,8 @@ export function App() {
   const [view, setView] = useState<View>({ tab: "files" });
   const [prefill, setPrefill] = useState<{ text: string; nonce: number } | null>(null);
   const [tab, setTab] = useState<Tab>(() => (stored("tab") === "memory" ? "memory" : "history"));
-  const [sidebarOpen, setSidebarOpen] = useState(wide.matches);
+  // Open on a wide screen unless it was collapsed there; on a phone it opens over the conversation when asked.
+  const [sidebarOpen, setSidebarOpen] = useState(() => wide.matches && stored("sidebar") !== "collapsed");
   const [theme, setTheme] = useState<Theme>(() => (stored("theme") as Theme) || "system");
   const [worker, setWorker] = useState<any>(null);
   const [workerDown, setWorkerDown] = useState(false);
@@ -240,6 +249,10 @@ export function App() {
     if (!wide.matches) setSidebarOpen(false);
   }, []);
   const chooseTab = useCallback((name: Tab) => { setTab(name); store("tab", name === "memory" ? name : null); }, []);
+  const toggleSidebar = useCallback(() => setSidebarOpen((open) => {
+    if (wide.matches) store("sidebar", open ? "collapsed" : null);
+    return !open;
+  }), []);
   const openIssue = useCallback((id: string, question: string) => { select(id); suggest(question); }, [select, suggest]);
   const investigate = useCallback((question: string) => { select(null); suggest(question); }, [select, suggest]);
   const openView = useCallback((next: View) => { setView(next); setPanelOpen(true); }, []);
@@ -299,8 +312,8 @@ export function App() {
      <TurnContext.Provider value={turnContext}>
       <div className="ax-app">
         <header className="topbar">
-          <button type="button" className="icon-button ax-menu" aria-label={sidebarOpen ? "Collapse history and memory" : "Expand history and memory"}
-            aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(!sidebarOpen)}>
+          <button type="button" className="icon-button ax-menu" aria-label={sidebarOpen ? "Close history and memory" : "Open history and memory"}
+            aria-expanded={sidebarOpen} onClick={toggleSidebar}>
             <Icon path="M4 6h16M4 12h16M4 18h16" />
           </button>
           <div className="brand">
@@ -353,12 +366,11 @@ export function App() {
         </header>
 
         <main className="ax-main" data-panel={panelOpen ? "open" : "closed"} data-sidebar={sidebarOpen ? "open" : "closed"}>
-          {sidebarOpen ? <Sidebar conversations={conversations} current={current} onSelect={select} onNew={() => select(null)}
-            onInvestigate={investigate} tab={tab} onTab={chooseTab} health={config.health ? health : undefined}
+          <Sidebar collapsed={!sidebarOpen} onToggle={toggleSidebar} conversations={conversations} current={current} onSelect={select}
+            onNew={() => select(null)} onInvestigate={investigate} tab={tab} onTab={chooseTab} health={config.health ? health : undefined}
             memory={config.memory ? <MemoryList idleMinutes={Math.round(((config.idle_close_s as number) || 300) / 60)}
               current={current} onOpen={(id) => select(id)}
               onCorrect={() => { select(null); suggest("Something you remember is wrong: "); }} /> : null} />
-            : <Rail memory={Boolean(config.memory)} onNew={() => select(null)} onOpen={(name) => { chooseTab(name); setSidebarOpen(true); }} />}
           <section className="chat-pane ax-chat-pane" aria-label="Conversation">
             <ChatColumn key={current || "new"} config={config} current={current} summary={summary} messages={messages}
               conversation={conversation} prefill={prefill} send={send} stop={stop} suggest={suggest} openIssue={openIssue}

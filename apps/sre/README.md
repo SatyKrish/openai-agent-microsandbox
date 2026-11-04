@@ -59,9 +59,13 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   worker, its containment and egress, and how the agent is contained, said once
   here rather than on every view. Settings opens it too. In a conversation, the
   panel button shows or hides the side panel.
-- **Left column.** History and Memory are two tabs beside the conversation. The
-  menu button collapses the column to a stack of icons (new investigation, History,
-  Memory) that open it where they lead; on a phone it opens over the conversation.
+- **Left column.** A sidebar of icons with their names: New investigation,
+  History and Memory, with the section that is open shown under them. The button
+  at its top collapses it to the same icons in the same places, each named on
+  hover; a collapsed icon opens the sidebar at its section, and the page
+  remembers whether it was collapsed. History carries a red count of unhealthy
+  workloads, or a green dot while a turn runs, open or collapsed. On a phone the
+  menu button opens it over the conversation.
 - **History.** The History tab starts with **Health now**: each namespace's
   unhealthy workloads, with readiness and what is wrong, read every 10 s and kept
   while a conversation is open; each opens its issue, or puts a question in the
