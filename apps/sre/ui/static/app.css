@@ -6,13 +6,14 @@
 :root {
   --bg: #F5F6F7; --surface: #FFFFFF; --sunken: #F0F2F4;
   --border: #DADDE1; --border-soft: #E8EAED;
-  --ink: #17191C; --ink-2: #363A40; --muted: #5B616A; --faint: #737A84;
+  --ink: #17191C; --ink-2: #363A40; --muted: #5B616A; --faint: #666D77;
   --primary-bg: #17191C; --primary-ink: #FFFFFF;
   --accent: #2557D6; --accent-ink: #2557D6; --accent-ring: #2557D622;
   --ok: #1D7A4A; --warn: #8F5B00; --warn-bg: #FFF7E6; --warn-border: #F0D9A8;
   --err: #B42318; --err-bg: #FDF1F0; --err-border: #F3C4BF;
-  --mark: #FFE58A;
-  --c-workspace: #8A9099; --c-harness: #2557D6; --c-sandbox: #6B5BA8;
+  --mark: #FFE58A; --selection: #B9CCF5;
+  /* Trace lanes, apart in lightness as well as hue: harness lighter, sandbox darker, workspace outlined */
+  --c-workspace: #6E757F; --c-harness: #5B86EE; --c-sandbox: #3F2F86;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color-scheme: light;
@@ -26,8 +27,8 @@
   --accent: #2557D6; --accent-ink: #8AA9F0; --accent-ring: #8AA9F040;
   --ok: #4CB782; --warn: #E2B05A; --warn-bg: #2A2110; --warn-border: #574317;
   --err: #F28B82; --err-bg: #331614; --err-border: #64271F;
-  --mark: #5C4B12;
-  --c-workspace: #6E747D; --c-harness: #7E9BE6; --c-sandbox: #A898E0;
+  --mark: #5C4B12; --selection: #2F4778;
+  --c-workspace: #7A808A; --c-harness: #B4C8F7; --c-sandbox: #7564C9;
   color-scheme: dark;
 }
 
@@ -175,7 +176,7 @@ code, pre { font-family: var(--mono); }
 .trace-section { display: flex; flex-direction: column; gap: 10px; }
 .trace-section h3 { margin: 0; font-size: 14px; }
 .trace-section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
-.k-workspace { background: var(--c-workspace); } .k-harness { background: var(--c-harness); }
+.k-workspace { background: transparent; box-shadow: inset 0 0 0 1.5px var(--c-workspace); } .k-harness { background: var(--c-harness); }
 .k-sandbox { background: var(--c-sandbox); } .k-error { background: var(--err); }
 /* One grid for the lanes and the steps, so every bar sits on the same time axis */
 .tl { display: flex; flex-direction: column; }

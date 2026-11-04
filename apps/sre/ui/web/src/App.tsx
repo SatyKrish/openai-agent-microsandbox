@@ -1,17 +1,18 @@
 // Copyright 2026 openai-agent-mxc contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// The SRE agent's page, an incident console: on the left, the cluster's health now with the issue for each
+// The SRE agent's page, after Artifacts: on the left, the cluster's health now with the issue for each
 // unhealthy workload, then History (your conversations) and Memory (what the agent remembers from them);
-// in the middle the conversation, where each turn leads with its verdict and its findings' fixes; and a
-// side panel that opens on a quote, a file or the trace. The start screen is the health board. How the
-// agent is contained is said once, in the How this works dialog. Everything comes from the harness's API.
+// in the middle the conversation, where each turn is a short reply and a card for the findings it wrote;
+// and on the right the panel, which holds the findings (a document with a version per turn that rewrote
+// them) and everything they rest on. The start screen is the health board. How the agent is contained is
+// said once, in the How this works dialog. Everything comes from the harness's API.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { loadHealth, renderHome } from "../../static/sre.js";
 
-import { api, workloadKey, type Config, type Conversation, type Health, type Workload } from "./api";
+import { api, workloadKey, type Config, type Conversation, type Health, type TurnRecord, type Workload } from "./api";
 import { Chat } from "./Chat";
 import { toMessages, useConversation } from "./conversation";
 import { HealthList } from "./Health";
@@ -54,6 +55,7 @@ const ICONS = {
   history: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M12 7v5l4 2",
   memory: "M2 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H2zM22 4h-7a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h8z",
 };
+const NO_TURNS: TurnRecord[] = [];
 const TABS: { name: Tab; label: string }[] = [{ name: "history", label: "History" }, { name: "memory", label: "Memory" }];
 
 function Icon({ path, size = 18 }: { path: string; size?: number }) {
@@ -209,9 +211,17 @@ export function App() {
   const workloads = useMemo(() => new Map<string, Workload>((health?.namespaces || []).flatMap(({ namespace, workloads: items }) =>
     items.map((workload) => [workloadKey(namespace, workload.kind, workload.name), workload] as const))), [health]);
 
-  // The side panel opens only when asked: a quote, a file or the trace. Findings show in the conversation.
   const conversation = useConversation(current, {
     onTurnEnd: () => { refreshThread(); refreshList(); },
+    // A turn that wrote the findings opens them beside the conversation, as a new artifact opens; on a phone the
+    // card's Open findings does.
+    onEffect: (name, data) => {
+      if (name === "open_file" && wide.matches) {
+        refreshThread();
+        setPanelOpen(true);
+        setView({ tab: "files", turn: Number(data.turn), path: String(data.path) });
+      }
+    },
     onTitle: () => refreshList(),
     // A remembered conversation that is gone opens the start screen; a link to one says why.
     onMissing: (id) => {
@@ -233,8 +243,11 @@ export function App() {
   const openIssue = useCallback((id: string, question: string) => { select(id); suggest(question); }, [select, suggest]);
   const investigate = useCallback((question: string) => { select(null); suggest(question); }, [select, suggest]);
   const openView = useCallback((next: View) => { setView(next); setPanelOpen(true); }, []);
-  const turnContext = useMemo(() => ({ threadId: current, turns: thread?.turns || [], workloads, open: openView }),
-    [current, thread, workloads, openView]);
+  // A question put in the composer from the panel or a card, to finish and send.
+  const ask = useCallback((text: string) => {
+    suggest(text);
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".ax-composer-input")?.focus());
+  }, [suggest]);
   const send = useCallback(async (text: string) => {
     setNotice(null);
     try {
@@ -250,6 +263,11 @@ export function App() {
     }
   }, [current, refreshList]);
   const stop = useCallback(async () => { if (current) await api.stop(current).catch(() => {}); }, [current]);
+  // Each turn's question, which names the version of the findings it wrote.
+  const questions = useMemo(() => new Map(conversation.entries.flatMap((entry) =>
+    entry.kind === "user" && entry.turn != null ? [[entry.turn, entry.text] as const] : [])), [conversation.entries]);
+  const turnContext = useMemo(() => ({ threadId: current, turns: thread?.turns || NO_TURNS, workloads, questions, open: openView, ask,
+    send: (text: string) => { send(text); } }), [current, thread, workloads, questions, openView, ask, send]);
   const remove = async () => {
     if (!current || !window.confirm("Delete this conversation?\n\nIts workspace, files and history are deleted. "
       + "The worker's audit journal keeps the commands. This can't be undone.")) return;
@@ -326,9 +344,9 @@ export function App() {
               </div>
             </details>
             {current ? (
-              <button type="button" className="chip panel-toggle" aria-label={panelOpen ? "Hide evidence and trace" : "Show evidence and trace"}
-                aria-expanded={panelOpen} onClick={() => setPanelOpen(!panelOpen)}>
-                <Icon path="M3 4h18v16H3zM14 4v16" size={16} /><span className="wide-only">Evidence</span>
+              <button type="button" className="icon-button panel-toggle" aria-label={panelOpen ? "Hide the panel" : "Show the panel"}
+                title={panelOpen ? "Hide the panel" : "Show the findings and evidence"} aria-expanded={panelOpen} onClick={() => setPanelOpen(!panelOpen)}>
+                <Icon path="M3 4h18v16H3zM14 4v16" />
               </button>
             ) : null}
           </div>
@@ -346,7 +364,7 @@ export function App() {
               conversation={conversation} prefill={prefill} send={send} stop={stop} suggest={suggest} openIssue={openIssue}
               followUps={followUps} notice={notice} onPrefilled={clearPrefill} />
           </section>
-          {panelOpen && current ? <Panel threadId={current} thread={thread} config={config} view={view} setView={setView}
+          {panelOpen && current ? <Panel threadId={current} turns={thread?.turns || NO_TURNS} config={config} view={view} setView={setView}
             onClose={() => setPanelOpen(false)} /> : null}
         </main>
 

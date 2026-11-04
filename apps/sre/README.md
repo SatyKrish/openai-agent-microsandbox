@@ -57,8 +57,8 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
 - **Top bar.** One button says what the agent reads and with which model, and
   turns amber when the worker is unreachable. It opens **How this works**: the
   worker, its containment and egress, and how the agent is contained, said once
-  here rather than on every view. Settings opens it too. In a conversation,
-  **Evidence** opens the side panel.
+  here rather than on every view. Settings opens it too. In a conversation, the
+  panel button shows or hides the side panel.
 - **Left column.** History and Memory are two tabs beside the conversation. The
   menu button collapses the column to a stack of icons (new investigation, History,
   Memory) that open it where they lead; on a phone it opens over the conversation.
@@ -93,35 +93,48 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
   conversation, grouped by day, while the conversation stays open beside it. Select one to open it, forget one, or forget
   everything. **Correct something** starts a conversation to tell the agent what
   is wrong; it is remembered when that conversation goes idle.
-- **A turn, verdict first.** While the agent works, its steps show as they run,
-  its narration muted between them; a finished group folds to one line ("Worked
-  for 8 s", with its step count). When the turn ends, the page scrolls to its
-  verdict: a line says whether the host check found every quote in what the worker
-  read (and that the causes are the agent's reasoning), a failed check is red,
-  and a correction after a failed first check is said. The agent's answer
-  follows, then the findings, then **How I got here** with the step count, time
-  and tokens, which opens the steps and narration; beside it, **Evidence** opens
-  the turn's reads in the side panel, with its other outputs and the trace. Each
-  step is titled with what ran (`kubectl describe pod …`,
+- **A turn.** The chat says what happened and the findings hold the detail, as
+  with an artifact. While the agent works, its steps show as they run, its
+  narration muted between them, with a Working line while the model thinks. When
+  the turn ends, one line ("Worked for 42 s, 16 steps") opens the steps and
+  narration, then comes the reply of two or three sentences and, when the turn
+  wrote the findings, one card for them: "Findings" (or "Findings, version 2"),
+  what each finding is about (`payments-ledger · ImagePullBackOff`), what the host
+  check found, and **Open**, with the turn's time, steps and tokens. On a wide
+  screen a turn that wrote the findings opens them in the side panel. A failed
+  check names the quote that was not found and the read it cites, with **Ask the
+  agent to fix**, which sends that back as the next message. Each step is titled
+  with what ran (`kubectl describe pod …`,
   `pod_logs payments-api -n payments match="timeout"`); its icon says where it
   ran. The title adds only what is unusual: a non-zero exit, or `harness` for a
   harness tool.
-- **Findings.** Each finding in `output/findings.json` is a card titled by its
-  short problem label, with the workload and its state now as the worker reads
-  it (the card's edge takes the state's colour), the cause, and the fix: the
-  summary, then steps (check first, run, verify, undo) where each command block
-  has Copy and advice shows as text, and its risk. Evidence and Ruled out open
-  below it. Each quote shows the read it came from and when, and opens that read
-  in the side panel with the quote highlighted. A finding whose quote was not
-  found is marked Unverified, with its evidence open and that quote in red.
-- **Evidence.** The side panel opens only when asked: a quote, Evidence, a file
-  or the trace. It lists the turn's files as rows, the reads first, each named by
-  the command that produced it (`kubectl get pods -n payments -o wide`,
-  `pod_logs …`), with the file name on hover; files from earlier turns are
-  muted. A log excerpt says how many lines it shows of how many, with errors and
-  warnings highlighted and masked values and collapsed repeats marked. A
-  `kubectl get` read shows as a table; only failing statuses are coloured.
-  `findings.json` shows as the agent wrote it.
+- **The side panel.** It shows one thing at a time, named in its header. The
+  title is a menu of everything else: the outputs (Findings, the Report in
+  Markdown, with their versions), the evidence (each read by its command and
+  turn), the team's runbooks, and a turn's trace. Under the title: "Version 2 of
+  2, written after …" for an output, or a read's command and turn. Arrows step
+  through an output's versions, one per turn that rewrote it. **Rendered** or
+  **Source**, **Copy** and **Download** act on what is open; on a phone the panel
+  is a full-screen sheet and those three share one menu.
+- **Findings.** A line says what the host check found ("2 findings; every quote
+  is in the evidence it cites", and that the causes are the agent's reasoning),
+  or how many quotes were not, with Ask the agent to fix; a correction after a
+  failed first check is said. Each finding has its short problem label, the
+  workload and its state now as the worker reads it, the cause, the proposed fix
+  as steps (check first, run, verify, undo) where each command block has Copy
+  and advice shows as text, its risk, and Ruled out. Under Evidence each quote
+  shows the read it came from and when, and opens that read with the quote
+  highlighted. A finding whose quote was not found is marked Unverified, with
+  that quote in red. **Copy as Markdown** copies the check, each finding, its fix
+  and its quotes with their reads, for an incident channel.
+- **Evidence.** An open read has a readable title over its command: `kubectl get
+  pods -n payments -o wide` is "Pods in payments", a previous container's log is
+  "Log: payments-processor (previous)". A log excerpt says how many lines it
+  shows of how many, with errors and warnings highlighted and masked values and
+  collapsed repeats marked. A `kubectl get` read shows as a table; only failing
+  statuses are coloured. Selecting text in the panel offers **Ask about this**,
+  which puts the quote, its line and the read it came from in the composer, to
+  finish and send; nothing is sent until you send it.
 - **Trace.** One line of totals (time, model calls, tokens, tool calls,
   failures), then each lane and step on one time axis. Bars take their lane's
   colour; failed commands are red.
@@ -182,8 +195,8 @@ agent/
   lib/findings.py           Host check of findings.json against the evidence
   spec.py                   AgentSpec for the harness
 ui/                         The UI: its page served beside the harness's API, the turn card and the launcher
-  web/                      The page (assistant-ui, React): health now, History and Memory, turns
-                            with their verdict and findings, side panel; built into static/app and served at /
+  web/                      The page (assistant-ui, React): health now, History and Memory, turns and
+                            their findings cards, the side panel and the findings; built into static/app and served at /
   static/                   The views the page imports: sre.js (health board, log excerpts, kubectl
                             tables), the trace and file views, and the shared styles
 evals/                      Tests against the worker's real gRPC service

@@ -51,6 +51,8 @@ export type QuoteResult = { file?: string; quote?: string; found: boolean; reaso
 export type Check = {
   status: "evidence_passed" | "failed" | "no_findings"; detail?: string; findings?: number; quotes?: number; quotes_total?: number;
   results?: { index: number; verified: boolean; quotes: QuoteResult[] }[];
+  summary?: { resource: string; problem: string; verified?: boolean }[];
+  failures?: { file?: string; quote?: string; reason: string }[];
 };
 export type TurnRecord = {
   number: number; status: string; files: TurnFile[]; check?: Check | null; check_first?: Check | null; tools?: unknown[];
