@@ -1,14 +1,14 @@
 // Copyright 2026 openai-agent-mxc contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// The only way MXC containers reach Kubernetes: a read-only API proxy on the
-// worker's loopback. Containers get no service-account token. kubectl in a
-// container talks plain HTTP to this proxy (MXC's proxy-only network mode makes it
-// the one reachable address, as 10.0.2.2); the proxy adds the worker's token, which
+// The only way session VMs reach Kubernetes: a read-only API proxy on the
+// worker's loopback. VMs get no service-account token. kubectl in a VM talks
+// plain HTTP to this proxy (the VM's network policy makes it the one reachable
+// address, as host.microsandbox.internal); the proxy adds the worker's token, which
 // it reads from the kubelet-rotated file on every request, and forwards over TLS to
 // the API server. It forwards only reads (GET and HEAD) of API paths, never
 // upgrades or the exec, attach, port-forward and proxy subresources, and drops any
-// credential or impersonation header a container sends. Pod logs are refused too:
+// credential or impersonation header a VM sends. Pod logs are refused too:
 // they reach the agent only through the worker's log policy (ReadLogs). RBAC still
 // decides what the token can read; the proxy keeps writes out even if the Role grows.
 
@@ -109,14 +109,14 @@ export function createKubeProxy(upstream: ProxyUpstream, port: number,
   return server;
 }
 
-/** The kubeconfig every container uses: the proxy, as the API server, with no credentials. */
-export function kubeconfig(port: number, namespace: string): string {
+/** The kubeconfig every VM uses: the proxy, as the API server, with no credentials. */
+export function kubeconfig(server: string, namespace: string): string {
   return [
     'apiVersion: v1',
     'kind: Config',
     'clusters:',
     `- name: in-cluster`,
-    `  cluster: {server: "http://10.0.2.2:${port}"}`,
+    `  cluster: {server: ${JSON.stringify(server)}}`,
     'users:',
     '- name: sandbox',
     '  user: {}',

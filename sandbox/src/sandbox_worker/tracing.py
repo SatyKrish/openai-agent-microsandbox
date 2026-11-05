@@ -124,7 +124,7 @@ class OTLPTracingProcessor(TracingProcessor):
             resource=self.resource, kind=SpanKind.INTERNAL,
             start_time=started, end_time=ended, attributes=attributes,
             status=Status(StatusCode.ERROR if error else StatusCode.UNSET),
-            instrumentation_scope=InstrumentationScope("agent_mxc", "0.1.0"),
+            instrumentation_scope=InstrumentationScope("sandbox_worker", "0.1.0"),
         ))
 
     def force_flush(self):

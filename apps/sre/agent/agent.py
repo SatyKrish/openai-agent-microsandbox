@@ -39,7 +39,7 @@ def memory(extract_model: str = EXTRACT_MODEL, consolidate_model: str = CONSOLID
 
 
 def build_agent(manifest, model, *, memory_models: tuple[str, str] | None = None):
-    """Sandbox tools only: kubectl, the shell and Python all run in MXC containers on the sandbox worker.
+    """Sandbox tools only: kubectl, the shell and Python all run in the session's VM on the sandbox worker.
 
     Compaction keeps a long investigation within the model's context; the SDK includes it by
     default, and an explicit capability list replaces the defaults, so it is listed here.

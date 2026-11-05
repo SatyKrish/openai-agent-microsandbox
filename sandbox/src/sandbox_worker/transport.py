@@ -1,6 +1,6 @@
 # Copyright 2026 openai-agent-mxc contributors
 # SPDX-License-Identifier: Apache-2.0
-"""The gRPC connection to one MXC sandbox worker (proto/mxc/sandbox/v1/sandbox.proto).
+"""The gRPC connection to one sandbox worker (proto/sandbox/v1/sandbox.proto).
 
 A ``grpc.aio`` channel belongs to the event loop that created it, so the channel
 is opened lazily in the running loop and reopened if a later call runs in another.
@@ -30,7 +30,7 @@ class WorkerError(RuntimeError):
 
 class WorkerTransport:
     def __init__(self, target: str, *, token: str | None = None, max_message_bytes: int = 12 * MIB,
-                 call_timeout: float = 30, deadline_margin: float = 15):
+                 call_timeout: float = 30, deadline_margin: float = 120):
         self.target = target
         self._metadata = (("authorization", f"Bearer {token}"),) if token else ()
         self._options = [("grpc.max_receive_message_length", max_message_bytes),
@@ -69,7 +69,8 @@ class WorkerTransport:
                    requester: str = "") -> pb.ExecResponse:
         request = pb.ExecRequest(session_id=session_id, argv=argv, cwd=cwd, timeout_ms=int(timeout_s * 1000),
                                  requester=requester)
-        # The worker enforces the command's deadline; the call's covers queueing and transfer as well.
+        # The worker enforces the command's deadline; the call's covers queueing and transfer as well,
+        # including waiting for the session's VM to start or for room among the worker's running VMs.
         return await self._call("Exec", request, timeout=timeout_s + self.deadline_margin)
 
     async def write_file(self, session_id: str, path: str, content: bytes) -> pb.WriteFileResponse:

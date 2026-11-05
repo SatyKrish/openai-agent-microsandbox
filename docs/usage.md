@@ -1,9 +1,9 @@
 # Using the sandbox provider
 
 The provider is the `openai-agent-mxc` package in `sandbox/`, imported as
-`agent_mxc`. It implements the OpenAI Agents SDK's `BaseSandboxClient` and
+`sandbox_worker`. It implements the OpenAI Agents SDK's `BaseSandboxClient` and
 `BaseSandboxSession`, so any `SandboxAgent` can run its shell, filesystem and
-skill tools on an MXC sandbox worker.
+skill tools on a paired sandbox worker, in a microVM per session.
 
 ## Integrate into your application
 
@@ -15,12 +15,12 @@ from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Filesystem, Shell
 from agents.sandbox.entries import Dir, File
-from agent_mxc import MXCSandboxClient, MXCSandboxOptions
+from sandbox_worker import WorkerSandboxClient, WorkerSandboxOptions
 
-client = MXCSandboxClient(
+client = WorkerSandboxClient(
     "sre-sandbox-payments-0.sre-sandbox-payments.sre-system.svc.cluster.local:50051",
     worker="sre-sandbox-payments-0",  # saved with each session: it resumes only on this worker
-    token=Path("/var/run/secrets/mxc/token").read_text().strip(),
+    token=Path("/var/run/secrets/pair/token").read_text().strip(),
 )
 
 workspace = client.new_workspace_id()
@@ -28,7 +28,7 @@ manifest = Manifest(root=client.workspace_root(workspace), entries={
     "output": Dir(),
     "runbook.md": File(content=b"Check DATABASE_URL and REDIS_HOST if startup fails.\n"),
 })
-session = await client.create(manifest=manifest, options=MXCSandboxOptions(workspace_id=workspace))
+session = await client.create(manifest=manifest, options=WorkerSandboxOptions(workspace_id=workspace))
 agent = SandboxAgent(name="SRE", model="gpt-6.1-terra", instructions="Investigate; change nothing.",
                      default_manifest=manifest, capabilities=[Shell(), Filesystem()])
 async with session:
@@ -39,7 +39,7 @@ saved = client.serialize_session_state(session.state)  # store with the conversa
 
 The manifest's root must be the session's workspace,
 `client.workspace_root(workspace)`: a workspace has the same path inside its
-containers as on the worker's volume (`/sandboxes/active/WORKSPACE`). Manifests
+VM as on the worker's volume (`/sandboxes/active/WORKSPACE`). Manifests
 hold `File`, `Dir`, `LocalFile` and `LocalDir` entries; accounts, environment
 variables and extra path grants are refused.
 
@@ -97,7 +97,7 @@ agent constrains what memory may hold.
 | --- | --- |
 | A command exits nonzero | An `ExecResult` with its exit code |
 | A command exceeds its timeout (60 s by default, `exec_timeout`) | `ExecTimeoutError` |
-| The worker is unreachable, refuses the token or cannot launch a container | `ExecTransportError` for commands; `WorkerError` with the gRPC status elsewhere |
+| The worker is unreachable, refuses the token or cannot start the session's VM | `ExecTransportError` for commands; `WorkerError` with the gRPC status elsewhere |
 | A file is missing | `FileNotFoundError`, which is also the SDK's `WorkspaceReadNotFoundError` |
 | A file is over the limit (10 MiB by default) | `ValueError` |
 | A path leaves the workspace | `ValueError` (the SDK's own checks usually refuse it first) |
@@ -106,7 +106,7 @@ Commands are never retried: one that failed in transit may already have run.
 
 ## Logs
 
-Containers cannot read pod logs. Read them through the worker's log policy
+VMs cannot read pod logs. Read them through the worker's log policy
 (see [architecture](architecture.md#logs-reach-the-model-only-as-excerpts)):
 
 ```python
@@ -153,24 +153,26 @@ people: the SRE UI's start screen shows it, and it is never sent to the model.
 
 ## The worker's contract
 
-[`proto/mxc/sandbox/v1/sandbox.proto`](../proto/mxc/sandbox/v1/sandbox.proto)
+[`proto/sandbox/v1/sandbox.proto`](../proto/sandbox/v1/sandbox.proto)
 defines `Info`, `InitSession`, `Exec`, `WriteFile`, `ReadFile`, `ListEvidence`,
 `ReadEvidence`, `ReadLogs`, `Health` and `DestroySession`. The worker takes these settings from its
 environment:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DATA_DIR` | `/sandboxes` | Workspaces in `active/`, the journal and evidence in `history/` |
-| `MXC_EGRESS` | `kube-api` | `kube-api`: containers reach only the worker's read-only Kubernetes API proxy (MXC proxy-only egress); `none`: no network |
-| `MXC_KUBE_PROXY_PORT` | `18080` | The API proxy's port on the worker's loopback; containers reach it as `10.0.2.2` |
-| `MXC_KUBE_TOKEN_FILE`, `MXC_KUBE_CA_FILE` | the pod's service-account token and CA | What the proxy authenticates with and verifies the API server against |
-| `MXC_TIMEOUT_MS` | `60000` | The longest a command may run |
-| `MXC_MAX_CONCURRENT` | `8` | Commands running at once across sessions |
-| `MXC_MAX_FILE_BYTES`, `MXC_MAX_OUTPUT_BYTES`, `MXC_MAX_EVIDENCE_BYTES` | 10 MiB, 1 MiB, 4 MiB | Size limits |
-| `MXC_LIMIT_AS_BYTES` | 2 GiB | Address space per command (`prlimit`) |
-| `MXC_WORKER_TOKEN_FILE` | unset | The pair token every call must carry |
+| `DATA_DIR` | `/sandboxes` | Workspaces in `active/`, the journal and evidence in `history/`, microsandbox's store in `msb/` (`MSB_HOME`) |
+| `WORKER_EGRESS` | `kube-api` | `kube-api`: VMs reach only the worker's read-only Kubernetes API proxy; `none`: no network |
+| `WORKER_KUBE_PROXY_PORT` | `18080` | The API proxy's port on the worker's loopback; VMs reach it as `host.microsandbox.internal` |
+| `WORKER_KUBE_TOKEN_FILE`, `WORKER_KUBE_CA_FILE` | the pod's service-account token and CA | What the proxy authenticates with and verifies the API server against |
+| `WORKER_GUEST_IMAGE` | `sre-sandbox-guest:local` | The image every session's VM boots |
+| `WORKER_GUEST_IMAGE_ARCHIVE` | unset (`/opt/guest/image.tar` in the image) | A `docker save` archive of it, loaded into microsandbox's store at startup when the image is not there |
+| `WORKER_VM_CPUS`, `WORKER_VM_MEMORY_MIB` | 1, 768 | Each VM's vCPUs and memory, enforced by the hypervisor |
+| `WORKER_MAX_RUNNING` | 4 | VMs running or starting at once; to start another, the least recently used one idle for 10 s stops, or the command waits for one to be |
+| `WORKER_IDLE_STOP_S` | 600 | An idle VM stops after this long; its disk and workspace stay |
+| `WORKER_TIMEOUT_MS` | `60000` | The longest a command may run |
+| `WORKER_MAX_FILE_BYTES`, `WORKER_MAX_OUTPUT_BYTES`, `WORKER_MAX_EVIDENCE_BYTES` | 10 MiB, 1 MiB, 4 MiB | Size limits |
+| `WORKER_TOKEN_FILE` | unset | The pair token every call must carry |
 | `SRE_NAMESPACES` | none | The namespaces `ReadLogs` serves |
-| `MXC_LOG_TAIL_LINES`, `MXC_LOG_MAX_TAIL_LINES`, `MXC_LOG_MAX_BYTES` | 500, 5000, 4 MiB | How much raw log the worker reads per call, by default and at most |
-| `MXC_LOG_EXCERPT_LINES`, `MXC_LOG_EXCERPT_BYTES` | 40, 6000 | The most an excerpt may hold |
-| `MXC_LOG_CONTEXT_LINES`, `MXC_LOG_LAST_LINES` | 2, 3 | Context kept around each error, and last lines always kept |
-| `MXC_READONLY_PATHS` | none | Extra read-only mounts for every container, beyond MXC's baseline and the kubeconfig directory |
+| `WORKER_LOG_TAIL_LINES`, `WORKER_LOG_MAX_TAIL_LINES`, `WORKER_LOG_MAX_BYTES` | 500, 5000, 4 MiB | How much raw log the worker reads per call, by default and at most |
+| `WORKER_LOG_EXCERPT_LINES`, `WORKER_LOG_EXCERPT_BYTES` | 40, 6000 | The most an excerpt may hold |
+| `WORKER_LOG_CONTEXT_LINES`, `WORKER_LOG_LAST_LINES` | 2, 3 | Context kept around each error, and last lines always kept |

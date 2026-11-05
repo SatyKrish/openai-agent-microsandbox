@@ -37,10 +37,10 @@ spec:
           envFrom:
             - secretRef: {name: openai-creds}
           env:
-            - {name: MXC_WORKER_TARGET, value: "sre-sandbox-payments-0.sre-sandbox-payments.sre-system.svc.cluster.local:50051"}
-            - {name: MXC_WORKER_NAME, value: sre-sandbox-payments-0}
-            - {name: MXC_WORKER_TOKEN_FILE, value: /var/run/secrets/mxc/token}
-            - {name: MXC_WORKSPACE_BASE, value: /sandboxes/active}
+            - {name: WORKER_TARGET, value: "sre-sandbox-payments-0.sre-sandbox-payments.sre-system.svc.cluster.local:50051"}
+            - {name: WORKER_NAME, value: sre-sandbox-payments-0}
+            - {name: WORKER_TOKEN_FILE, value: /var/run/secrets/pair/token}
+            - {name: WORKER_WORKSPACE_BASE, value: /sandboxes/active}
             - {name: SRE_NAMESPACES, value: payments}
             - {name: SRE_DATA_DIR, value: /data}
             # A conversation's session closes after this long without a message; the SDK distils
@@ -69,7 +69,7 @@ spec:
           volumeMounts:
             - {name: data, mountPath: /data}
             - {name: tmp, mountPath: /tmp}
-            - {name: pair-token, mountPath: /var/run/secrets/mxc, readOnly: true}
+            - {name: pair-token, mountPath: /var/run/secrets/pair, readOnly: true}
       volumes:
         - name: tmp
           emptyDir: {}

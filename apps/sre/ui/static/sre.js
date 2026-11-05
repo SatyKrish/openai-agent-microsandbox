@@ -155,7 +155,7 @@ function renderLogExcerpt({ body, text }) {
 }
 
 function renderKubectlTable({ body, text }) {
-  const lines = text.split("\n").filter((line) => line.trim() && !line.startsWith("[mxc-worker]"));
+  const lines = text.split("\n").filter((line) => line.trim() && !line.startsWith("[sandbox-worker]"));
   if (lines.length < 2 || !/^[A-Z][A-Z -]*\s{2,}/.test(lines[0])) return false;
   // Column starts come from the header, where kubectl aligns every column.
   const starts = [...lines[0].matchAll(/\S+(?: \S+)*/g)].map((match) => match.index);

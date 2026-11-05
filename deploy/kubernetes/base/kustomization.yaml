@@ -1,5 +1,5 @@
 # One paired SRE agent instance for the payments domain: a harness StatefulSet
-# and its MXC sandbox worker StatefulSet, 1:1. Copy the base per domain.
+# and its sandbox worker StatefulSet, 1:1. Copy the base per domain.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

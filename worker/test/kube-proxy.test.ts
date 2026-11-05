@@ -73,7 +73,7 @@ test('reads pass with the worker token, and a container cannot choose another id
 });
 
 test("kubectl's proxy-form requests to the proxy itself are served", async () => {
-  const reply = await send('GET', `http://10.0.2.2:${port}/apis/apps/v1/namespaces/payments/deployments`);
+  const reply = await send('GET', `http://host.microsandbox.internal:${port}/apis/apps/v1/namespaces/payments/deployments`);
   assert.equal(reply.status, 200);
   assert.equal(seen.at(-1)!.url, '/apis/apps/v1/namespaces/payments/deployments');
 });
@@ -102,8 +102,8 @@ test('writes, streams, other paths and other hosts are refused before reaching t
 });
 
 test('the kubeconfig points at the proxy and carries no credentials', () => {
-  const text = kubeconfig(18080, 'payments');
-  assert.match(text, /server: "http:\/\/10\.0\.2\.2:18080"/);
+  const text = kubeconfig('http://host.microsandbox.internal:18080', 'payments');
+  assert.match(text, /server: "http:\/\/host\.microsandbox\.internal:18080"/);
   assert.match(text, /user: \{\}/);
   assert.match(text, /namespace: "payments"/);
   assert.doesNotMatch(text, /token|certificate/);

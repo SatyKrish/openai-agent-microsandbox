@@ -2,45 +2,45 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The harness/sandbox boundary: the OpenAI Agents SDK harness calls this service
-// on its paired MXC sandbox worker. Every command runs in a fresh Microsoft
-// eXecution Container (Bubblewrap backend) that sees only its own session's
-// workspace. The worker holds the application-scoped Kubernetes identity; the
-// harness holds the model credentials. Neither crosses this boundary.
+// on its paired sandbox worker. Each session runs in its own microVM (microsandbox)
+// that sees only that session's workspace. The worker holds the application-scoped
+// Kubernetes identity; the harness holds the model credentials. Neither crosses
+// this boundary.
 //
 // Errors use gRPC status codes: INVALID_ARGUMENT for bad session IDs or paths
 // that leave the workspace, NOT_FOUND for a missing session, file or evidence
 // entry, RESOURCE_EXHAUSTED for a file over the size limit, UNAUTHENTICATED for
-// a missing or wrong worker token, UNAVAILABLE when MXC cannot launch a
-// container. A command's nonzero exit or timeout is a normal ExecResponse.
+// a missing or wrong worker token, UNAVAILABLE when the session's VM cannot be
+// started or reached. A command's nonzero exit or timeout is a normal ExecResponse.
 
 syntax = "proto3";
 
-package mxc.sandbox.v1;
+package sandbox.v1;
 
 service Sandbox {
-  // What this worker is: its identity, MXC backend, limits and egress policy.
+  // What this worker is: its identity, isolation, limits and egress policy.
   rpc Info(InfoRequest) returns (InfoResponse);
   // Create the session's workspace, or confirm it still exists. Idempotent.
   rpc InitSession(InitSessionRequest) returns (InitSessionResponse);
-  // Run one command in a fresh MXC container over the session's workspace.
+  // Run one command in the session's VM, starting the VM if it is not running.
   rpc Exec(ExecRequest) returns (ExecResponse);
-  // File I/O inside the session's workspace, without a container round trip.
+  // File I/O inside the session's workspace, without a shell command.
   rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
   // Cluster reads the worker recorded as evidence, from its own journal that
-  // the containers cannot see.
+  // no VM can see.
   rpc ListEvidence(ListEvidenceRequest) returns (ListEvidenceResponse);
   rpc ReadEvidence(ReadEvidenceRequest) returns (ReadEvidenceResponse);
   // A pod's log, through the worker's log policy: the caller gets a bounded,
-  // redacted excerpt of the lines that matter, never the raw log. Containers
-  // cannot read logs at all; the worker's API proxy refuses them. The excerpt is
+  // redacted excerpt of the lines that matter, never the raw log. VMs cannot
+  // read logs at all; the worker's API proxy refuses them. The excerpt is
   // recorded as evidence and saved in the session's workspace.
   rpc ReadLogs(ReadLogsRequest) returns (ReadLogsResponse);
   // A health summary of the workloads in the worker's namespaces, for the UI:
   // pod status, restarts, waiting reasons and recent warning events. No logs,
   // and nothing here goes to the model.
   rpc Health(HealthRequest) returns (HealthResponse);
-  // Remove the session's workspace. The audit journal stays unless purged.
+  // Remove the session's VM and workspace. The audit journal stays unless purged.
   rpc DestroySession(DestroySessionRequest) returns (DestroySessionResponse);
 }
 
@@ -49,8 +49,8 @@ message InfoRequest {}
 message InfoResponse {
   string worker_id = 1;          // pod name
   string domain = 2;             // application domain this worker serves
-  string containment = 3;        // MXC backend, e.g. "bubblewrap"
-  string mxc_sdk_version = 4;
+  string isolation = 3;          // e.g. "microVM per session (1 vCPU, 768 MiB)"
+  string runtime_version = 4;    // e.g. "microsandbox 0.7.13"
   string egress = 5;             // e.g. "kube-api only (10.96.0.1:443)"
   uint32 active_sessions = 6;
   uint64 max_file_bytes = 7;
@@ -63,7 +63,7 @@ message InitSessionRequest {
 }
 
 message InitSessionResponse {
-  string workspace_root = 1;     // the same path inside and outside the container
+  string workspace_root = 1;     // the same path inside and outside the VM
   bool created = 2;              // false when the workspace already existed
 }
 

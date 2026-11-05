@@ -7,10 +7,11 @@ workspaces A, B and C at once, gives each its own kubectl evidence, a private
 marker file and a notes log, and checks from A against B and C while all three
 are alive:
 
-1. A's containers cannot list, read, write or delete B's or C's files, or the
+1. A's VM cannot list, read, write or delete B's or C's files, or the
    worker's journal, by absolute path, ``../``, globbing or a planted symlink,
-   and cannot see their processes;
-2. A's file RPCs aimed there are refused, and B's and C's files are unchanged;
+   cannot see their processes, and its own disk changes never reach B;
+2. A's file RPCs aimed there are refused (a path through a symlink A planted is
+   NOT_FOUND: the volume keeps it as a plain file), and B's and C's files are unchanged;
 3. A's evidence RPCs return only A's entries, numbered per session;
 4. the harness's findings check fails when a conversation cites another
    conversation's evidence file or text, even after tampering with its own copy.
@@ -56,13 +57,13 @@ def digest(data: bytes) -> str:
 
 
 def client_from_env():
-    from agent_mxc import MXCSandboxClient
+    from sandbox_worker import WorkerSandboxClient
 
-    token_file = os.environ.get("MXC_WORKER_TOKEN_FILE")
-    return MXCSandboxClient(os.environ.get("MXC_WORKER_TARGET", "127.0.0.1:50051"),
-                            worker=os.environ.get("MXC_WORKER_NAME"),
+    token_file = os.environ.get("WORKER_TOKEN_FILE")
+    return WorkerSandboxClient(os.environ.get("WORKER_TARGET", "127.0.0.1:50051"),
+                            worker=os.environ.get("WORKER_NAME"),
                             token=Path(token_file).read_text().strip() if token_file else None,
-                            workspace_base=os.environ.get("MXC_WORKSPACE_BASE", "/sandboxes/active"))
+                            workspace_base=os.environ.get("WORKER_WORKSPACE_BASE", "/sandboxes/active"))
 
 
 async def fingerprint(client, workspace: str) -> dict:
@@ -76,7 +77,7 @@ async def fingerprint(client, workspace: str) -> dict:
     return {"files": files, "trusted": trusted}
 
 
-async def containers(sessions, ids, markers) -> None:
+async def vms(sessions, ids, markers) -> None:
     """Check 1: what A's commands can reach."""
     a = sessions["A"]
     others = [markers[name] for name in "BC"]
@@ -98,7 +99,7 @@ async def containers(sessions, ids, markers) -> None:
         await probe(f"A cannot read {target}'s evidence", f"cat /sandboxes/active/{other}/evidence/*", fails=True)
         await probe(f"A's symlink to {target}'s workspace leads nowhere",
                     f"ln -sfn /sandboxes/active/{other} link-{target} && cat link-{target}/work/marker.txt", fails=True)
-        await probe(f"A's writes and deletes aimed at {target} stay in A's container",
+        await probe(f"A's writes and deletes aimed at {target} stay in A's VM",
                     f"mkdir -p /sandboxes/active/{other}/work 2>/dev/null; "
                     f"echo pwned > /sandboxes/active/{other}/work/pwned.txt 2>/dev/null; "
                     f"echo pwned > ../{other}/work/marker.txt 2>/dev/null; "
@@ -110,6 +111,13 @@ async def containers(sessions, ids, markers) -> None:
                 "ls /sandboxes/history || cat /sandboxes/history/*/journal.jsonl", fails=True)
     await probe("A's symlink to the journal leads nowhere",
                 "ln -sfn /sandboxes/history link-history && ls link-history/", fails=True)
+
+    # A's disk outside the workspace is A's own: a file it adds under /etc never appears in B's VM.
+    planted = f"/etc/probe-{ids['A']}"
+    await a.exec(f"echo {markers['A']} > {planted}", timeout=30)
+    seen = await sessions["B"].exec(f"cat {planted}", timeout=30)
+    report(seen.exit_code != 0 and markers["A"].encode() not in seen.stdout,
+           "A's changes outside its workspace do not reach B's VM", f"exit {seen.exit_code}")
 
     # While B runs a process named after its marker, A's /proc must not show it.
     sleeper = f"{markers['B']}-proc"
@@ -134,8 +142,12 @@ async def file_rpcs(client, ids) -> None:
     """Check 2: A's ReadFile and WriteFile aimed at B, C and the journal are refused."""
     import grpc
 
-    from agent_mxc import WorkerError
+    from sandbox_worker import WorkerError
 
+    # A path that leaves the workspace is INVALID_ARGUMENT. A symlink A planted inside its VM is an
+    # ordinary file on the worker's volume (microsandbox keeps guest symlinks that way), so a path
+    # through it does not resolve at all: NOT_FOUND. Either way nothing is read or written.
+    REFUSED = (grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.NOT_FOUND)
     a, root_a = ids["A"], client.workspace_root(ids["A"])
     for target in "BC":
         other, root = ids[target], client.workspace_root(ids[target])
@@ -150,23 +162,23 @@ async def file_rpcs(client, ids) -> None:
             try:
                 await client.transport.read_file(a, path)
             except WorkerError as error:
-                refused.append(error.code == grpc.StatusCode.INVALID_ARGUMENT)
+                refused.append(error.code in REFUSED)
             else:
                 refused.append(False)
         for path in writes:
             try:
                 await client.transport.write_file(a, path, b"pwned\n")
             except WorkerError as error:
-                refused.append(error.code == grpc.StatusCode.INVALID_ARGUMENT)
+                refused.append(error.code in REFUSED)
             else:
                 refused.append(False)
         report(all(refused), f"A's file RPCs into {target}'s workspace and journal are refused",
-               f"{sum(refused)} of {len(refused)} INVALID_ARGUMENT")
+               f"{sum(refused)} of {len(refused)} refused")
 
 
 async def evidence_rpcs(client, ids) -> None:
     """Check 3: evidence is per session."""
-    from agent_mxc import WorkerError
+    from sandbox_worker import WorkerError
 
     listed = {name: await client.transport.list_evidence(ids[name]) for name in NAMES}
     commands = {name: [entry.command for entry in entries] for name, entries in listed.items()}
@@ -259,17 +271,17 @@ async def in_pod() -> int:
     from agents.sandbox import Manifest
     from agents.sandbox.entries import Dir
 
-    from agent_mxc import MXCSandboxOptions, WorkerError
+    from sandbox_worker import WorkerSandboxOptions, WorkerError
 
     client = client_from_env()
     info = await client.info()
     ids = {name: client.new_workspace_id() for name in NAMES}
-    markers = {name: f"MXC-ISOLATION-{name}-{secrets.token_hex(6)}" for name in NAMES}
+    markers = {name: f"SANDBOX-ISOLATION-{name}-{secrets.token_hex(6)}" for name in NAMES}
     print(f"Worker {info['worker_id']}: sessions A, B and C opened at once", flush=True)
     async with contextlib.AsyncExitStack() as stack:
         created = await asyncio.gather(*(client.create(
             manifest=Manifest(root=client.workspace_root(ids[name]), entries={"evidence": Dir(), "work": Dir()}),
-            options=MXCSandboxOptions(workspace_id=ids[name])) for name in NAMES))
+            options=WorkerSandboxOptions(workspace_id=ids[name])) for name in NAMES))
         sessions = {name: await stack.enter_async_context(session) for name, session in zip(NAMES, created)}
 
         async def setup(name):
@@ -289,8 +301,8 @@ async def in_pod() -> int:
         await asyncio.gather(*(setup(name) for name in NAMES))
         before = {name: await fingerprint(client, ids[name]) for name in "BC"}
 
-        print("1. A's containers against B, C and the journal:", flush=True)
-        await containers(sessions, ids, markers)
+        print("1. A's VM against B, C and the journal:", flush=True)
+        await vms(sessions, ids, markers)
         print("2. A's file RPCs against B, C and the journal:", flush=True)
         await file_rpcs(client, ids)
         for name in "BC":

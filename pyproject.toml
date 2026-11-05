@@ -23,7 +23,7 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 target-version = "py311"
-extend-exclude = ["sandbox/src/agent_mxc/proto"]
+extend-exclude = ["sandbox/src/sandbox_worker/proto"]
 
 [tool.ruff.lint]
 select = ["E9", "F"]

@@ -11,11 +11,11 @@ class InfoRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class InfoResponse(_message.Message):
-    __slots__ = ("worker_id", "domain", "containment", "mxc_sdk_version", "egress", "active_sessions", "max_file_bytes", "workspace_base", "namespaces")
+    __slots__ = ("worker_id", "domain", "isolation", "runtime_version", "egress", "active_sessions", "max_file_bytes", "workspace_base", "namespaces")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     DOMAIN_FIELD_NUMBER: _ClassVar[int]
-    CONTAINMENT_FIELD_NUMBER: _ClassVar[int]
-    MXC_SDK_VERSION_FIELD_NUMBER: _ClassVar[int]
+    ISOLATION_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_VERSION_FIELD_NUMBER: _ClassVar[int]
     EGRESS_FIELD_NUMBER: _ClassVar[int]
     ACTIVE_SESSIONS_FIELD_NUMBER: _ClassVar[int]
     MAX_FILE_BYTES_FIELD_NUMBER: _ClassVar[int]
@@ -23,14 +23,14 @@ class InfoResponse(_message.Message):
     NAMESPACES_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     domain: str
-    containment: str
-    mxc_sdk_version: str
+    isolation: str
+    runtime_version: str
     egress: str
     active_sessions: int
     max_file_bytes: int
     workspace_base: str
     namespaces: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, worker_id: _Optional[str] = ..., domain: _Optional[str] = ..., containment: _Optional[str] = ..., mxc_sdk_version: _Optional[str] = ..., egress: _Optional[str] = ..., active_sessions: _Optional[int] = ..., max_file_bytes: _Optional[int] = ..., workspace_base: _Optional[str] = ..., namespaces: _Optional[_Iterable[str]] = ...) -> None: ...
+    def __init__(self, worker_id: _Optional[str] = ..., domain: _Optional[str] = ..., isolation: _Optional[str] = ..., runtime_version: _Optional[str] = ..., egress: _Optional[str] = ..., active_sessions: _Optional[int] = ..., max_file_bytes: _Optional[int] = ..., workspace_base: _Optional[str] = ..., namespaces: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class InitSessionRequest(_message.Message):
     __slots__ = ("session_id",)

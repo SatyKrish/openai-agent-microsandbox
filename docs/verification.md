@@ -1,8 +1,85 @@
 # Verification record
 
-Date: 2026-11-01.
+## 2026-11-05: microsandbox in place of MXC
 
-## Versions and environment
+Each conversation's commands now run in a microVM (microsandbox) on the worker
+instead of a Microsoft eXecution Container per command. The record below this
+section is from before the move and describes MXC.
+
+### Versions and environment
+
+- Host: macOS ARM64, Apple M4 Max.
+- Local VM: dedicated Colima profile `openai-agent-mxc`, 4 CPUs and 8 GiB RAM,
+  `vz` with nested virtualization, Ubuntu 24.04.4, kernel 6.8.0-117, `/dev/kvm`
+  present. The session VMs run under KVM nested inside it.
+- Kubernetes: Kind 0.31.0, one node, v1.35.0, Linux ARM64, kindnet.
+- Sandbox worker: `node:24-trixie-slim`, `microsandbox` 0.7.13 (guest kernel
+  6.12.113); privileged container that drops to uid 10001 with no capabilities
+  and `no_new_privs` after giving its own `/dev/kvm` copy to that user.
+- Guest image: `debian:trixie-slim` with kubectl v1.35.0, python3, jq and
+  ripgrep; each VM 1 vCPU and 768 MiB, at most 4 running.
+- Harness: as before, `python:3.13-slim-trixie`, `openai-agents==0.24.0`.
+
+### Results
+
+| Check | Result |
+| --- | --- |
+| Worker unit tests | 26 passed: as before, with each session's VM spec (workspace at the same path, kubeconfig read-only, proxy-only or no network) in place of MXC requests, a VM failure as `UNAVAILABLE`, and files written through a running VM after the worker's own path checks |
+| Python tests, against the worker's real gRPC service on the test host | 46 passed |
+| microsandbox on macOS and in a Kind pod (spike) | Passed. A privileged pod opened `/dev/kvm`; an unprivileged pod with the device mounted got `EPERM`. Internet, other pod ports and the kube API's service address refused; the pod's loopback port 18080 reachable as `host.microsandbox.internal`; a 1 s command limit and a 512 MiB memory limit enforced; a VM's disk kept across stop and start. A file the host renamed over another read back empty in the running VM, on both platforms, while writes through the VM's file API were correct |
+| Worker start in the cluster | Guest image loaded from the worker image in 0.4 s; the self-test VM passed its 5 checks in 2.1 s, including kubectl through the proxy. The node's `/dev/kvm` stayed `root:kvm`; only the container's own copy went to the worker's group |
+| Boundary probes (`make verify`), in a session VM | 19 of 19 passed: the VM's own memory limit and an allocation past it refused (`MemoryError`), `no_new_privs`, no worker processes visible, journal and other workspaces not mounted, no API key, no route to 1.1.1.1, no Kubernetes token or `KUBERNETES_*` variable, no direct route to the API, python3, jq and ripgrep available, the API reachable through the worker's proxy, pods readable in `payments`, Secrets and `kube-system` forbidden, a dry-run delete refused as read-only, `kubectl exec` refused, raw `kubectl logs` refused, credentials redacted. The harness pod had no Kubernetes token |
+| Logs to the model (`make verify`) | Passed: a busy service's 5,000-line read reached the harness as a 2-line, 659-byte excerpt with 231 values masked |
+| Scripted investigation (`make verify`) | Passed in 5.5 s: a kubectl read and a log excerpt recorded as evidence, and both findings quotes matched the worker's copies |
+| Cross-session isolation (`make isolation`), three sessions open at once | 38 of 38 passed: A's VM could not list, read, write or delete B's or C's workspace, evidence or notes, or the journal, by absolute path, `../`, glob or a planted symlink; a file A added under `/etc` did not appear in B's VM; A's `/proc` showed 2 processes and none of B's; 14 of 14 file calls aimed at each of B and C were refused and their files and evidence were unchanged; evidence was per session; the findings check failed when A cited B's evidence; each journal held only its own commands; neither pod's logs held command output. A symlink planted in a VM is a plain file on the worker's volume, so a call through it answers `NOT_FOUND` rather than `INVALID_ARGUMENT` |
+| One user, 6 conversations at once (`make loadtest`) | Passed in 50.6 s (MXC: 5.0 s); turn p50 28.2 s; each conversation had its own workspace and saw only it |
+| 12 users at once, three times the worker's 4 running VMs | Passed in 74.1 s (MXC: 8.8 s); turn p50 43.7 s, max 73.5 s; conversations past the first four waited for a VM; every check passed |
+| 3 users sending to one shared conversation at once | Passed: 4 messages answered in 3 turns, in order, with no errors |
+| Workspace cleanup after the load test | Passed: deleting 19 conversations removed 19 workspaces |
+| Cost | A new session VM about 1.3 s to create, a stopped one about 1.2 s to start again; a command in a running VM 10 to 60 ms through the worker; a fresh VM's first kubectl 1.8 s (reading the binary), 0.3 to 0.6 s after. Directly on macOS, without the nesting, a stopped VM restarted in 156 ms |
+
+### Found and fixed while moving
+
+- The guest image archive, which `docker save` writes as 0600, and the folder
+  BuildKit created for it with the same mode were unreadable to the worker's
+  user; the image now makes the folder first and copies the archive as 0644.
+- The worker's file writes landed on the volume underneath running VMs, which
+  do not reliably see a replaced file; they now go through the VM's own agent
+  while it runs.
+- Stopping one session's VM to make room raced with that session's next
+  command, which reached a VM that was going away ("already running", or a
+  file missing). Commands and files now wait for a stop in flight.
+- Twelve sessions at once booted twelve VMs on four CPUs; the worker now waits
+  for room instead of going past `WORKER_MAX_RUNNING`. It then stopped VMs
+  between two commands of a running turn, so sessions took turns restarting
+  each other's VMs and opening a workspace took up to 283 s; only a VM idle for
+  10 s is stopped now. The worker's separate limit on commands at once
+  (`WORKER_MAX_CONCURRENT`) held slots for sessions waiting for a VM and starved
+  the ones that had one; it is gone, since one command per running VM already
+  bounds it. The client's call deadline allows 120 s beyond a command's own
+  limit for that wait.
+- A fresh VM's first kubectl took longer than the agent's 10 s default command
+  limit when four VMs started at once; the worker now runs `kubectl version
+  --client` while starting a VM.
+- A new probe for the worker's processes matched its own command line.
+
+### Unverified
+
+- AKS, or any node with direct (not nested) KVM; the AKS overlay has not been
+  applied. A KVM device plugin in place of the privileged worker.
+- A live investigation with the model, memory generation and the page in the
+  browser since the move; the scripted runs above exercise the same paths
+  without the model.
+- Multi-node clusters, and load beyond a few dozen conversations.
+- Resistance to a guest-kernel or VMM escape, which the VM boundary cannot
+  contain from inside.
+
+## 2026-11-01 and earlier: with MXC
+
+These results are from before the move to microsandbox, when every command ran
+in its own Microsoft eXecution Container (Bubblewrap backend) on the worker.
+
+### Versions and environment
 
 - Host: macOS ARM64.
 - Local VM: dedicated Colima profile `openai-agent-mxc`, 4 CPUs and 8 GiB RAM,
@@ -17,7 +94,7 @@ Date: 2026-11-01.
   `@assistant-ui/react` 0.15.29, React 19.3.1 and Vite 8.3.4.
 - Live model: `gpt-6.1-terra`.
 
-## Results
+### Results
 
 | Check | Result |
 | --- | --- |
@@ -65,7 +142,7 @@ Date: 2026-11-01.
 | Previous container's log already removed | The kubelet answered `--previous` with a one-line "unable to retrieve container logs" body, which the worker had recorded as a log excerpt; it is now a `NOT_FOUND` error and is not recorded as evidence |
 | Cost of isolation | About 11 ms per MXC container without network; about 110 ms per command with the proxy-only network |
 
-## Unverified
+### Unverified then
 
 - AKS, Kata or any other runtime than Kind's runc; the AKS overlay has not been
   applied.

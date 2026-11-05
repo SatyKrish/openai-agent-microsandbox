@@ -35,52 +35,52 @@ class SandboxStub:
             channel: A grpc.Channel.
         """
         self.Info = channel.unary_unary(
-                '/mxc.sandbox.v1.Sandbox/Info',
+                '/sandbox.v1.Sandbox/Info',
                 request_serializer=sandbox__pb2.InfoRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.InfoResponse.FromString,
                 _registered_method=True)
         self.InitSession = channel.unary_unary(
-                '/mxc.sandbox.v1.Sandbox/InitSession',
+                '/sandbox.v1.Sandbox/InitSession',
                 request_serializer=sandbox__pb2.InitSessionRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.InitSessionResponse.FromString,
                 _registered_method=True)
         self.Exec = channel.unary_unary(
-                '/mxc.sandbox.v1.Sandbox/Exec',
+                '/sandbox.v1.Sandbox/Exec',
                 request_serializer=sandbox__pb2.ExecRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.ExecResponse.FromString,
                 _registered_method=True)
         self.WriteFile = channel.unary_unary(
-                '/mxc.sandbox.v1.Sandbox/WriteFile',
+                '/sandbox.v1.Sandbox/WriteFile',
                 request_serializer=sandbox__pb2.WriteFileRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.WriteFileResponse.FromString,
                 _registered_method=True)
         self.ReadFile = channel.unary_unary(
-                '/mxc.sandbox.v1.Sandbox/ReadFile',
+                '/sandbox.v1.Sandbox/ReadFile',
                 request_serializer=sandbox__pb2.ReadFileRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.ReadFileResponse.FromString,
                 _registered_method=True)
         self.ListEvidence = channel.unary_unary(
-                '/mxc.sandbox.v1.Sandbox/ListEvidence',
+                '/sandbox.v1.Sandbox/ListEvidence',
                 request_serializer=sandbox__pb2.ListEvidenceRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.ListEvidenceResponse.FromString,
                 _registered_method=True)
         self.ReadEvidence = channel.unary_unary(
-                '/mxc.sandbox.v1.Sandbox/ReadEvidence',
+                '/sandbox.v1.Sandbox/ReadEvidence',
                 request_serializer=sandbox__pb2.ReadEvidenceRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.ReadEvidenceResponse.FromString,
                 _registered_method=True)
         self.ReadLogs = channel.unary_unary(
-                '/mxc.sandbox.v1.Sandbox/ReadLogs',
+                '/sandbox.v1.Sandbox/ReadLogs',
                 request_serializer=sandbox__pb2.ReadLogsRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.ReadLogsResponse.FromString,
                 _registered_method=True)
         self.Health = channel.unary_unary(
-                '/mxc.sandbox.v1.Sandbox/Health',
+                '/sandbox.v1.Sandbox/Health',
                 request_serializer=sandbox__pb2.HealthRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.HealthResponse.FromString,
                 _registered_method=True)
         self.DestroySession = channel.unary_unary(
-                '/mxc.sandbox.v1.Sandbox/DestroySession',
+                '/sandbox.v1.Sandbox/DestroySession',
                 request_serializer=sandbox__pb2.DestroySessionRequest.SerializeToString,
                 response_deserializer=sandbox__pb2.DestroySessionResponse.FromString,
                 _registered_method=True)
@@ -90,7 +90,7 @@ class SandboxServicer:
     """Missing associated documentation comment in .proto file."""
 
     def Info(self, request, context):
-        """What this worker is: its identity, MXC backend, limits and egress policy.
+        """What this worker is: its identity, isolation, limits and egress policy.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -104,14 +104,14 @@ class SandboxServicer:
         raise NotImplementedError('Method not implemented!')
 
     def Exec(self, request, context):
-        """Run one command in a fresh MXC container over the session's workspace.
+        """Run one command in the session's VM, starting the VM if it is not running.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def WriteFile(self, request, context):
-        """File I/O inside the session's workspace, without a container round trip.
+        """File I/O inside the session's workspace, without a shell command.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -125,7 +125,7 @@ class SandboxServicer:
 
     def ListEvidence(self, request, context):
         """Cluster reads the worker recorded as evidence, from its own journal that
-        the containers cannot see.
+        no VM can see.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -139,8 +139,8 @@ class SandboxServicer:
 
     def ReadLogs(self, request, context):
         """A pod's log, through the worker's log policy: the caller gets a bounded,
-        redacted excerpt of the lines that matter, never the raw log. Containers
-        cannot read logs at all; the worker's API proxy refuses them. The excerpt is
+        redacted excerpt of the lines that matter, never the raw log. VMs cannot
+        read logs at all; the worker's API proxy refuses them. The excerpt is
         recorded as evidence and saved in the session's workspace.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -157,7 +157,7 @@ class SandboxServicer:
         raise NotImplementedError('Method not implemented!')
 
     def DestroySession(self, request, context):
-        """Remove the session's workspace. The audit journal stays unless purged.
+        """Remove the session's VM and workspace. The audit journal stays unless purged.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -218,9 +218,9 @@ def add_SandboxServicer_to_server(servicer, server):
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'mxc.sandbox.v1.Sandbox', rpc_method_handlers)
+            'sandbox.v1.Sandbox', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('mxc.sandbox.v1.Sandbox', rpc_method_handlers)
+    server.add_registered_method_handlers('sandbox.v1.Sandbox', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -241,7 +241,7 @@ class Sandbox:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/mxc.sandbox.v1.Sandbox/Info',
+            '/sandbox.v1.Sandbox/Info',
             sandbox__pb2.InfoRequest.SerializeToString,
             sandbox__pb2.InfoResponse.FromString,
             options,
@@ -268,7 +268,7 @@ class Sandbox:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/mxc.sandbox.v1.Sandbox/InitSession',
+            '/sandbox.v1.Sandbox/InitSession',
             sandbox__pb2.InitSessionRequest.SerializeToString,
             sandbox__pb2.InitSessionResponse.FromString,
             options,
@@ -295,7 +295,7 @@ class Sandbox:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/mxc.sandbox.v1.Sandbox/Exec',
+            '/sandbox.v1.Sandbox/Exec',
             sandbox__pb2.ExecRequest.SerializeToString,
             sandbox__pb2.ExecResponse.FromString,
             options,
@@ -322,7 +322,7 @@ class Sandbox:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/mxc.sandbox.v1.Sandbox/WriteFile',
+            '/sandbox.v1.Sandbox/WriteFile',
             sandbox__pb2.WriteFileRequest.SerializeToString,
             sandbox__pb2.WriteFileResponse.FromString,
             options,
@@ -349,7 +349,7 @@ class Sandbox:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/mxc.sandbox.v1.Sandbox/ReadFile',
+            '/sandbox.v1.Sandbox/ReadFile',
             sandbox__pb2.ReadFileRequest.SerializeToString,
             sandbox__pb2.ReadFileResponse.FromString,
             options,
@@ -376,7 +376,7 @@ class Sandbox:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/mxc.sandbox.v1.Sandbox/ListEvidence',
+            '/sandbox.v1.Sandbox/ListEvidence',
             sandbox__pb2.ListEvidenceRequest.SerializeToString,
             sandbox__pb2.ListEvidenceResponse.FromString,
             options,
@@ -403,7 +403,7 @@ class Sandbox:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/mxc.sandbox.v1.Sandbox/ReadEvidence',
+            '/sandbox.v1.Sandbox/ReadEvidence',
             sandbox__pb2.ReadEvidenceRequest.SerializeToString,
             sandbox__pb2.ReadEvidenceResponse.FromString,
             options,
@@ -430,7 +430,7 @@ class Sandbox:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/mxc.sandbox.v1.Sandbox/ReadLogs',
+            '/sandbox.v1.Sandbox/ReadLogs',
             sandbox__pb2.ReadLogsRequest.SerializeToString,
             sandbox__pb2.ReadLogsResponse.FromString,
             options,
@@ -457,7 +457,7 @@ class Sandbox:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/mxc.sandbox.v1.Sandbox/Health',
+            '/sandbox.v1.Sandbox/Health',
             sandbox__pb2.HealthRequest.SerializeToString,
             sandbox__pb2.HealthResponse.FromString,
             options,
@@ -484,7 +484,7 @@ class Sandbox:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/mxc.sandbox.v1.Sandbox/DestroySession',
+            '/sandbox.v1.Sandbox/DestroySession',
             sandbox__pb2.DestroySessionRequest.SerializeToString,
             sandbox__pb2.DestroySessionResponse.FromString,
             options,

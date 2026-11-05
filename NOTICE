@@ -8,9 +8,11 @@ and apps/sre/agent/skills/kubernetes-triage/scripts/triage.py derive from
 openai-agent-substrate, Copyright 2026 openai-agent-substrate contributors,
 Apache-2.0. Files that keep that copyright line are those copies.
 
-The sandbox worker image installs Microsoft eXecution Container
-(@microsoft/mxc-sdk), Copyright (c) Microsoft Corporation, under the MIT
-License, from npm; the repository vendors none of its source.
+The sandbox worker image installs microsandbox (the microsandbox npm package
+and its platform runtime), Copyright the microsandbox authors, under the Apache
+License 2.0, from npm; the repository vendors none of its source. The runtime
+includes libkrunfw (LGPL-2.1-only), which bundles a Linux kernel
+(GPL-2.0-only); see THIRD_PARTY_NOTICES.md before distributing a built image.
 
 The OpenAI architecture diagram is third-party documentation artwork and is
 excluded from this project's Apache-2.0 license grant. See

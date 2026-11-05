@@ -1,6 +1,6 @@
 # Copyright 2026 openai-agent-mxc contributors
 # SPDX-License-Identifier: Apache-2.0
-"""Serve the SRE agent's UI on loopback, against its paired MXC sandbox worker.
+"""Serve the SRE agent's UI on loopback, against its paired sandbox worker.
 
 In the cluster this runs in the harness pod and binds 127.0.0.1, so the only way
 in is ``kubectl port-forward``. Locally it can run against a port-forwarded worker.
@@ -23,13 +23,13 @@ def parse_args(argv=None):
 
     env = os.environ.get
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--worker", default=env("MXC_WORKER_TARGET", "127.0.0.1:50051"),
-                        help="The sandbox worker's gRPC address (MXC_WORKER_TARGET)")
-    parser.add_argument("--worker-name", default=env("MXC_WORKER_NAME"),
-                        help="Stable name saved with each conversation; defaults to --worker (MXC_WORKER_NAME)")
-    parser.add_argument("--token-file", type=Path, default=env("MXC_WORKER_TOKEN_FILE"),
-                        help="The pair token the worker expects (MXC_WORKER_TOKEN_FILE)")
-    parser.add_argument("--workspace-base", default=env("MXC_WORKSPACE_BASE", "/sandboxes/active"),
+    parser.add_argument("--worker", default=env("WORKER_TARGET", "127.0.0.1:50051"),
+                        help="The sandbox worker's gRPC address (WORKER_TARGET)")
+    parser.add_argument("--worker-name", default=env("WORKER_NAME"),
+                        help="Stable name saved with each conversation; defaults to --worker (WORKER_NAME)")
+    parser.add_argument("--token-file", type=Path, default=env("WORKER_TOKEN_FILE"),
+                        help="The pair token the worker expects (WORKER_TOKEN_FILE)")
+    parser.add_argument("--workspace-base", default=env("WORKER_WORKSPACE_BASE", "/sandboxes/active"),
                         help="The worker's DATA_DIR/active")
     parser.add_argument("--namespace", action="append", dest="namespaces",
                         help="A namespace the worker's identity may read; repeat for more (SRE_NAMESPACES)")
@@ -83,8 +83,8 @@ def main(argv=None):
 
     from agents import flush_traces
 
-    from agent_mxc import MXCSandboxClient
-    from agent_mxc.tracing import configure_tracing, tracing_enabled
+    from sandbox_worker import WorkerSandboxClient
+    from sandbox_worker.tracing import configure_tracing, tracing_enabled
     from openai_harness import http
     from openai_harness.engine import Harness
     from openai_harness.memory import UserMemory
@@ -100,7 +100,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
     spec = make_spec(args.namespaces, memory_models=args.memory_models)
     configure_tracing(operation_names=spec.trace_operations, harness_tools=TOOL_NAMES)
-    client = MXCSandboxClient(args.worker, worker=args.worker_name, token=args.token, workspace_base=args.workspace_base)
+    client = WorkerSandboxClient(args.worker, worker=args.worker_name, token=args.token, workspace_base=args.workspace_base)
     store = SQLiteStore(args.data_dir / "threads.sqlite3", admins=args.admins)
     max_age = timedelta(days=args.memory_max_age_days) if args.memory_max_age_days > 0 else None
     memory = UserMemory(args.data_dir / "memory", memories_dir=spec.memory_dir, max_age=max_age,

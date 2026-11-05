@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The gRPC service end to end with a stand-in runner: commands run on the test
-// host (no MXC), and kubectl is a fake that prints a fixed pod table.
+// host (no VM), and kubectl is a fake that prints a fixed pod table.
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -13,12 +13,15 @@ import { after, before, test } from 'node:test';
 
 import * as grpc from '@grpc/grpc-js';
 
-import { createServer, loadService, type Runner } from '../src/server.js';
+import { RuntimeError } from 'microsandbox';
+
+import type { Runner } from '../src/runner.js';
+import { createServer, loadService } from '../src/server.js';
 import { config, fakeHealthSource, fakeLogSource } from './helpers.js';
 
 const PODS = 'NAME READY STATUS\npayments-api-1 0/1 CrashLoopBackOff\ntoken=abcd1234secret\n';
 
-const fakeRunner: Runner = async (_config, _root, argv, cwd) => {
+const run: Runner['run'] = async (_id, _root, argv, cwd) => {
   const fake = path.join(cwd, '..', '..', 'bin');
   // A login shell would reset PATH and lose the fake kubectl.
   const words = argv[1] === '-lc' ? [argv[0]!, '-c', ...argv.slice(2)] : [...argv];
@@ -26,6 +29,7 @@ const fakeRunner: Runner = async (_config, _root, argv, cwd) => {
     env: { PATH: `${fake}:${process.env.PATH}` } });
   return { stdout: result.stdout, stderr: result.stderr, exitCode: result.status ?? 1, timedOut: false, durationMs: 1 };
 };
+const fakeRunner: Runner = { run, write: async () => false, destroy: async () => undefined };
 
 let data: string;
 let server: grpc.Server;
@@ -38,11 +42,11 @@ function call<T>(method: string, request: object, metadata = new grpc.Metadata()
 }
 
 before(async () => {
-  data = await fs.mkdtemp(path.join(os.tmpdir(), 'mxc-server-'));
+  data = await fs.mkdtemp(path.join(os.tmpdir(), 'worker-server-'));
   await fs.mkdir(path.join(data, 'bin'));
   await fs.writeFile(path.join(data, 'bin', 'kubectl'), `#!/bin/sh\nprintf '${PODS.replace(/\n/g, '\\n')}'\n`,
     { mode: 0o755 });
-  server = createServer(config(data, { token: 'pair-token', maxConcurrent: 2 }), fakeRunner, { logs: fakeLogSource, health: fakeHealthSource });
+  server = createServer(config(data, { token: 'pair-token' }), fakeRunner, { logs: fakeLogSource, health: fakeHealthSource });
   const port = await new Promise<number>((resolve, reject) =>
     server.bindAsync('127.0.0.1:0', grpc.ServerCredentials.createInsecure(), (error, bound) =>
       (error ? reject(error) : resolve(bound))));
@@ -124,18 +128,19 @@ test('a session runs commands, records kubectl reads as evidence, and keeps file
   await assert.rejects(fs.access(path.join(data, 'history', 'conv-a')));
 });
 
-test("MXC's structured errors and warnings are handled as its docs describe", async () => {
-  const { MxcError } = await import('@microsoft/mxc-sdk/v1');
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mxc-errors-'));
-  let next: 'backend_error' | 'policy_validation' | 'warn' = 'backend_error';
-  const runner: Runner = async () => {
-    if (next === 'warn') {
-      return { stdout: 'ok\n', stderr: '', exitCode: 0, timedOut: false, durationMs: 1,
-        warnings: ['Bubblewrap: IPv6 destination is unreachable'] };
-    }
-    throw new MxcError(next, `${next} from the backend`);
+test('VM failures are UNAVAILABLE; a running VM gets its files written through it', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'worker-errors-'));
+  let fail = true;
+  const written: string[] = [];
+  const runner: Runner = {
+    run: async () => {
+      if (fail) throw new RuntimeError('the VM could not start');
+      return { stdout: 'ok\n', stderr: '', exitCode: 0, timedOut: false, durationMs: 1 };
+    },
+    write: async (_id, file) => { written.push(file); return true; },
+    destroy: async () => undefined,
   };
-  const other = createServer(config(dataDir, { maxConcurrent: 1 }), runner);
+  const other = createServer(config(dataDir), runner);
   const port = await new Promise<number>((resolve, reject) =>
     other.bindAsync('127.0.0.1:0', grpc.ServerCredentials.createInsecure(), (error, bound) =>
       (error ? reject(error) : resolve(bound))));
@@ -144,16 +149,19 @@ test("MXC's structured errors and warnings are handled as its docs describe", as
   const invoke = <T>(method: string, request: object) => new Promise<T>((resolve, reject) =>
     direct[method]!(request, (error: grpc.ServiceError | null, response: T) => (error ? reject(error) : resolve(response))));
   try {
-    await invoke('InitSession', { session_id: 'conv-e' });
+    const { workspace_root: root } = await invoke<{ workspace_root: string }>('InitSession', { session_id: 'conv-e' });
     await assert.rejects(invoke('Exec', { session_id: 'conv-e', argv: ['true'] }),
-      (error: grpc.ServiceError) => error.code === grpc.status.UNAVAILABLE && /backend_error/.test(error.details));
-    next = 'policy_validation';
-    await assert.rejects(invoke('Exec', { session_id: 'conv-e', argv: ['true'] }),
-      (error: grpc.ServiceError) => error.code === grpc.status.FAILED_PRECONDITION);
-    next = 'warn';
+      (error: grpc.ServiceError) => error.code === grpc.status.UNAVAILABLE && /RuntimeError/.test(error.details));
+    fail = false;
     await invoke('Exec', { session_id: 'conv-e', argv: ['true'] });
-    const journal = await fs.readFile(path.join(dataDir, 'history', 'conv-e', 'journal.jsonl'), 'utf8');
-    assert.match(journal, /"mxc_warnings":\["Bubblewrap: IPv6 destination is unreachable"\]/);
+    // The runner wrote the file; the worker still checked the path and made its directory.
+    await invoke('WriteFile', { session_id: 'conv-e', path: 'notes/a.txt', content: Buffer.from('a') });
+    assert.deepEqual(written, [path.join(root, 'notes', 'a.txt')]);
+    await fs.access(path.join(root, 'notes'));
+    await assert.rejects(fs.access(path.join(root, 'notes', 'a.txt')));
+    await assert.rejects(invoke('WriteFile', { session_id: 'conv-e', path: '../escape.txt', content: Buffer.from('a') }),
+      (error: grpc.ServiceError) => error.code === grpc.status.INVALID_ARGUMENT);
+    assert.equal(written.length, 1);
   } finally {
     direct.close();
     other.forceShutdown();

@@ -14,7 +14,8 @@ COLIMA_MEMORY  ?= 8
 ENV_FILE       ?= .env
 OVERLAY        ?= deploy/kubernetes/overlays/kind
 UI_PORT        ?= 8001
-WORKER_IMAGE   ?= mxc-sandbox-worker:local
+GUEST_IMAGE    ?= sre-sandbox-guest:local
+WORKER_IMAGE   ?= sandbox-worker:local
 HARNESS_IMAGE  ?= sre-agent-harness:local
 
 ifneq ($(COLIMA_PROFILE),)
@@ -28,12 +29,13 @@ all: cluster images load secrets deploy demo
 
 cluster: ## Colima VM (macOS) and the Kind cluster
 ifneq ($(COLIMA_PROFILE),)
+	@# The worker's VMs need KVM inside the Colima VM: nested virtualization (Apple M3 or later, vz).
 	@colima status --profile $(COLIMA_PROFILE) >/dev/null 2>&1 || \
 	  colima start --profile $(COLIMA_PROFILE) --cpus $(COLIMA_CPUS) --memory $(COLIMA_MEMORY) --disk 40 \
-	    --activate=false --ssh-config=false
-	@# Ubuntu 24.04 confines unprivileged user namespaces with AppArmor, which Bubblewrap needs.
-	@# This VM exists only for this cluster; MXC's own diagnostics suggest the same on an ephemeral host.
-	colima ssh --profile $(COLIMA_PROFILE) -- sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+	    --vm-type vz --nested-virtualization --activate=false --ssh-config=false
+	@colima ssh --profile $(COLIMA_PROFILE) -- test -c /dev/kvm || { \
+	  echo "No /dev/kvm in the $(COLIMA_PROFILE) VM. Set nestedVirtualization: true in"; \
+	  echo "~/.colima/$(COLIMA_PROFILE)/colima.yaml, then colima stop/start --profile $(COLIMA_PROFILE)."; exit 1; }
 endif
 	@kind get clusters 2>/dev/null | grep -qx $(CLUSTER) || { \
 	  previous=$$(kubectl config current-context 2>/dev/null); \
@@ -43,7 +45,9 @@ endif
 page: ## Build the UI's page (apps/sre/ui/web) into static/app, for running the UI outside the image
 	cd apps/sre/ui/web && npm ci --no-audit --no-fund && npm run build
 
-images: ## Build the worker and harness images
+images: ## Build the guest, worker and harness images; the worker image carries the guest's
+	docker build -t $(GUEST_IMAGE) - < deploy/docker/guest.Dockerfile
+	@mkdir -p build && docker save $(GUEST_IMAGE) -o build/guest-image.tar
 	docker build -f deploy/docker/worker.Dockerfile -t $(WORKER_IMAGE) .
 	docker build -f deploy/docker/harness.Dockerfile -t $(HARNESS_IMAGE) .
 
@@ -107,11 +111,11 @@ test-python: ## Needs the worker built (test-worker)
 	uv run --locked pytest
 
 proto: ## Regenerate the Python stubs from proto/
-	uvx --from grpcio-tools==1.85.1 python -m grpc_tools.protoc -Iproto/mxc/sandbox/v1 \
-	  --python_out=sandbox/src/agent_mxc/proto --pyi_out=sandbox/src/agent_mxc/proto \
-	  --grpc_python_out=sandbox/src/agent_mxc/proto proto/mxc/sandbox/v1/sandbox.proto
+	uvx --from grpcio-tools==1.85.1 python -m grpc_tools.protoc -Iproto/sandbox/v1 \
+	  --python_out=sandbox/src/sandbox_worker/proto --pyi_out=sandbox/src/sandbox_worker/proto \
+	  --grpc_python_out=sandbox/src/sandbox_worker/proto proto/sandbox/v1/sandbox.proto
 	sed -i.bak 's/^import sandbox_pb2 as sandbox__pb2/from . import sandbox_pb2 as sandbox__pb2/' \
-	  sandbox/src/agent_mxc/proto/sandbox_pb2_grpc.py && rm sandbox/src/agent_mxc/proto/sandbox_pb2_grpc.py.bak
+	  sandbox/src/sandbox_worker/proto/sandbox_pb2_grpc.py && rm sandbox/src/sandbox_worker/proto/sandbox_pb2_grpc.py.bak
 
 clean: ## Remove the pair and the demo; keeps the cluster
 	-$(KUBECTL) delete -f deploy/demo/payments.yaml --ignore-not-found

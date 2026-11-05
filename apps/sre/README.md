@@ -1,23 +1,23 @@
 # SRE agent
 
 Investigates unhealthy Kubernetes workloads and explains each cause with
-evidence. It reads the cluster with kubectl inside its MXC containers, using the
+evidence. It reads the cluster with kubectl inside its session's VM, using the
 sandbox worker's read-only identity, and cannot change anything. It runs on the
 [shared harness](../../harness/src/openai_harness/engine.py) and its UI.
 
 | Where | What runs there |
 | --- | --- |
 | Harness | The agent loop, the model calls and the host check. No Kubernetes token. |
-| MXC containers on the worker | kubectl, the shell, Python and the `kubernetes-triage` skill, over the conversation's workspace. No credentials; network to the worker's read-only API proxy only. |
+| The conversation's VM on the worker | kubectl, the shell, Python and the `kubernetes-triage` skill, over the conversation's workspace. No credentials; network to the worker's read-only API proxy only. |
 | The worker's API proxy | Adds the worker's token to kubectl's reads and refuses writes, `exec`, pod logs and anything that is not the Kubernetes API. |
 | `pod_logs` tool | Gets a pod's log from the worker as an excerpt: errors, server errors and warnings with context and stack traces, the last lines, repeats collapsed with status codes and addresses kept apart, credentials and personal data masked, at most 40 lines; `since` limits it to recent lines. The raw log never leaves the worker. |
-| Worker journal | Every command, and the output of every plain kubectl read as evidence. No container can see it. |
+| Worker journal | Every command, and the output of every plain kubectl read as evidence. No VM can see it. |
 | Host check | Every quote in `output/findings.json` must appear in the worker's copy of the evidence file it cites. Each quote's result is reported; when one is missing, the agent gets one pass to correct the findings, and the card says so. |
 | Memory | What a user's earlier investigations of this application learned, distilled by the SDK when a conversation's session closes and carried by the harness into that user's later conversations. Without sign-in, everyone shares the guest's. |
 
 ## Access
 
-`payments-sre-sa` is used only by the worker's API proxy; containers never see
+`payments-sre-sa` is used only by the worker's API proxy; VMs never see
 its token. It holds a Role in `payments` that grants `get`, `list` and
 `watch` on pods, pod logs, events, services, endpoints, deployments, replica
 sets, stateful sets, daemon sets, jobs and cron jobs. It grants nothing on
@@ -31,7 +31,7 @@ credential patterns it recognizes.
 
 A plain kubectl read (no pipes, redirections, quotes or `$`) is saved by the
 worker in its journal and in the workspace as `evidence/NNN-kubectl-....txt`,
-and the command's output ends with `[mxc-worker] saved as …`. Each `pod_logs`
+and the command's output ends with `[sandbox-worker] saved as …`. Each `pod_logs`
 excerpt is saved the same way as `evidence/NNN-pod-logs-....txt`. The agent analyzes
 the workspace copies with the shell and Python; the harness checks quotes
 against the journal's. Editing `evidence/` in the sandbox cannot make a quote
@@ -56,7 +56,7 @@ closes. `make verify` and `make loadtest` use a scripted model instead.
 
 - **Top bar.** One button says what the agent reads and with which model, and
   turns amber when the worker is unreachable. It opens **How this works**: the
-  worker, its containment and egress, and how the agent is contained, said once
+  worker, its isolation and egress, and how the agent is contained, said once
   here rather than on every view. Settings opens it too. In a conversation, the
   panel button shows or hides the side panel.
 - **Left column.** A sidebar of icons with their names: New investigation,

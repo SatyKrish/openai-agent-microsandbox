@@ -6,10 +6,10 @@ Each user is its own thread and HTTP connection, as browsers would be.
 
 Scripted (``make loadtest``, in the harness pod): starts a second harness on
 127.0.0.1:8099 with a scripted model against the real worker, so every turn runs
-real kubectl reads and file writes in MXC containers without model API usage.
+real kubectl reads and file writes in session VMs without model API usage.
 
 - one user starts several conversations at once (like several tabs);
-- many users start one conversation each, more than the worker's parallel slots;
+- many users start one conversation each, more than the worker runs VMs at once;
 - several users send to one shared conversation at the same moment: the conversation's turns run one
   at a time, and messages that arrive while one runs are answered together in the next.
 
@@ -132,7 +132,7 @@ def serve_scripted(port: int, data: Path) -> None:
     """A second harness in this process with a scripted model, against the deployed worker."""
     import uvicorn
 
-    from agent_mxc import MXCSandboxClient
+    from sandbox_worker import WorkerSandboxClient
     from openai_harness.engine import Harness as Engine
     from openai_harness.store import SQLiteStore
     from openai_harness.testing import Calls, shell
@@ -149,11 +149,11 @@ def serve_scripted(port: int, data: Path) -> None:
         shell("ls /sandboxes/active | wc -l | tr -d ' ' > work/visible.txt && sleep 1 && cat work/visible.txt"),
         shell(findings_command()),
     ], answer="payments-processor crashes at startup: DATABASE_URL is not set.")
-    token_file = os.environ.get("MXC_WORKER_TOKEN_FILE")
-    client = MXCSandboxClient(os.environ.get("MXC_WORKER_TARGET", "127.0.0.1:50051"),
-                              worker=os.environ.get("MXC_WORKER_NAME"),
+    token_file = os.environ.get("WORKER_TOKEN_FILE")
+    client = WorkerSandboxClient(os.environ.get("WORKER_TARGET", "127.0.0.1:50051"),
+                              worker=os.environ.get("WORKER_NAME"),
                               token=Path(token_file).read_text().strip() if token_file else None,
-                              workspace_base=os.environ.get("MXC_WORKSPACE_BASE", "/sandboxes/active"))
+                              workspace_base=os.environ.get("WORKER_WORKSPACE_BASE", "/sandboxes/active"))
     spec = make_spec({"payments"})
     engine = Engine(spec, SQLiteStore(data / "threads.sqlite3"), client, model=model, output_dir=data / "threads",
                     model_label="scripted", card=check_rows, file_status=file_status, preferred_output=REPORT)

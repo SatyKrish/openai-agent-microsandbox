@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import { evidenceName, kubectlRead } from '../src/evidence.js';
 import { apiLogSource, failingFirst, LogError } from '../src/logs.js';
 import { redact } from '../src/redact.js';
-import { buildRequest, quote } from '../src/runner.js';
+import { GUEST_KUBE_DIR, vmSpec } from '../src/runner.js';
 import { Workspaces, WorkspaceError } from '../src/workspace.js';
 import { config } from './helpers.js';
 
@@ -62,30 +62,25 @@ test('redaction removes credentials and keeps context', () => {
   assert.ok(out.includes('[REDACTED_PRIVATE_KEY]') && !out.includes('MIIabc'));
 });
 
-test('container requests confine the command', () => {
-  assert.equal(quote("it's"), `'it'\\''s'`);
-  assert.equal(quote('get'), 'get');
-  const request = buildRequest(config('/sandboxes'), '/sandboxes/active/s-1', ['sh', '-lc', 'kubectl get pods | wc -l'],
-    '/sandboxes/active/s-1', 20_000);
-  assert.equal(request.command,
-    "exec choom -n 1000 -- prlimit --as=1073741824 --cpu=20 --nofile=4096:4096 -- sh -lc 'kubectl get pods | wc -l'");
-  assert.deepEqual(request.filesystem?.readwritePaths, ['/sandboxes/active/s-1']);
-  assert.deepEqual(request.containment, { type: 'bubblewrap' });
-  assert.equal(request.environment?.HOME, '/tmp');
-  // Kubernetes only through the worker's proxy: no token or API address in the container.
-  assert.deepEqual(request.network, { egress: { default: 'deny' }, ingress: { default: 'deny', hostLoopback: 'deny' },
-    runtimeConfig: { networkProxy: 'http://127.0.0.1:18080' } });
-  assert.deepEqual(request.filesystem?.readonlyPaths, ['/sandboxes/kube']);
-  assert.equal(request.environment?.KUBECONFIG, '/sandboxes/kube/config');
-  assert.ok(!Object.keys(request.environment ?? {}).some((name) => name.startsWith('KUBERNETES_')));
-  const closed = buildRequest(config('/sandboxes', { egress: 'none' }), '/w', ['true'], '/w', 1000);
-  assert.deepEqual(closed.network, { egress: { default: 'deny' }, ingress: { default: 'deny', hostLoopback: 'deny' } });
-  assert.deepEqual(closed.filesystem?.readonlyPaths, []);
-  assert.equal(closed.environment?.KUBECONFIG, undefined);
+test("a session's VM sees its workspace and, with Kubernetes access, only the proxy", () => {
+  const spec = vmSpec(config('/sandboxes'), 's-1', '/sandboxes/active/s-1');
+  assert.equal(spec.name, 's-1');
+  assert.equal(spec.workdir, '/sandboxes/active/s-1');
+  // The workspace at the same path inside, and the kubeconfig read-only: nothing else of the worker's volume.
+  assert.deepEqual(spec.mounts, [{ guest: '/sandboxes/active/s-1', host: '/sandboxes/active/s-1', readonly: false },
+    { guest: GUEST_KUBE_DIR, host: '/sandboxes/kube', readonly: true }]);
+  assert.deepEqual(spec.network, { mode: 'proxy', port: 18080 });
+  assert.equal(spec.env.KUBECONFIG, `${GUEST_KUBE_DIR}/config`);
+  assert.ok(!Object.keys(spec.env).some((name) => name.startsWith('KUBERNETES_')));
+  assert.deepEqual([spec.cpus, spec.memoryMib, spec.image], [1, 768, 'sre-sandbox-guest:local']);
+  const closed = vmSpec(config('/sandboxes', { egress: 'none' }), 's-2', '/w');
+  assert.deepEqual(closed.network, { mode: 'none' });
+  assert.deepEqual(closed.mounts, [{ guest: '/w', host: '/w', readonly: false }]);
+  assert.equal(closed.env.KUBECONFIG, undefined);
 });
 
 test('workspace paths stay inside the session', async () => {
-  const data = await fs.mkdtemp(path.join(os.tmpdir(), 'mxc-worker-'));
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), 'worker-'));
   const spaces = new Workspaces(data);
   assert.throws(() => spaces.root('../x'), WorkspaceError);
   assert.throws(() => spaces.root('Upper'), WorkspaceError);

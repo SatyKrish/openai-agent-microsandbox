@@ -2,11 +2,12 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
-A reference implementation of **Microsoft eXecution Containers (MXC) on
-Kubernetes as the sandbox for OpenAI Agents SDK `SandboxAgent`**. The SDK harness
-runs in one pod with the model's API key; every shell command and file operation
-runs in an MXC container on a paired sandbox worker pod that holds the
-application's read-only cluster identity instead.
+A reference implementation of **a paired sandbox for the OpenAI Agents SDK
+`SandboxAgent` on Kubernetes, with a microVM per conversation**. The SDK
+harness runs in one pod with the model's API key; every shell command and file
+operation runs in a [microsandbox](https://github.com/superradcompany/microsandbox)
+microVM on a paired sandbox worker pod that holds the application's read-only
+cluster identity instead.
 
 ## Harness separate from compute
 
@@ -16,37 +17,37 @@ This project follows the [harness separate from compute pattern](https://develop
 
 *Diagram from the [official OpenAI documentation](https://developers.openai.com/api/docs/guides/agents/sandboxes).*
 
-`MXCSandboxClient` connects the SDK sandbox interface to an MXC sandbox worker
-over gRPC. The worker gives each conversation a workspace on its volume and runs
-every command in a fresh MXC container (the Bubblewrap backend on Linux) that
-can see only that workspace. Each application domain gets one pair:
+`WorkerSandboxClient` connects the SDK sandbox interface to the sandbox worker
+over gRPC. The worker gives each conversation a workspace on its volume and a
+microVM, started on the conversation's first command and stopped when it is
+idle, that sees only that workspace. Each application domain gets one pair:
 
 | Harness (`sre-harness-payments-0`) | Sandbox worker (`sre-sandbox-payments-0`) |
 | --- | --- |
 | The OpenAI Agents SDK, with SDK sessions for history | One workspace per conversation, kept on the worker's volume |
-| The SRE UI (assistant-ui) over the harness's conversation API | An MXC container per command: shell, files, skills, kubectl, Python |
+| The SRE UI (assistant-ui) over the harness's conversation API | A microVM per conversation: shell, files, skills, kubectl, Python |
 | The model's API key, and no Kubernetes token | A read-only Kubernetes identity, used only by its API proxy, and no model API key |
-| Host checks of findings against recorded evidence | An audit journal and recorded evidence that no container can see |
+| Host checks of findings against recorded evidence | An audit journal and recorded evidence that no VM can see |
 
 The model loop, model calls and conversation state stay in the harness. A
-command reaches the cluster only from inside an MXC container, which has no
-capabilities and no credentials, a private network that reaches nothing but the
-worker's read-only Kubernetes API proxy, and no view of the journal or of other
-conversations. The proxy adds the worker's token and refuses anything but
-reads, so the token never enters a container. Logs never reach the model raw:
-containers cannot read them, and the agent's `pod_logs` tool gets them from the
+command reaches the cluster only from inside its conversation's VM, which has its
+own kernel, vCPU and memory limits, no credentials, a network that reaches
+nothing but the worker's read-only Kubernetes API proxy, and no view of the
+journal or of other conversations. The proxy adds the worker's token and refuses
+anything but reads, so the token never enters a VM. Logs never reach the model
+raw: VMs cannot read them, and the agent's `pod_logs` tool gets them from the
 worker as excerpts, with only the error and warning lines kept, repeats
 collapsed, credentials and personal data masked, and a hard size cap. Plain kubectl reads are
-recorded as evidence outside the containers, and the harness checks every quote
+recorded as evidence outside the VMs, and the harness checks every quote
 in the agent's findings against those copies. See the
 [architecture](docs/architecture.md).
 
 ## Quick start
 
-Run the SRE agent on a local Kind cluster. You need macOS with
-[Colima](https://github.com/abiosoft/colima) or Linux with Docker, plus
-[kind](https://kind.sigs.k8s.io/), kubectl, Node 24 or later,
-[uv](https://docs.astral.sh/uv/), and an OpenAI API key.
+Run the SRE agent on a local Kind cluster. You need macOS on Apple silicon (M3
+or later, for nested virtualization) with [Colima](https://github.com/abiosoft/colima),
+or Linux with Docker and KVM, plus [kind](https://kind.sigs.k8s.io/), kubectl,
+Node 24 or later, [uv](https://docs.astral.sh/uv/), and an OpenAI API key.
 
 **1. Add your OpenAI settings.** Set `OPENAI_API_KEY` and `OPENAI_MODEL` in
 `.env`. Only the harness pod receives them, through a Secret; the sandbox worker
@@ -57,17 +58,17 @@ cp .env.example .env
 ```
 
 **2. Set up the cluster and deploy the pair.** This starts a dedicated Colima
-VM, creates the Kind cluster, builds the worker and harness images, and deploys
-them with a payments application that is broken in two ways, plus a service
-whose logs are full of customer data. Every command
-names the `kind-openai-agent-mxc` context, and your current kubectl context is
-restored afterwards. See the [local Kubernetes guide](docs/local-kubernetes.md).
+VM with nested virtualization, creates the Kind cluster, builds the guest,
+worker and harness images, and deploys them with a payments application that is
+broken in two ways, plus a service whose logs are full of customer data. Every
+command names the `kind-openai-agent-mxc` context, and your current kubectl
+context is restored afterwards. See the [local Kubernetes guide](docs/local-kubernetes.md).
 
 ```bash
 make all
 ```
 
-**3. Check the boundary.** Eighteen probes run in real MXC containers, then a
+**3. Check the boundary.** Nineteen probes run in a real session VM, then a
 scripted investigation runs through the harness. No model API usage.
 
 ```bash
@@ -82,7 +83,7 @@ or ask which workloads are unhealthy.
 make ui
 ```
 
-You see each command as it runs, every one in its own MXC container. The agent
+You see each command as it runs in the conversation's VM. The agent
 writes `output/findings.md` and `output/findings.json`. As with an artifact, the
 chat says what happened in a few sentences and a card opens the findings beside
 it: each finding's cause, its fix as steps to copy and run, and its quotes, each of
@@ -113,32 +114,19 @@ harness serves only its API.
 ## Use the provider in your own application
 
 The provider is the `openai-agent-mxc` package in `sandbox/`, imported as
-`agent_mxc`. It implements the SDK's `BaseSandboxClient` for any `SandboxAgent`;
-the worker is the image built from `worker/`. See
+`sandbox_worker`. It implements the SDK's `BaseSandboxClient` for any `SandboxAgent`;
+the worker is the image built from `worker/`, and the image its VMs boot is
+built from `deploy/docker/guest.Dockerfile`. See
 [SDK integration](docs/usage.md) and, for a cluster other than Kind, the
 [deployment guide](docs/deployment.md).
 
 ## Verification
 
 The provider is pinned to `openai-agents==0.24.0` and the worker to
-`@microsoft/mxc-sdk` 1.0.1. On local ARM64 Kind, all eighteen boundary probes
-passed in real MXC containers, including no token in the container, no direct
-route to the API, and writes, exec and raw logs refused by the worker's proxy.
-In a live investigation of a service that logs customer emails and card numbers,
-the model's whole history held none of either. Live
-investigations with `gpt-6.1-terra` ran every tool call in MXC containers and
-every quote in their findings matched the worker's recorded evidence. One user
-with six conversations, twelve users at once and three users on one shared
-conversation all passed; with three sessions open at once, none could reach
-another's workspace, evidence, logs or the worker's journal; and a pod outside
-the pair could not reach the worker. With memory on, a second conversation
-started from the first's lessons and confirmed them against fresh evidence;
-memory held no email address, card number or credential, and a harness restart
-closed an open conversation and kept its memory. Memory generated with
-`gpt-6-luna` and `gpt-6.1-terra`, and a signed-in user's memory was kept apart
-from the guest's. An MXC command costs about
-110 ms with the proxy-only network. AKS and Kata remain unverified. See the
-[verification record](docs/verification.md).
+`microsandbox` 0.7.13, which is beta software. See the
+[verification record](docs/verification.md) for what has been checked on local
+ARM64 Kind, where KVM runs nested under macOS's hypervisor. AKS remains
+unverified.
 
 ## Tracing
 
@@ -153,12 +141,12 @@ harness.
 
 ```text
 pyproject.toml              uv workspace root: dev tools and test settings, no package
-proto/mxc/sandbox/v1/       The harness/worker gRPC contract
-worker/                     MXC sandbox worker (Node 24, TypeScript), its unit tests and a host runner for tests
-sandbox/                    The provider (openai-agent-mxc): MXCSandboxClient, gRPC transport, tracing
+proto/sandbox/v1/           The harness/worker gRPC contract
+worker/                     The sandbox worker (Node 24, TypeScript, microsandbox), its unit tests and a host runner for tests
+sandbox/                    The provider (openai-agent-mxc): WorkerSandboxClient, gRPC transport, tracing
 harness/                    The agent harness (openai-harness): turn engine, memory and HTTP API, adapted from openai-agent-substrate
 apps/sre/                   The SRE agent: SandboxAgent, skill, runbooks, findings check, its UI, verify and load test
-deploy/docker/              Worker and harness images
+deploy/docker/              Guest, worker and harness images
 deploy/kubernetes/          Kustomize base (the pair, RBAC, NetworkPolicies) and kind and AKS overlays
 deploy/kind/, deploy/demo/  The Kind cluster and the broken payments workloads
 docs/                       Architecture, local Kubernetes, deployment, usage, development and verification
@@ -177,6 +165,6 @@ docs/                       Architecture, local Kubernetes, deployment, usage, d
 
 Original project code and documentation are licensed under
 [Apache-2.0](LICENSE). The harness and UI derive from openai-agent-substrate
-(Apache-2.0); MXC is installed from npm under MIT; the OpenAI diagram retains
-its original rights. See [NOTICE](NOTICE) and
+(Apache-2.0); microsandbox is installed from npm under Apache-2.0; the OpenAI
+diagram retains its original rights. See [NOTICE](NOTICE) and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -17,3 +17,6 @@ artifacts/
 
 .DS_Store
 .openai.env.tmp
+
+# The guest image archive the worker image carries (make images).
+build/

@@ -1,8 +1,8 @@
 {
-  "name": "mxc-sandbox-worker",
+  "name": "sandbox-worker",
   "version": "0.1.0",
   "private": true,
-  "description": "gRPC sandbox worker: runs OpenAI Agents SDK sandbox commands in Microsoft eXecution Containers",
+  "description": "gRPC sandbox worker: runs OpenAI Agents SDK sandbox sessions in microVMs (microsandbox)",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
@@ -16,7 +16,7 @@
   "dependencies": {
     "@grpc/grpc-js": "1.14.7",
     "@grpc/proto-loader": "0.8.1",
-    "@microsoft/mxc-sdk": "1.0.1"
+    "microsandbox": "0.7.13"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

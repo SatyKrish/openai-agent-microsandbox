@@ -110,7 +110,7 @@ async def test_an_investigation_reads_the_cluster_in_the_sandbox_and_is_checked(
     try:
         thread_id, stream = await ask(harness, "Why is payments-processor crashing?")
         assert not [event for event in stream if event["type"] == "error"], stream
-        assert "[mxc-worker] saved as evidence/001" in model.outputs[0]
+        assert "[sandbox-worker] saved as evidence/001" in model.outputs[0]
         thread = await store.load_thread(thread_id, {})
         turn = thread.metadata["turns"][0]
         assert [item["path"] for item in thread.metadata["evidence"]] == [PODS_FILE, LOGS_FILE, API_LOGS_FILE]

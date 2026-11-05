@@ -33,7 +33,6 @@ export interface CommandRecord {
   stdout: Buffer;
   stderr: Buffer;
   evidenceSeq?: number;
-  warnings?: string[];
 }
 
 const PREVIEW = 500;
@@ -73,7 +72,6 @@ export class Journal {
       stdout_preview: record.stdout.subarray(0, PREVIEW).toString('utf8'),
       stderr_preview: record.stderr.subarray(0, PREVIEW).toString('utf8'),
       ...(record.evidenceSeq ? { evidence_seq: record.evidenceSeq } : {}),
-      ...(record.warnings?.length ? { mxc_warnings: record.warnings } : {}),
     });
   }
 

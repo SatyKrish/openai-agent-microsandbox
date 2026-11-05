@@ -1,10 +1,10 @@
 # Copyright 2026 openai-agent-mxc contributors
 # SPDX-License-Identifier: Apache-2.0
-"""Shared fixtures: the worker's real gRPC service on loopback, with a host runner in place of MXC.
+"""Shared fixtures: the worker's real gRPC service on loopback, with a host runner in place of its VMs.
 
 The Python tests exercise the provider, harness and agent against the worker's
 actual protocol, path guards, redaction, journal and evidence rules. Commands
-run on the test host without isolation; MXC itself is exercised on Kind
+run on the test host without isolation; the VMs themselves are exercised on Kind
 (``make verify``). Build the worker first: ``npm --prefix worker run build``.
 """
 
@@ -52,9 +52,9 @@ class Worker:
         return str(self.data_dir / "active")
 
     def client(self, **options):
-        from agent_mxc import MXCSandboxClient
+        from sandbox_worker import WorkerSandboxClient
 
-        return MXCSandboxClient(self.target, worker="test-worker", token=self.token,
+        return WorkerSandboxClient(self.target, worker="test-worker", token=self.token,
                                 workspace_base=self.workspace_base, **options)
 
 
@@ -69,7 +69,7 @@ def worker(tmp_path):
     fake_bin.mkdir()
     (fake_bin / "kubectl").write_text(FAKE_KUBECTL)
     (fake_bin / "kubectl").chmod(0o755)
-    env = {**os.environ, "DATA_DIR": str(data_dir), "FAKE_BIN": str(fake_bin), "MXC_TEST_TOKEN": "pair-token"}
+    env = {**os.environ, "DATA_DIR": str(data_dir), "FAKE_BIN": str(fake_bin), "WORKER_TEST_TOKEN": "pair-token"}
     process = subprocess.Popen([node, str(HOST_WORKER)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                                text=True)
     line = process.stdout.readline()

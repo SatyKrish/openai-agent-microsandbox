@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The agent's only way to read pod logs: the sandbox worker's log policy.
 
-Containers cannot read logs (the worker's API proxy refuses them), so raw logs
+VMs cannot read logs (the worker's API proxy refuses them), so raw logs
 never reach the workspace or the model. The worker fetches a log with its own
 identity and returns an excerpt: error and warning lines with context, the last
 lines, repeats collapsed, credentials and personal data masked, size capped. It
@@ -15,7 +15,7 @@ import re
 
 from agents import function_tool
 
-from agent_mxc import WorkerError
+from sandbox_worker import WorkerError
 
 TOOL_NAMES = ("pod_logs",)
 _SINCE = re.compile(r"(\d+)\s*([smhd])")

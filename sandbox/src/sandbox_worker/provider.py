@@ -1,12 +1,12 @@
 # Copyright 2026 openai-agent-mxc contributors
 # SPDX-License-Identifier: Apache-2.0
-"""OpenAI Agents SDK sandbox client for an MXC sandbox worker on Kubernetes.
+"""OpenAI Agents SDK sandbox client for a paired sandbox worker on Kubernetes.
 
-A session is a workspace directory on the worker's volume. Every command runs in
-a new Microsoft eXecution Container over that directory, so nothing runs between
-commands and there is nothing to suspend: closing a session only closes it on
-this side, and the workspace stays until ``delete``. Files move over the worker's
-own file RPCs rather than through shell commands.
+A session is a workspace directory on the worker's volume, and a microVM there
+that the worker starts on the session's first command and stops when it is idle.
+The SDK has nothing to suspend: closing a session only closes it on this side,
+and the workspace stays until ``delete``. Files move over the worker's own file
+RPCs rather than through shell commands.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from agents.sandbox.types import ExecResult, User
 from .instrumentation import operation, traced_operation
 from .transport import MIB, WorkerError, WorkerTransport
 
-BACKEND = "mxc-kubernetes-worker"
+BACKEND = "kubernetes-sandbox-worker"
 MAX_FILE_BYTES = 10 * MIB
 _SESSION_ID = re.compile(r"[a-z0-9][a-z0-9-]{2,62}")
 
@@ -49,8 +49,8 @@ def workspace_id(value: str) -> str:
     return value
 
 
-class MXCSandboxOptions(BaseSandboxClientOptions):
-    type: Literal["mxc-kubernetes-worker"] = BACKEND
+class WorkerSandboxOptions(BaseSandboxClientOptions):
+    type: Literal["kubernetes-sandbox-worker"] = BACKEND
     workspace_id: str | None = None
 
     @field_validator("workspace_id")
@@ -59,8 +59,8 @@ class MXCSandboxOptions(BaseSandboxClientOptions):
         return workspace_id(value) if value is not None else None
 
 
-class MXCSessionState(SandboxSessionState):
-    type: Literal["mxc-kubernetes-worker"] = BACKEND
+class WorkerSessionState(SandboxSessionState):
+    type: Literal["kubernetes-sandbox-worker"] = BACKEND
     workspace_id: str
     worker: str
 
@@ -75,11 +75,11 @@ def validate_manifest(manifest: Manifest) -> None:
     if not root.is_absolute() or str(root) == "/" or ".." in root.parts:
         raise ValueError("Use an absolute workspace root below /, without '..'")
     if manifest.users or manifest.groups or manifest.extra_path_grants or manifest.environment.value:
-        raise NotImplementedError("MXC workspaces hold files and directories only: no accounts, environment or path grants")
+        raise NotImplementedError("Worker workspaces hold files and directories only: no accounts, environment or path grants")
 
     def validate(entry: BaseEntry) -> None:
         if not isinstance(entry, (File, Dir, LocalFile, LocalDir)) or entry.group is not None:
-            raise NotImplementedError("MXC workspaces support File, Dir, LocalFile and LocalDir entries without ownership")
+            raise NotImplementedError("Worker workspaces support File, Dir, LocalFile and LocalDir entries without ownership")
         if isinstance(entry, Dir):
             for child in entry.children.values():
                 validate(child)
@@ -94,12 +94,12 @@ def _rollout(message) -> dict:
             "changed": [{"container": item.container, "from": getattr(item, "from"), "to": item.to} for item in message.changed]}
 
 
-class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
+class WorkerSandboxClient(BaseSandboxClient[WorkerSandboxOptions]):
     """Bound to one worker. ``worker`` names it in saved session state, so a session
     resumes only on the worker that holds its workspace.
 
     ``workspace_base`` must match the worker's ``DATA_DIR``/active: a session's
-    workspace has the same path inside its containers as on the worker's volume.
+    workspace has the same path inside its VM as on the worker's volume.
     """
 
     backend_id = BACKEND
@@ -124,8 +124,8 @@ class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
 
     async def info(self) -> dict:
         reply = await self.transport.info()
-        return {"worker_id": reply.worker_id, "domain": reply.domain, "containment": reply.containment,
-                "mxc_sdk_version": reply.mxc_sdk_version, "egress": reply.egress,
+        return {"worker_id": reply.worker_id, "domain": reply.domain, "isolation": reply.isolation,
+                "runtime_version": reply.runtime_version, "egress": reply.egress,
                 "active_sessions": reply.active_sessions, "namespaces": list(reply.namespaces)}
 
     async def health(self) -> dict:
@@ -144,11 +144,11 @@ class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
             for item in reply.namespaces]}
 
     @traced_operation("sandbox.create")
-    async def create(self, *, options: MXCSandboxOptions | None = None, manifest: Manifest | None = None,
+    async def create(self, *, options: WorkerSandboxOptions | None = None, manifest: Manifest | None = None,
                      snapshot: SnapshotSpec | SnapshotBase | None = None) -> SandboxSession:
         if snapshot is not None:
             raise NotImplementedError("Workspaces persist on the worker's volume; portable SDK snapshots are unsupported")
-        options = options or MXCSandboxOptions()
+        options = options or WorkerSandboxOptions()
         sid = options.workspace_id or self.new_workspace_id()
         root = self.workspace_root(sid)
         manifest = manifest if manifest is not None else Manifest(root=root)
@@ -156,27 +156,31 @@ class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
             raise ValueError(f"The manifest root must be the session's workspace, {root}")
         self._validate_manifest_for_create(manifest)
         validate_manifest(manifest)
-        state = MXCSessionState(workspace_id=sid, worker=self.worker, manifest=manifest,
+        state = WorkerSessionState(workspace_id=sid, worker=self.worker, manifest=manifest,
                                 snapshot=NoopSnapshot(id=uuid.uuid4().hex))
-        return self._wrap_session(_MXCSession(state, self, preserved=False))
+        return self._wrap_session(_WorkerSession(state, self, preserved=False))
 
     async def resume(self, state: SandboxSessionState) -> SandboxSession:
-        if not isinstance(state, MXCSessionState) or state.worker != self.worker:
-            raise ValueError("Resume requires MXC session state from this client's worker")
+        if not isinstance(state, WorkerSessionState) or state.worker != self.worker:
+            raise ValueError("Resume requires session state from this client's worker")
         state.assert_path_grants_rebound()
         validate_manifest(state.manifest)
-        return self._wrap_session(_MXCSession(state.model_copy(deep=True), self, preserved=True))
+        return self._wrap_session(_WorkerSession(state.model_copy(deep=True), self, preserved=True))
 
-    def deserialize_session_state(self, payload: dict[str, object]) -> MXCSessionState:
-        state = self._deserialize_session_state_payload(payload, MXCSessionState)
-        if not isinstance(state, MXCSessionState) or state.worker != self.worker:
+    def deserialize_session_state(self, payload: dict[str, object]) -> WorkerSessionState:
+        # Conversations saved before the worker ran microVMs name the backend by its old name; the
+        # workspace is the same, and its new VM starts on the next command.
+        if payload.get("type") == "mxc-kubernetes-worker":
+            payload = {**payload, "type": BACKEND}
+        state = self._deserialize_session_state_payload(payload, WorkerSessionState)
+        if not isinstance(state, WorkerSessionState) or state.worker != self.worker:
             raise ValueError("Session state belongs to another worker")
         return state
 
     @traced_operation("sandbox.delete")
     async def delete(self, session: SandboxSession, *, purge_history: bool = False) -> SandboxSession:
         inner = session._inner
-        if not isinstance(inner, _MXCSession) or inner.client is not self:
+        if not isinstance(inner, _WorkerSession) or inner.client is not self:
             raise ValueError("Delete requires a session owned by this client")
         if not inner.deleted:
             await self.transport.destroy(inner.state.workspace_id, purge_history=purge_history)
@@ -191,8 +195,8 @@ class MXCSandboxClient(BaseSandboxClient[MXCSandboxOptions]):
         await self.transport.close()
 
 
-class _MXCSession(BaseSandboxSession):
-    def __init__(self, state: MXCSessionState, client: MXCSandboxClient, *, preserved: bool):
+class _WorkerSession(BaseSandboxSession):
+    def __init__(self, state: WorkerSessionState, client: WorkerSandboxClient, *, preserved: bool):
         self.state = state
         self.client = client
         self.deleted = False
@@ -242,8 +246,8 @@ class _MXCSession(BaseSandboxSession):
         return ExecResult(stdout=reply.stdout, stderr=reply.stderr, exit_code=reply.exit_code)
 
     async def running(self) -> bool:
-        # Nothing runs between commands: a started session's workspace is ready for the next one.
-        # Probing with a command would cost a container launch on every SDK check.
+        # The worker starts the session's VM on the next command if it has stopped; a started
+        # session is always ready for one. Probing with a command would cost a VM start.
         return self.ready and not self.deleted
 
     def _file_error(self, error: WorkerError, path: str) -> Exception:
@@ -295,7 +299,7 @@ class _MXCSession(BaseSandboxSession):
                  "bytes": item.bytes, "recorded_at": item.recorded_at} for item in entries]
 
     async def read_evidence(self, seq: int) -> bytes:
-        """The worker's own copy of an evidence entry, which no container can edit."""
+        """The worker's own copy of an evidence entry, which no VM can edit."""
         return (await self.transport.read_evidence(self.state.workspace_id, seq)).content
 
     async def read_logs(self, namespace: str, pod: str, *, container: str | None = None, previous: bool = False,

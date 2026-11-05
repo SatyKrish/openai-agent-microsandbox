@@ -1,7 +1,7 @@
-# The MXC sandbox worker for payments. Every command the agent runs starts in its
-# own Microsoft eXecution Container (Bubblewrap backend) inside this pod, over the
-# conversation's workspace on the PVC. The pod holds the read-only payments
-# identity and never the model's API key; the containers hold neither.
+# The sandbox worker for payments. Each conversation's commands run in its own
+# microVM (microsandbox, on KVM) inside this pod, over the conversation's workspace
+# on the PVC. The pod holds the read-only payments identity and never the model's
+# API key; the VMs hold neither.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -19,17 +19,14 @@ spec:
     spec:
       serviceAccountName: payments-sre-sa
       # The worker's read-only API proxy uses this token (bound, rotated by the kubelet);
-      # it is never mounted into an MXC container.
+      # it is never mounted into a VM.
       automountServiceAccountToken: true
       enableServiceLinks: false
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
-        runAsGroup: 10001
         fsGroup: 10001
       containers:
         - name: worker
-          image: mxc-sandbox-worker:local
+          image: sandbox-worker:local
           ports:
             - {name: grpc, containerPort: 50051}
           env:
@@ -38,22 +35,26 @@ spec:
             - {name: SRE_DOMAIN, value: payments}
             - {name: SRE_NAMESPACES, value: payments}
             - {name: DATA_DIR, value: /sandboxes}
-            # Containers reach only the worker's read-only Kubernetes API proxy.
-            - {name: MXC_EGRESS, value: kube-api}
-            - {name: MXC_TIMEOUT_MS, value: "60000"}
-            - {name: MXC_MAX_CONCURRENT, value: "8"}
-            - {name: MXC_WORKER_TOKEN_FILE, value: /var/run/secrets/mxc/token}
+            # VMs reach only the worker's read-only Kubernetes API proxy.
+            - {name: WORKER_EGRESS, value: kube-api}
+            - {name: WORKER_TIMEOUT_MS, value: "60000"}
+            # Up to 4 VMs of 768 MiB run at once; an idle one stops after 10 minutes and
+            # keeps its disk. The memory limit below covers them and the worker.
+            - {name: WORKER_VM_CPUS, value: "1"}
+            - {name: WORKER_VM_MEMORY_MIB, value: "768"}
+            - {name: WORKER_MAX_RUNNING, value: "4"}
+            - {name: WORKER_IDLE_STOP_S, value: "600"}
+            - {name: WORKER_TOKEN_FILE, value: /var/run/secrets/pair/token}
           securityContext:
-            # Bubblewrap needs unprivileged user namespaces and an unmasked /proc for the
-            # containers' own procfs; seccomp and AppArmor defaults refuse both. The
-            # workload inside each MXC container runs with no capabilities.
-            runAsNonRoot: true
-            seccompProfile: {type: Unconfined}
-            appArmorProfile: {type: Unconfined}
-            capabilities: {drop: ["ALL"]}
+            # The VMs need the node's /dev/kvm, which only a privileged container gets as a
+            # device. The entrypoint starts as root only to give the container's own copy
+            # of /dev/kvm and the volume to the worker's user, then runs as 10001 with no
+            # capabilities and no_new_privs. Commands run inside the VMs, behind KVM.
+            privileged: true
+            runAsUser: 0
           resources:
-            requests: {cpu: 250m, memory: 512Mi}
-            limits: {memory: 3Gi}
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {memory: 4Gi}
           readinessProbe:
             tcpSocket: {port: grpc}
             periodSeconds: 5
@@ -62,11 +63,13 @@ spec:
             periodSeconds: 20
           volumeMounts:
             - {name: sandboxes, mountPath: /sandboxes}
-            - {name: pair-token, mountPath: /var/run/secrets/mxc, readOnly: true}
+            - {name: pair-token, mountPath: /var/run/secrets/pair, readOnly: true}
       volumes:
         - name: pair-token
           secret: {secretName: sre-payments-pair-token, defaultMode: 0440}
-  # The workspaces and the journal survive restarts; no attach delay mid-incident.
+  # The workspaces, the VMs' disks, the guest image and the journal survive restarts; no
+  # attach delay mid-incident. Size it for the guest image (a few hundred MiB) plus each
+  # session's workspace and disk; the AKS overlay asks for more.
   volumeClaimTemplates:
     - metadata: {name: sandboxes}
       spec:

@@ -9,7 +9,7 @@ import re
 
 _EXIT_CODE = re.compile(r"Process exited with code (-?\d+)")
 _TASK_TEXT = 1600
-# Where a tool ran, shown on its step: harness tools hold credentials, sandbox tools run in an MXC container.
+# Where a tool ran, shown on its step: harness tools hold credentials, sandbox tools run in the session's VM.
 # The icon says it for every step; the title names only the exception, the harness.
 ICONS = {"harness": "keys", "sandbox": "cube"}
 

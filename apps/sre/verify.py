@@ -3,7 +3,7 @@
 """Verify a deployed harness/worker pair without a model: boundary probes, then a scripted investigation.
 
 Run it in the harness pod (``make verify``). It uses the same settings as the UI.
-The probes run real commands in MXC containers on the worker; the investigation
+The probes run real commands in a session VM on the worker; the investigation
 drives the harness with a scripted model, so it reads the real cluster and checks
 real evidence without model API usage. Exits nonzero if anything fails.
 """
@@ -19,17 +19,19 @@ import time
 from pathlib import Path
 
 PROBES = [
-    # MXC's own proxy-mode tests require all three sets to be zero.
-    ("container has no capabilities (bounding, effective, permitted)",
-     "test \"$(grep -cE '^Cap(Bnd|Eff|Prm):[[:space:]]+0+$' /proc/self/status)\" = 3", 0, None),
-    ("container sees only its own processes", "test \"$(ls /proc | grep -cE '^[0-9]+$')\" -lt 10", 0, None),
+    # The VM's own kernel enforces its memory: a command cannot take more than the VM was given.
+    ("the VM has its own memory limit", "test \"$(awk '/^MemTotal/ {print $2}' /proc/meminfo)\" -lt 2097152", 0, None),
+    ("a command cannot allocate past it", "python3 -c \"bytearray(3 * 1024 ** 3)\"", "nonzero", "MemoryError"),
+    ("commands run with no_new_privs", "grep -qE '^NoNewPrivs:[[:space:]]+1' /proc/self/status", 0, None),
+    # The bracket keeps the pattern from matching this command's own command line.
+    ("the worker's processes are not visible",
+     "! grep -qs 'dist/src/mai[n].js' /proc/[0-9]*/cmdline", 0, None),
     ("worker journal is not mounted", "test ! -e /sandboxes/history", 0, None),
     ("other workspaces are not mounted", 'test "$(ls /sandboxes/active)" = "$(basename "$PWD")"', 0, None),
-    ("system files are read-only", "! touch /usr/bin/probe 2>/dev/null && ! touch /etc/probe 2>/dev/null", 0, None),
     ("no model API key in the environment", 'test -z "${OPENAI_API_KEY:-}" && ! env | grep -qi openai', 0, None),
     ("no route to the public internet",
      "python3 -c \"import socket; socket.create_connection(('1.1.1.1', 443), 3)\"", "nonzero", None),
-    ("no Kubernetes token in the container",
+    ("no Kubernetes token in the VM",
      "test ! -e /var/run/secrets/kubernetes.io/serviceaccount && test ! -e /run/secrets/kubernetes.io && "
      "! env | grep -q '^KUBERNETES_'", 0, None),
     ("no direct route to the Kubernetes API",
@@ -71,11 +73,11 @@ def report(ok: bool, name: str, detail: str = "") -> bool:
 async def probes(client) -> bool:
     from agents.sandbox import Manifest
 
-    from agent_mxc import MXCSandboxOptions
+    from sandbox_worker import WorkerSandboxOptions
 
     workspace = client.new_workspace_id()
     session = await client.create(manifest=Manifest(root=client.workspace_root(workspace)),
-                                  options=MXCSandboxOptions(workspace_id=workspace))
+                                  options=WorkerSandboxOptions(workspace_id=workspace))
     passed = True
     async with session:
         for name, command, expected, needle in PROBES:
@@ -140,18 +142,18 @@ async def investigation(client, namespaces) -> bool:
 
 
 async def main() -> int:
-    from agent_mxc import MXCSandboxClient
+    from sandbox_worker import WorkerSandboxClient
 
-    token_file = os.environ.get("MXC_WORKER_TOKEN_FILE")
-    client = MXCSandboxClient(os.environ.get("MXC_WORKER_TARGET", "127.0.0.1:50051"),
-                              worker=os.environ.get("MXC_WORKER_NAME"),
+    token_file = os.environ.get("WORKER_TOKEN_FILE")
+    client = WorkerSandboxClient(os.environ.get("WORKER_TARGET", "127.0.0.1:50051"),
+                              worker=os.environ.get("WORKER_NAME"),
                               token=Path(token_file).read_text().strip() if token_file else None,
-                              workspace_base=os.environ.get("MXC_WORKSPACE_BASE", "/sandboxes/active"))
+                              workspace_base=os.environ.get("WORKER_WORKSPACE_BASE", "/sandboxes/active"))
     namespaces = frozenset(name for name in os.environ.get("SRE_NAMESPACES", "payments").split(",") if name)
     info = await client.info()
-    print(f"Worker {info['worker_id']} · domain {info['domain']} · MXC {info['containment']} "
-          f"(SDK {info['mxc_sdk_version']}) · egress {info['egress']}", flush=True)
-    print("Boundary probes, each in its own MXC container:", flush=True)
+    print(f"Worker {info['worker_id']} · domain {info['domain']} · {info['isolation']} "
+          f"({info['runtime_version']}) · egress {info['egress']}", flush=True)
+    print("Boundary probes, in a session VM:", flush=True)
     passed = await probes(client)
     print("Scripted investigation through the harness:", flush=True)
     passed &= await investigation(client, namespaces)

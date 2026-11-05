@@ -386,7 +386,7 @@ export function App() {
             <dl className="about-facts">
               <dt>Reads</dt><dd>{scope}</dd>
               <dt>Model</dt><dd>{config.model}</dd>
-              <dt>Worker</dt><dd>{worker ? `${worker.worker_id}, MXC ${worker.containment}` : "unreachable; new turns fail until it is back"}</dd>
+              <dt>Worker</dt><dd>{worker ? `${worker.worker_id}, ${worker.isolation}` : "unreachable; new turns fail until it is back"}</dd>
               {worker?.egress ? <><dt>Containers reach</dt><dd>{worker.egress}</dd></> : null}
             </dl>
             <ul className="about-list">

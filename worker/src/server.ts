@@ -1,19 +1,18 @@
 // Copyright 2026 openai-agent-mxc contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// The gRPC side of the worker (proto/mxc/sandbox/v1/sandbox.proto). Commands and
+// The gRPC side of the worker (proto/sandbox/v1/sandbox.proto). Commands and
 // file operations of one session run one at a time, in arrival order; commands of
-// different sessions run concurrently up to the worker's limit.
+// different sessions run concurrently, one per running VM (runner.ts).
 
 import { existsSync, readFileSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
-import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
-import { MxcError } from '@microsoft/mxc-sdk/v1';
+import { MicrosandboxError } from 'microsandbox';
 
 import type { Config } from './config.js';
 import { evidenceName, kubectlRead } from './evidence.js';
@@ -23,17 +22,20 @@ import { apiHealthSource, type HealthSource, type NamespaceHealth } from './heal
 import { KubeApi } from './kube-api.js';
 import { apiLogSource, LogError, type LogSource } from './logs.js';
 import { redact } from './redact.js';
-import { describeEgress, runInContainer, type RunResult } from './runner.js';
+import { describeEgress, type Runner } from './runner.js';
 import { WorkspaceError, Workspaces, validSessionId } from './workspace.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const PROTO = 'mxc/sandbox/v1/sandbox.proto';
-const MXC_VERSION = (createRequire(import.meta.url)('@microsoft/mxc-sdk/package.json') as { version: string }).version;
+const PROTO = 'sandbox/v1/sandbox.proto';
+// microsandbox does not export its package.json; read it beside the module it resolves to.
+const MICROSANDBOX = JSON.parse(readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.resolve('microsandbox'))),
+  '..', 'package.json'), 'utf8')) as { version: string };
+export const RUNTIME = `microsandbox ${MICROSANDBOX.version}`;
 
 export function protoRoot(): string {
-  const candidates = [process.env.MXC_PROTO_ROOT, path.resolve(here, '../../proto'), path.resolve(here, '../../../proto')];
+  const candidates = [process.env.WORKER_PROTO_ROOT, path.resolve(here, '../../proto'), path.resolve(here, '../../../proto')];
   const found = candidates.find((dir) => dir && existsSync(path.join(dir, PROTO)));
-  if (!found) throw new Error(`cannot find ${PROTO}; set MXC_PROTO_ROOT`);
+  if (!found) throw new Error(`cannot find ${PROTO}; set WORKER_PROTO_ROOT`);
   return found;
 }
 
@@ -41,8 +43,8 @@ export function loadService(): grpc.ServiceDefinition {
   const definition = protoLoader.loadSync(PROTO, { includeDirs: [protoRoot()], keepCase: true, longs: Number,
     enums: String, defaults: true });
   const loaded = grpc.loadPackageDefinition(definition) as unknown as
-    { mxc: { sandbox: { v1: { Sandbox: { service: grpc.ServiceDefinition } } } } };
-  return loaded.mxc.sandbox.v1.Sandbox.service;
+    { sandbox: { v1: { Sandbox: { service: grpc.ServiceDefinition } } } };
+  return loaded.sandbox.v1.Sandbox.service;
 }
 
 class Status extends Error {
@@ -67,37 +69,15 @@ class KeyedQueue {
   }
 }
 
-class Semaphore {
-  private waiting: Array<() => void> = [];
-
-  constructor(private free: number) {}
-
-  async use<T>(task: () => Promise<T>): Promise<T> {
-    if (this.free > 0) this.free -= 1;
-    else await new Promise<void>((resolve) => this.waiting.push(resolve));
-    try {
-      return await task();
-    } finally {
-      const next = this.waiting.shift();
-      if (next) next();
-      else this.free += 1;
-    }
-  }
-}
-
 function cap(text: string, limit: number): { data: Buffer; truncated: boolean } {
   const data = Buffer.from(text, 'utf8');
   if (data.length <= limit) return { data, truncated: false };
-  const note = Buffer.from(`\n[mxc-worker: output truncated at ${limit} of ${data.length} bytes]\n`);
+  const note = Buffer.from(`\n[sandbox-worker: output truncated at ${limit} of ${data.length} bytes]\n`);
   return { data: Buffer.concat([data.subarray(0, limit), note]), truncated: true };
 }
 
 function wire(entry: EvidenceEntry) {
   return { ...entry };
-}
-
-export interface Runner {
-  (config: Config, root: string, argv: readonly string[], cwd: string, timeoutMs: number): Promise<RunResult>;
 }
 
 const NAME = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
@@ -129,13 +109,11 @@ export interface Sources {
   health?: HealthSource;
 }
 
-export function createServer(config: Config, runner: Runner = runInContainer, sources: Sources = {}): grpc.Server {
+export function createServer(config: Config, runner: Runner, sources: Sources = {}): grpc.Server {
   const workspaces = new Workspaces(config.dataDir);
   const journal = new Journal(config.dataDir);
   const sessions = new KeyedQueue();
-  const slots = new Semaphore(config.maxConcurrent);
   const expected = config.token ? Buffer.from(`Bearer ${config.token}`) : null;
-  const warned = new Set<string>();
 
   function authorize(metadata: grpc.Metadata): void {
     if (!expected) return;
@@ -160,12 +138,11 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
           code = { invalid: grpc.status.INVALID_ARGUMENT, not_found: grpc.status.NOT_FOUND,
             too_large: grpc.status.RESOURCE_EXHAUSTED }[error.kind];
           message = error.message;
-        } else if (error instanceof MxcError) {
-          // MXC's structured errors: the host or backend failed, or this worker built a request MXC refused.
-          code = ['backend_unavailable', 'backend_error'].includes(error.code)
-            ? grpc.status.UNAVAILABLE : grpc.status.FAILED_PRECONDITION;
-          message = `MXC could not launch the container (${error.code})`;
-          log('error', `${name} failed in MXC`, { code: error.code, error: error.message.slice(0, 2000) });
+        } else if (error instanceof MicrosandboxError) {
+          // The session's VM could not be started or reached, or refused the operation.
+          code = grpc.status.UNAVAILABLE;
+          message = `the session's VM could not run this (${error.name})`;
+          log('error', `${name} failed in the VM`, { error: error.message.slice(0, 2000) });
         } else {
           log('error', `${name} failed`, { error: String((error as Error)?.message ?? error).slice(0, 2000) });
         }
@@ -229,7 +206,7 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
     const requester = requesterOf(request.requester);
     await journal.record(id, { seq, path: name, command, exit_code: 0, requester }, content);
     try {
-      await workspaces.write(id, name, content, config.maxEvidenceBytes);
+      await workspaces.write(id, name, content, config.maxEvidenceBytes, (file) => runner.write(id, file, content));
     } catch (error) {
       if (!(error instanceof WorkspaceError)) throw error;
     }
@@ -249,12 +226,7 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
     const root = await workspaces.require(id);
     const cwd = request.cwd ? workspaces.lexical(id, request.cwd) : root;
     const timeoutMs = Math.min(request.timeout_ms || config.timeoutMs, config.timeoutMs);
-    const result = await slots.use(() => runner(config, root, request.argv, cwd, timeoutMs));
-    for (const warning of result.warnings ?? []) {
-      // Host-level notes (a resolver it could not pin, an IPv6 rule with no route); log each once.
-      if (!warned.has(warning)) log('warn', 'MXC warning', { warning: warning.slice(0, 1000) });
-      warned.add(warning);
-    }
+    const result = await runner.run(id, root, request.argv, cwd, timeoutMs);
     const stdoutText = redact(result.stdout);
     let stderrText = redact(result.stderr);
     let evidence: EvidenceEntry | undefined;
@@ -268,18 +240,17 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
       // The agent's copy, for analysis in the workspace. Checks use the journal's copy.
       let note = `saved as ${name}`;
       try {
-        await workspaces.write(id, name, content, config.maxEvidenceBytes);
+        await workspaces.write(id, name, content, config.maxEvidenceBytes, (file) => runner.write(id, file, content));
       } catch (error) {
         if (!(error instanceof WorkspaceError)) throw error;
         note = `recorded as evidence ${seq}, but the workspace copy was refused: ${error.message}`;
       }
-      stderrText += `${stderrText && !stderrText.endsWith('\n') ? '\n' : ''}[mxc-worker] ${note}\n`;
+      stderrText += `${stderrText && !stderrText.endsWith('\n') ? '\n' : ''}[sandbox-worker] ${note}\n`;
     }
     const stdout = cap(stdoutText, config.maxOutputBytes);
     const stderr = cap(stderrText, config.maxOutputBytes);
     await journal.command(id, { requester, argv: request.argv, cwd, exitCode: result.exitCode, timedOut: result.timedOut,
-      durationMs: result.durationMs, stdout: stdout.data, stderr: stderr.data, evidenceSeq: evidence?.seq,
-      warnings: result.warnings });
+      durationMs: result.durationMs, stdout: stdout.data, stderr: stderr.data, evidenceSeq: evidence?.seq });
     return { stdout: stdout.data, stderr: stderr.data, exit_code: result.exitCode, timed_out: result.timedOut,
       duration_ms: result.durationMs, truncated: stdout.truncated || stderr.truncated,
       evidence_path: evidence?.path ?? '' };
@@ -290,8 +261,8 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
   server.addService(loadService(), {
     Info: unary('Info', async () => ({
       worker_id: config.workerId, domain: config.domain,
-      containment: config.containment === 'auto' ? 'platform default' : config.containment,
-      mxc_sdk_version: MXC_VERSION, egress: describeEgress(config), active_sessions: await workspaces.count(),
+      isolation: `microVM per session (${config.vmCpus} vCPU, ${config.vmMemoryMib} MiB)`,
+      runtime_version: RUNTIME, egress: describeEgress(config), active_sessions: await workspaces.count(),
       max_file_bytes: config.maxFileBytes, workspace_base: workspaces.base, namespaces: config.namespaces,
     })),
     InitSession: unary('InitSession', async (request: { session_id: string }) => {
@@ -307,7 +278,8 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
     WriteFile: unary('WriteFile', async (request: { session_id: string; path: string; content: Buffer }) => {
       const id = validSessionId(request.session_id);
       return sessions.run(id, async () => {
-        await workspaces.write(id, request.path, request.content, config.maxFileBytes);
+        await workspaces.write(id, request.path, request.content, config.maxFileBytes,
+          (file) => runner.write(id, file, request.content));
         return { bytes_written: request.content.length };
       });
     }),
@@ -334,6 +306,7 @@ export function createServer(config: Config, runner: Runner = runInContainer, so
     DestroySession: unary('DestroySession', async (request: { session_id: string; purge_history: boolean }) => {
       const id = validSessionId(request.session_id);
       return sessions.run(id, async () => {
+        await runner.destroy(id);
         const existed = await workspaces.destroy(id);
         if (request.purge_history) await journal.purge(id);
         else {

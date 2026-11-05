@@ -8,7 +8,7 @@ one runs are answered together in the next turn, and every page, terminal or oth
 listens sees the same events.
 
 Each turn continues the conversation's open sandbox session or opens it (creating the workspace on
-its MXC sandbox worker the first time), runs the agent loop with the conversation's SDK session history (every command in a fresh MXC container), fetches the cluster
+its sandbox worker the first time), runs the agent loop with the conversation's SDK session history (every command in the session's VM), fetches the cluster
 reads the worker recorded as evidence, copies the agent's output folders to the host and runs the
 agent's host check.
 
@@ -50,9 +50,9 @@ from agents.run_error_handlers import RunErrorHandlerResult
 from agents.sandbox import SandboxRunConfig
 from agents.tracing import gen_trace_id
 
-from agent_mxc import MXCSandboxOptions, WorkerError
-from agent_mxc.instrumentation import operation
-from agent_mxc.tracing import otel_trace_id, tracing_enabled
+from sandbox_worker import WorkerSandboxOptions, WorkerError
+from sandbox_worker.instrumentation import operation
+from sandbox_worker.tracing import otel_trace_id, tracing_enabled
 
 from .memory import UserMemory, user_key
 from .spec import AgentSpec, Conversation, TurnContext
@@ -430,7 +430,7 @@ class Harness:
         if created:
             workspace_id = self.client.new_workspace_id()
             manifest = self.spec.start(conversation, self.client.workspace_root(workspace_id))
-            session = await self.client.create(manifest=manifest, options=MXCSandboxOptions(workspace_id=workspace_id))
+            session = await self.client.create(manifest=manifest, options=WorkerSandboxOptions(workspace_id=workspace_id))
             # Save immediately: a failed first turn must still be deletable.
             meta["sandbox"] = self.client.serialize_session_state(session.state)
             meta["workspace"] = f"{self.client.worker}/{workspace_id}"

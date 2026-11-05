@@ -1,6 +1,7 @@
 # The sandbox worker's identity: read-only, and only in the payments namespace.
 # No Secrets, no ConfigMaps, no exec, no port-forward, no write verbs, nothing
-# cluster-wide. kubectl in every MXC container uses this account's token.
+# cluster-wide. kubectl in every VM reads through the worker's proxy, which adds this
+# account's token.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

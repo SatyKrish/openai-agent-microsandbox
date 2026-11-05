@@ -2,8 +2,8 @@
 # Copyright 2026 openai-agent-mxc contributors
 # SPDX-License-Identifier: Apache-2.0
 #
-# The SRE agent's harness: the OpenAI Agents SDK loop, the shared UI and the MXC
-# provider. Build with the repository root as the context. It holds the model's
+# The SRE agent's harness: the OpenAI Agents SDK loop, the shared UI and the
+# sandbox worker provider. Build with the repository root as the context. It holds the model's
 # API key at run time (from a Secret) and no Kubernetes credentials.
 
 # The page (apps/sre/ui/web, assistant-ui), built into static/app. It imports the views in static/.

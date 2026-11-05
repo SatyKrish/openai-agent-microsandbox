@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openai-harness"
 version = "0.1.0"
-description = "Runs OpenAI Agents SDK SandboxAgents with one MXC sandbox session per conversation"
+description = "Runs OpenAI Agents SDK SandboxAgents with one sandbox worker session per conversation"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [

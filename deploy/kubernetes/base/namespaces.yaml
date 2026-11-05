@@ -3,7 +3,7 @@ kind: Namespace
 metadata:
   name: sre-system
   labels:
-    # The worker's pod spec is not "restricted": it creates nested namespaces for MXC.
+    # The worker's pod is privileged: its VMs need the node's /dev/kvm.
     pod-security.kubernetes.io/enforce: privileged
 ---
 apiVersion: v1

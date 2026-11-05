@@ -9,7 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-# The MXC provider's workspace lifecycle spans, and the operations that set a workspace up before the first model call.
+# The worker provider's workspace lifecycle spans, and the operations that set a workspace up before the first model call.
 LIFECYCLE = {"sandbox.create", "sandbox.init", "sandbox.delete"}
 STAGING = {"sandbox.exec", "sandbox.write"}
 

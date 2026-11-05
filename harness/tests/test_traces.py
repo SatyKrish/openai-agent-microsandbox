@@ -1,6 +1,6 @@
 # Copyright 2026 openai-agent-mxc contributors
 # SPDX-License-Identifier: Apache-2.0
-"""The trace panel's summary of a Jaeger trace with the MXC provider's span names."""
+"""The trace panel's summary of a Jaeger trace with the worker provider's span names."""
 
 from openai_harness import traces
 

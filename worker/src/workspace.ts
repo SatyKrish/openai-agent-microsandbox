@@ -130,7 +130,9 @@ export class Workspaces {
     }
   }
 
-  async write(id: string, requested: string, data: Buffer, limit: number): Promise<void> {
+  /** ``through``, when given, writes the file a better way (through the session's running VM) and says if it did. */
+  async write(id: string, requested: string, data: Buffer, limit: number,
+    through?: (target: string) => Promise<boolean>): Promise<void> {
     if (data.length > limit) throw new WorkspaceError('too_large', `content is larger than ${limit} bytes`);
     const root = await this.require(id);
     const target = this.lexical(id, requested);
@@ -142,8 +144,9 @@ export class Workspaces {
     } catch (error) {
       if (error instanceof WorkspaceError) throw error;
     }
+    if (through && await through(target)) return;
     // Write beside the target, then rename: readers see the old or the new file, never half of one.
-    const partial = path.join(path.dirname(target), `.${path.basename(target)}.mxc-${randomBytes(6).toString('hex')}`);
+    const partial = path.join(path.dirname(target), `.${path.basename(target)}.part-${randomBytes(6).toString('hex')}`);
     const handle = await fs.open(partial, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
       0o644);
     try {

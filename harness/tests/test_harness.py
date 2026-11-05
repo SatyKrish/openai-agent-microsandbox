@@ -140,9 +140,9 @@ async def test_a_failed_run_leaves_no_partial_turn_in_the_history(worker, tmp_pa
 
 
 async def test_an_unreachable_worker_fails_the_turn_with_a_clear_message(tmp_path):
-    from agent_mxc import MXCSandboxClient
+    from sandbox_worker import WorkerSandboxClient
 
-    client = MXCSandboxClient("127.0.0.1:9", worker="gone-worker")
+    client = WorkerSandboxClient("127.0.0.1:9", worker="gone-worker")
     harness = Harness(SPEC, SQLiteStore(tmp_path / "threads.sqlite3"), client, model=Calls(),
                       output_dir=tmp_path / "threads")
     try:

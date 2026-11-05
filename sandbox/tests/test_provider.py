@@ -14,11 +14,11 @@ from agents.sandbox.capabilities import Filesystem, Shell
 from agents.sandbox.entries import Dir, File
 from agents.sandbox.errors import ExecTimeoutError, WorkspaceReadNotFoundError
 
-from agent_mxc import MXCSandboxClient, MXCSandboxOptions, WorkerError
+from sandbox_worker import WorkerSandboxClient, WorkerSandboxOptions, WorkerError
 from openai_harness.testing import Calls, shell
 
 
-def manifest(client: MXCSandboxClient, workspace: str) -> Manifest:
+def manifest(client: WorkerSandboxClient, workspace: str) -> Manifest:
     return Manifest(root=client.workspace_root(workspace), entries={
         "runbooks": Dir(children={"payments.md": File(content=b"Check DATABASE_URL first.\n")}),
         "output": Dir()})
@@ -26,7 +26,7 @@ def manifest(client: MXCSandboxClient, workspace: str) -> Manifest:
 
 async def test_a_session_runs_commands_and_moves_files_in_its_own_workspace(worker):
     client = worker.client()
-    session = await client.create(manifest=manifest(client, "s-alpha"), options=MXCSandboxOptions(workspace_id="s-alpha"))
+    session = await client.create(manifest=manifest(client, "s-alpha"), options=WorkerSandboxOptions(workspace_id="s-alpha"))
     async with session:
         assert session.state.manifest.root == f"{worker.workspace_base}/s-alpha"
         result = await session.exec("cat runbooks/payments.md && pwd")
@@ -57,7 +57,7 @@ async def test_a_session_runs_commands_and_moves_files_in_its_own_workspace(work
 
 async def test_kubectl_reads_become_evidence_the_workspace_cannot_forge(worker):
     client = worker.client()
-    session = await client.create(manifest=manifest(client, "s-beta"), options=MXCSandboxOptions(workspace_id="s-beta"))
+    session = await client.create(manifest=manifest(client, "s-beta"), options=WorkerSandboxOptions(workspace_id="s-beta"))
     async with session:
         read = await session.exec("kubectl get pods -n payments -o wide")
         assert "CrashLoopBackOff" in read.stdout.decode()
@@ -74,7 +74,7 @@ async def test_kubectl_reads_become_evidence_the_workspace_cannot_forge(worker):
 
 async def test_paths_cannot_leave_the_workspace_and_sessions_belong_to_one_worker(worker):
     client = worker.client()
-    session = await client.create(manifest=manifest(client, "s-gamma"), options=MXCSandboxOptions(workspace_id="s-gamma"))
+    session = await client.create(manifest=manifest(client, "s-gamma"), options=WorkerSandboxOptions(workspace_id="s-gamma"))
     async with session:
         await session.exec(f"ln -s {worker.data_dir}/history escape")
         with pytest.raises(ValueError, match="outside the workspace"):
@@ -83,7 +83,7 @@ async def test_paths_cannot_leave_the_workspace_and_sessions_belong_to_one_worke
             await client.transport.read_file("s-gamma", "/etc/passwd")
         assert refused.value.code == grpc.StatusCode.INVALID_ARGUMENT
     with pytest.raises(ValueError, match="manifest root"):
-        await client.create(manifest=Manifest(root="/workspace"), options=MXCSandboxOptions(workspace_id="s-delta"))
+        await client.create(manifest=Manifest(root="/workspace"), options=WorkerSandboxOptions(workspace_id="s-delta"))
     other = worker.client()
     other.worker = "another-worker"
     with pytest.raises(ValueError, match="another worker"):
@@ -93,13 +93,13 @@ async def test_paths_cannot_leave_the_workspace_and_sessions_belong_to_one_worke
 
 async def test_timeouts_and_a_wrong_token_surface_as_sdk_errors(worker):
     client = worker.client(exec_timeout=1)
-    session = await client.create(manifest=manifest(client, "s-eps"), options=MXCSandboxOptions(workspace_id="s-eps"))
+    session = await client.create(manifest=manifest(client, "s-eps"), options=WorkerSandboxOptions(workspace_id="s-eps"))
     async with session:
         with pytest.raises(ExecTimeoutError):
             await session.exec("sleep 5")
     await client.delete(session)
-    intruder = MXCSandboxClient(worker.target, worker="test-worker", token="wrong", workspace_base=worker.workspace_base)
-    session = await intruder.create(manifest=manifest(intruder, "s-zeta"), options=MXCSandboxOptions(workspace_id="s-zeta"))
+    intruder = WorkerSandboxClient(worker.target, worker="test-worker", token="wrong", workspace_base=worker.workspace_base)
+    session = await intruder.create(manifest=manifest(intruder, "s-zeta"), options=WorkerSandboxOptions(workspace_id="s-zeta"))
     with pytest.raises(WorkerError) as refused:
         await session.start()
     assert refused.value.code == grpc.StatusCode.UNAUTHENTICATED
@@ -107,7 +107,7 @@ async def test_timeouts_and_a_wrong_token_surface_as_sdk_errors(worker):
 
 async def test_a_sandbox_agent_runs_its_tools_through_the_worker(worker):
     client = worker.client()
-    session = await client.create(manifest=manifest(client, "s-eta"), options=MXCSandboxOptions(workspace_id="s-eta"))
+    session = await client.create(manifest=manifest(client, "s-eta"), options=WorkerSandboxOptions(workspace_id="s-eta"))
     model = Calls([shell("kubectl get pods -n payments -o wide"),
                    shell("grep -c CrashLoopBackOff evidence/*.txt > output/count.txt && cat output/count.txt")],
                   answer="One pod is crash-looping.")
@@ -124,7 +124,7 @@ async def test_a_sandbox_agent_runs_its_tools_through_the_worker(worker):
 
 async def test_logs_reach_the_harness_only_as_policy_excerpts(worker):
     client = worker.client()
-    session = await client.create(manifest=manifest(client, "s-logs"), options=MXCSandboxOptions(workspace_id="s-logs"))
+    session = await client.create(manifest=manifest(client, "s-logs"), options=WorkerSandboxOptions(workspace_id="s-logs"))
     async with session:
         # Inside the sandbox, kubectl cannot read logs at all.
         raw = await session.exec("kubectl logs deploy/payments-api -n payments")
@@ -144,7 +144,7 @@ async def test_logs_reach_the_harness_only_as_policy_excerpts(worker):
 async def test_deleting_a_session_skips_its_pre_stop_hooks(worker):
     """The SDK generates memory in a pre-stop hook; a deleted conversation must not be remembered."""
     client = worker.client()
-    session = await client.create(manifest=manifest(client, "s-hooks"), options=MXCSandboxOptions(workspace_id="s-hooks"))
+    session = await client.create(manifest=manifest(client, "s-hooks"), options=WorkerSandboxOptions(workspace_id="s-hooks"))
     ran = []
 
     async def hook():
@@ -158,5 +158,5 @@ async def test_deleting_a_session_skips_its_pre_stop_hooks(worker):
 
 def test_session_ids_are_validated():
     with pytest.raises(ValueError):
-        MXCSandboxOptions(workspace_id="../x")
-    assert MXCSandboxClient.new_workspace_id().startswith("s-")
+        WorkerSandboxOptions(workspace_id="../x")
+    assert WorkerSandboxClient.new_workspace_id().startswith("s-")

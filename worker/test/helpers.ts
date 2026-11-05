@@ -8,10 +8,11 @@ import { LogError, type LogSource } from '../src/logs.js';
 
 export function config(dataDir: string, overrides: Partial<Config> = {}): Config {
   return { port: 0, bind: '127.0.0.1', dataDir, workerId: 'test', domain: 'payments', namespaces: ['payments'],
-    containment: 'bubblewrap', egress: 'kube-api', kubeApi: { host: '10.96.0.1', port: 443 },
-    kubeProxyPort: 18080, kubeTokenFile: '/nonexistent/token', kubeCaFile: '/nonexistent/ca.crt', readonlyPaths: [],
-    timeoutMs: 30_000, maxOutputBytes: 1024, maxFileBytes: 4096, maxEvidenceBytes: 2048, maxConcurrent: 2,
-    limitAddressSpaceBytes: 1 << 30, token: null, logTailLines: 500, logMaxTailLines: 5000, logMaxBytes: 1 << 22,
+    egress: 'kube-api', kubeApi: { host: '10.96.0.1', port: 443 },
+    kubeProxyPort: 18080, kubeTokenFile: '/nonexistent/token', kubeCaFile: '/nonexistent/ca.crt',
+    guestImage: 'sre-sandbox-guest:local', guestImageArchive: null, vmCpus: 1, vmMemoryMib: 768, maxRunning: 4,
+    idleStopMs: 600_000, timeoutMs: 30_000, maxOutputBytes: 1024, maxFileBytes: 4096, maxEvidenceBytes: 2048,
+    token: null, logTailLines: 500, logMaxTailLines: 5000, logMaxBytes: 1 << 22,
     logPolicy: DEFAULT_POLICY, ...overrides };
 }
 

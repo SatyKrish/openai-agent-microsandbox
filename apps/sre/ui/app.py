@@ -26,9 +26,9 @@ UI = {
     "greeting": "Which workload should I look at?",
     # How this works: said once, in the dialog the top bar opens, rather than on every view.
     "about": [
-        "Each command runs in its own Microsoft eXecution Container on the sandbox worker. kubectl there has the "
+        "Each conversation runs its commands in its own virtual machine on the sandbox worker. kubectl there has the "
         "worker's read-only identity and reaches only the Kubernetes API. The worker never holds the model's API key.",
-        "The worker records each kubectl read as evidence in a journal no container can edit. A pod's log is cut to "
+        "The worker records each kubectl read as evidence in a journal no virtual machine can edit. A pod's log is cut to "
         "an excerpt there, with credentials and personal data masked; the full log never reaches the model.",
         "After each turn the harness checks every quote in findings.json against the journal's copy. Causes are the "
         "agent's reasoning; fixes are proposals it cannot run.",

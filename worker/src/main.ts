@@ -1,22 +1,22 @@
 // Copyright 2026 openai-agent-mxc contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// Start the worker: check that MXC can launch a container on this host, then
-// serve. A host that cannot sandbox fails here, visibly, instead of on the
-// agent's first command.
+// Start the worker: load the guest image, check that a session VM boots with the
+// boundaries it should have, then serve. A host that cannot sandbox fails here,
+// visibly, instead of on the agent's first command.
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import * as grpc from '@grpc/grpc-js';
-import { getPlatformSupport } from '@microsoft/mxc-sdk/v1';
+import { Image, ImageNotFoundError } from 'microsandbox';
 
 import { loadConfig, type Config } from './config.js';
 import { createKubeProxy, kubeconfig } from './kube-proxy.js';
-import { describeEgress, kubeDir, runInContainer } from './runner.js';
-import { createServer, log } from './server.js';
+import { describeEgress, kubeDir, Machines, PROXY_HOST } from './runner.js';
+import { createServer, log, RUNTIME } from './server.js';
 
-/** Start the read-only API proxy and write the kubeconfig that points containers at it. */
+/** Start the read-only API proxy and write the kubeconfig that points VMs at it. */
 async function startKubeProxy(config: Config): Promise<void> {
   const ca = await fs.readFile(config.kubeCaFile);
   await fs.access(config.kubeTokenFile);
@@ -30,63 +30,70 @@ async function startKubeProxy(config: Config): Promise<void> {
   const dir = kubeDir(config);
   await fs.mkdir(dir, { recursive: true, mode: 0o755 });
   const namespace = config.namespaces[0] ?? 'default';
-  await fs.writeFile(path.join(dir, 'config.part'), kubeconfig(config.kubeProxyPort, namespace), { mode: 0o644 });
+  await fs.writeFile(path.join(dir, 'config.part'), kubeconfig(`http://${PROXY_HOST}:${config.kubeProxyPort}`, namespace),
+    { mode: 0o644 });
   await fs.rename(path.join(dir, 'config.part'), path.join(dir, 'config'));
 }
 
-async function selfTest(config: Config): Promise<void> {
-  const support = getPlatformSupport();
-  if (!support.isSupported) throw new Error(`MXC is not supported on this host: ${support.reason}`);
-  // MXC never falls back from proxy-only egress to a shared network; neither does the worker.
-  if (config.egress === 'kube-api' && config.kubeApi && support.bubblewrapNetwork?.proxyEnforcement !== 'supported') {
-    throw new Error('MXC cannot enforce proxy-only egress on this host: '
-      + (support.bubblewrapNetwork?.warnings.join('; ') || 'no Bubblewrap network support reported'));
+/** The guest image comes with the worker's image, as an archive; the VMs boot from microsandbox's cache. */
+async function loadGuestImage(config: Config): Promise<void> {
+  try {
+    await Image.get(config.guestImage);
+    return;
+  } catch (error) {
+    if (!(error instanceof ImageNotFoundError) || !config.guestImageArchive) throw error;
   }
-  // A directory no session ID can name: IDs start with [a-z0-9].
+  const started = performance.now();
+  await Image.load(config.guestImageArchive, { tag: config.guestImage });
+  log('info', 'guest image loaded', { image: config.guestImage, ms: Math.round(performance.now() - started) });
+}
+
+async function selfTest(config: Config, machines: Machines): Promise<void> {
+  // A name no session ID can take: IDs are [a-z0-9-] only.
+  const id = 'worker.self-test';
   const root = path.join(config.dataDir, 'active', '.self-test');
   await fs.mkdir(root, { recursive: true, mode: 0o700 });
-  // The container can write its workspace and cannot see the worker's journal.
-  const history = path.join(config.dataDir, 'history');
-  const result = await runInContainer({ ...config, egress: 'none' }, root,
-    ['sh', '-c', 'touch ok && test ! -e "$1"', 'sh', history], root, 15_000);
-  await fs.rm(root, { recursive: true, force: true });
-  if (result.exitCode !== 0) {
-    throw new Error(`MXC self-test failed (exit ${result.exitCode}): ${result.stderr.trim().slice(0, 1000)}`);
-  }
-  if (config.egress === 'kube-api' && config.kubeApi) {
-    // The proxy-only network starts, the kubeconfig is visible, and no token is. MXC's own
-    // tests require CapBnd, CapEff and CapPrm to be zero in proxy mode: that is what keeps
-    // the supervisor's user-namespace descriptor, which stays open in the workload, inert.
-    await fs.mkdir(root, { recursive: true, mode: 0o700 });
-    const proxied = await runInContainer(config, root, ['sh', '-c',
-      'test -r "$KUBECONFIG" && test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token && '
-      + 'test "$(grep -cE \'^Cap(Bnd|Eff|Prm):[[:space:]]+0+$\' /proc/self/status)" = 3'], root, 15_000);
-    await fs.rm(root, { recursive: true, force: true });
-    if (proxied.exitCode !== 0) {
-      throw new Error(`MXC self-test with the API proxy failed (exit ${proxied.exitCode}): ${proxied.stderr.trim().slice(0, 1000)}`);
+  // The VM can write its workspace and sees neither the worker's journal nor a service-account token.
+  const checks = ['touch ok', `test ! -e ${JSON.stringify(path.join(config.dataDir, 'history'))}`,
+    'test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token'];
+  // With Kubernetes access, kubectl reaches the API through the proxy, and only through it.
+  if (config.egress === 'kube-api' && config.kubeApi) checks.push('test -r "$KUBECONFIG"', 'kubectl get --raw /version >/dev/null');
+  try {
+    await machines.destroy(id);
+    const result = await machines.run(id, root, ['sh', '-c', checks.join(' && ')], root, 60_000);
+    if (result.exitCode !== 0) {
+      throw new Error(`VM self-test failed (exit ${result.exitCode}): ${result.stderr.trim().slice(0, 1000)}`);
     }
+    log('info', 'VM self-test passed', { ms: result.durationMs, checks: checks.length });
+  } finally {
+    await machines.destroy(id);
+    await fs.rm(root, { recursive: true, force: true });
   }
-  log('info', 'MXC self-test passed', { methods: support.availableMethods, ms: result.durationMs,
-    bubblewrap_network: support.bubblewrapNetwork?.proxyEnforcement });
 }
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  // microsandbox keeps its images, VM disks and catalog on the worker's volume; its socket
+  // paths are derived from this directory, so keep it short.
+  process.env.MSB_HOME ??= path.join(config.dataDir, 'msb');
   await fs.mkdir(path.join(config.dataDir, 'active'), { recursive: true, mode: 0o700 });
   await fs.mkdir(path.join(config.dataDir, 'history'), { recursive: true, mode: 0o700 });
+  await fs.mkdir(process.env.MSB_HOME, { recursive: true, mode: 0o700 });
+  await loadGuestImage(config);
   if (config.egress === 'kube-api' && config.kubeApi) await startKubeProxy(config);
-  if (process.env.MXC_SKIP_SELF_TEST !== '1') await selfTest(config);
-  const server = createServer(config);
+  const machines = new Machines(config, log);
+  if (process.env.WORKER_SKIP_SELF_TEST !== '1') await selfTest(config, machines);
+  const server = createServer(config, machines);
   const address = `${config.bind}:${config.port}`;
   await new Promise<void>((resolve, reject) => {
     server.bindAsync(address, grpc.ServerCredentials.createInsecure(), (error) => (error ? reject(error) : resolve()));
   });
-  log('info', 'MXC sandbox worker listening', { address, worker: config.workerId, domain: config.domain,
-    containment: config.containment, egress: describeEgress(config), auth: config.token ? 'token' : 'none' });
+  log('info', 'sandbox worker listening', { address, worker: config.workerId, domain: config.domain, runtime: RUNTIME,
+    image: config.guestImage, egress: describeEgress(config), auth: config.token ? 'token' : 'none' });
   const stop = () => {
     log('info', 'shutting down');
-    server.tryShutdown(() => process.exit(0));
-    setTimeout(() => process.exit(0), 10_000).unref();
+    server.tryShutdown(() => void machines.close().finally(() => process.exit(0)));
+    setTimeout(() => process.exit(0), 20_000).unref();
   };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);

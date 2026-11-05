@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openai-agent-mxc"
 version = "0.1.0"
-description = "OpenAI Agents SDK sandbox provider that runs commands in Microsoft eXecution Containers on a Kubernetes worker"
+description = "OpenAI Agents SDK sandbox provider for a paired sandbox worker on Kubernetes: one microVM per session"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -25,4 +25,4 @@ tracing = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-agent_mxc = ["proto/*.pyi"]
+sandbox_worker = ["proto/*.pyi"]

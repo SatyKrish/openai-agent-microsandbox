@@ -1,6 +1,6 @@
 # Architecture
 
-This project follows the **harness separate from compute** pattern in the [OpenAI Sandbox Agents guide](https://developers.openai.com/api/docs/guides/agents/sandboxes). The Agents SDK harness runs in a trusted pod. A paired sandbox worker pod provides compute: it runs every command as a workload in its own Microsoft eXecution Container (MXC) over the conversation's workspace. `MXCSandboxClient` adapts the worker to the SDK sandbox interface. MXC terms below (container, backend, workload, policy, create-and-run) follow the [MXC glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md).
+This project follows the **harness separate from compute** pattern in the [OpenAI Sandbox Agents guide](https://developers.openai.com/api/docs/guides/agents/sandboxes). The Agents SDK harness runs in a trusted pod. A paired sandbox worker pod provides compute: it gives each conversation a workspace and a microVM, from [microsandbox](https://github.com/superradcompany/microsandbox) (libkrun on KVM), that runs the conversation's commands over that workspace. `WorkerSandboxClient` adapts the worker to the SDK sandbox interface.
 
 ![Harness separate from compute: the agent harness accesses trusted services while sandbox compute executes commands against a filesystem.](assets/harness-separate-from-compute.png)
 
@@ -13,19 +13,19 @@ flowchart LR
     Browser -->|kubectl port-forward| UI
     subgraph Harness["sre-harness-payments-0: no Kubernetes token"]
         UI["SRE UI (assistant-ui) + harness API"] --> Loop["Turn engine: Agents SDK Runner + SandboxAgent"]
-        Loop --> Client["MXCSandboxClient"]
+        Loop --> Client["WorkerSandboxClient"]
         Check["Host check of findings"]
         Memory["/data/memory: each user's memory"]
         Loop <-.->|"seed on open, publish on close"| Memory
     end
     Loop -->|"OPENAI_API_KEY"| API["OpenAI API"]
     Client -->|"gRPC :50051, pair token"| Worker
-    subgraph Sandbox["sre-sandbox-payments-0: payments-sre-sa, Kata in production"]
-        Worker["Worker (Node, @microsoft/mxc-sdk)"]
-        Worker --> Container["MXC container per command, no credentials"]
+    subgraph Sandbox["sre-sandbox-payments-0: payments-sre-sa, /dev/kvm"]
+        Worker["Worker (Node, microsandbox)"]
+        Worker --> VM["microVM per conversation, no credentials"]
         Worker --> Journal["/sandboxes/history: journal and evidence"]
-        Container --> Workspace["/sandboxes/active/SESSION"]
-        Container -->|"kubectl, proxy-only egress (10.0.2.2)"| Proxy["Read-only API proxy: holds the token"]
+        VM --> Workspace["/sandboxes/active/SESSION"]
+        VM -->|"kubectl, egress to one port (host.microsandbox.internal)"| Proxy["Read-only API proxy: holds the token"]
     end
     Proxy -->|"GET with the worker's token"| K8s["Kubernetes API: read-only Role in payments"]
     Check -.->|"ListEvidence / ReadEvidence"| Journal
@@ -33,60 +33,70 @@ flowchart LR
 
 ## Who holds what
 
-| | Harness pod | Sandbox worker pod | Each MXC container |
+| | Harness pod | Sandbox worker pod | Each conversation's VM |
 | --- | --- | --- | --- |
 | Model API key | Yes, from the `openai-creds` Secret | No | No |
 | Kubernetes identity | None; its token is not mounted | `payments-sre-sa`: get, list and watch on pods, logs, events, services and workloads in `payments`; no Secrets, ConfigMaps, exec or writes. Only its API proxy uses the token | None. kubectl's kubeconfig names the proxy and carries no credentials |
-| Network | DNS, its worker, HTTPS | The API server's ports only (NetworkPolicy) | The worker's API proxy only (MXC proxy-only egress); no DNS, no internet, no direct route to the API |
-| Filesystem | Its volume: conversations and host copies | Its volume: every workspace and the journal | Its own workspace, read-write; system directories read-only; no journal, no other workspaces |
+| Network | DNS, its worker, HTTPS | The API server's ports only (NetworkPolicy) | The worker's API proxy only (microsandbox's deny-by-default policy); no internet, no private ranges, no direct route to the API |
+| Filesystem | Its volume: conversations and host copies | Its volume: every workspace, the VMs' disks and the journal | Its own workspace, read-write; its own disk from the guest image; the kubeconfig read-only; no journal, no other workspaces |
+| Kernel and limits | The node's | The node's | Its own guest kernel; vCPUs and memory capped by the hypervisor |
 | Reached by | `kubectl port-forward`; the UI binds 127.0.0.1 | Its harness only: NetworkPolicy and the pair token | Nothing |
 
 ## How a command runs
 
-1. The SDK calls `exec` on the session. `MXCSandboxClient` sends `Exec` to the
-   paired worker ([`proto/mxc/sandbox/v1/sandbox.proto`](../proto/mxc/sandbox/v1/sandbox.proto)).
-2. The worker runs it as a workload in a transient container: MXC's
-   create-and-run operation (`run()` in `@microsoft/mxc-sdk/v1`, captured
-   output) with the Bubblewrap backend. Bubblewrap has no persistent container
-   lifecycle, so a conversation's state lives in its workspace, not in a
-   container. Per MXC's backend documentation, each container gets new user,
-   PID, IPC and UTS namespaces; the deny-by-default read-only baseline (`/bin`,
-   `/sbin`, `/lib*`, `/usr/bin`, `/usr/sbin`, `/usr/lib*`, `/usr/libexec`,
-   `/usr/share`, `/etc`; not `/usr/local`, `/opt`, `/var` or `$HOME`); minimal
-   `/dev`, `/proc` and `/tmp`; a cleared environment; a seccomp filter that admits
-   only Unix, IPv4, IPv6 and netlink sockets; and the workload runs under
-   `sh -c`. The worker's policy adds the session's workspace as the only
-   read-write path (at the same path inside), the kubeconfig directory read-only,
-   `HOME=/tmp` (MXC sets `HOME` to the working directory otherwise, where
-   dotfiles would act as user configuration), and the network policy below.
-   Inside, `prlimit` caps address space, CPU time and open files, and `choom`
-   makes the workload the kernel's first OOM victim rather than the worker.
-3. **Network.** The policy is MXC's proxy-only posture: `egress.default: deny`
-   with no rules, ingress and host loopback denied, and
-   `runtimeConfig.networkProxy` naming the worker's API proxy on
-   `127.0.0.1`. MXC gives the container a private network namespace through
-   slirp4netns, admits only the proxy endpoint (seen inside as `10.0.2.2`),
-   opens no DNS, and sets `HTTP_PROXY` and `HTTPS_PROXY` for cooperating
-   clients. In MXC's terms the worker's proxy is the external proxy that does
-   the destination filtering: it serves only the Kubernetes API, adds the
-   worker's token, and forwards only reads (below). The worker checks
-   `getPlatformSupport().bubblewrapNetwork.proxyEnforcement` at startup and,
-   like MXC, never falls back to a weaker network: an unsupported host fails
-   the worker's self-test.
-4. The worker redacts the output (JWTs, cloud and API keys, bearer tokens, URL
+1. The SDK calls `exec` on the session. `WorkerSandboxClient` sends `Exec` to the
+   paired worker ([`proto/sandbox/v1/sandbox.proto`](../proto/sandbox/v1/sandbox.proto)).
+2. The worker finds the conversation's VM, named after its session. It
+   reconnects to a running one, restarts a stopped one, or creates one on the
+   session's first command ([`runner.ts`](../worker/src/runner.ts)). Each VM boots
+   the guest image (`deploy/docker/guest.Dockerfile`: kubectl, Python, jq,
+   ripgrep) with its own kernel, `WORKER_VM_CPUS` vCPUs and `WORKER_VM_MEMORY_MIB`
+   of memory, which the hypervisor enforces, and its own writable disk over the
+   image's shared read-only layers, so what one conversation changes outside its
+   workspace never reaches another. The session's workspace is mounted at the
+   same path inside, read-write, and the worker's kubeconfig directory
+   read-only; nothing else of the worker's volume is. Commands run with
+   microsandbox's restricted profile (`no_new_privs`, no mount administration).
+   Before the VM takes its first command, the worker runs `kubectl version
+   --client` in it: a fresh VM's first kubectl spends seconds reading the binary
+   from its disk, which would otherwise come out of the agent's first command
+   and its 10 s default limit.
+3. The command runs in the VM with its working directory, its timeout and the
+   VM's environment (`KUBECONFIG`, `LANG`, `NO_COLOR`). A command that runs past
+   its timeout ends with exit 124, and the VM stays up for the next one. The
+   worker runs or starts at most `WORKER_MAX_RUNNING` VMs (4). To start another it
+   stops the least recently used one that has been idle for 10 s, or waits for
+   one to be: a VM between two commands of a running turn is still in use, and
+   stopping it would only make sessions restart each other's VMs. A small node is
+   never asked to boot more VMs than it can run; past that, conversations wait
+   their turn. A VM idle for `WORKER_IDLE_STOP_S` (600 s) stops on its own. A stopped VM keeps its disk, and its workspace stays on the
+   volume.
+4. **Network.** With Kubernetes access, the VM's policy denies everything but
+   DNS to microsandbox's gateway and TCP to the worker's API proxy port on the
+   pod's loopback, which the VM reaches as `host.microsandbox.internal`. The
+   proxy serves only the Kubernetes API, adds the worker's token and forwards
+   only reads (below). Without it (`WORKER_EGRESS=none`) the VM has no network.
+   microsandbox's own defaults deny private ranges, cloud metadata and the host
+   either way.
+5. The worker redacts the output (JWTs, cloud and API keys, bearer tokens, URL
    credentials, `password=`-style pairs, private keys, email addresses and card
    numbers that pass the Luhn check), caps it, records it in
-   the session's audit journal with any warnings MXC returned, and returns it.
-   MXC's structured errors map to gRPC statuses: `backend_unavailable` and
-   `backend_error` to `UNAVAILABLE`, the rest to `FAILED_PRECONDITION`.
-5. A plain kubectl read is also **evidence** (below).
+   the session's audit journal, and returns it. A VM that cannot be started or
+   reached maps to the gRPC status `UNAVAILABLE`.
+6. A plain kubectl read is also **evidence** (below).
+
+At startup the worker loads the guest image into microsandbox's store from the
+archive its own image carries, then boots a VM that checks the boundary: it can
+write its workspace, sees neither the journal nor a service-account token, and
+reaches the API through the proxy. A host without KVM fails here, not on the
+agent's first command.
 
 ## The read-only API proxy
 
-Containers hold no Kubernetes credentials. The worker runs a small HTTP proxy
-on its own loopback (`MXC_KUBE_PROXY_PORT`, 18080) and writes a kubeconfig whose
-server is that proxy, as `http://10.0.2.2:18080`, with no user credentials. For
-each request the proxy:
+VMs hold no Kubernetes credentials. The worker runs a small HTTP proxy
+on its own loopback (`WORKER_KUBE_PROXY_PORT`, 18080) and writes a kubeconfig whose
+server is that proxy, as `http://host.microsandbox.internal:18080`, with no user
+credentials. For each request the proxy:
 
 - forwards only `GET` and `HEAD` of Kubernetes API paths (`/api`, `/apis`,
   `/version`, `/openapi`), so get, list, watch, describe and events work;
@@ -94,45 +104,51 @@ each request the proxy:
   `portforward` and `proxy` subresources, **pod logs**, other paths, and
   requests addressed to any other host, with a Kubernetes `Status` that kubectl
   prints as `Forbidden`;
-- drops any `Authorization`, cookie or `Impersonate-*` header the container
+- drops any `Authorization`, cookie or `Impersonate-*` header the VM
   sent, adds the worker's token, read from the kubelet-rotated file on every
   request, and forwards over TLS, verifying the API server against the cluster
   CA.
 
 RBAC still decides what the token can read. The proxy keeps writes out even if
-the Role is widened later, and a workload can no longer print the token in any
-form, because no file, variable or header in the container holds it.
+the Role is widened later, and a command can no longer print the token in any
+form, because no file, variable or header in the VM holds it.
 
-Files move over `WriteFile` and `ReadFile`, outside any container. A path must
+Files move over `WriteFile` and `ReadFile`, without a shell command. A path must
 stay inside the session's workspace lexically and again after the worker
-resolves symlinks the agent may have planted; writes refuse symlinked
-components and land by rename. The SDK's own path checks run first.
+resolves symlinks, and writes refuse symlinked components. A symlink the agent
+makes in its VM is not one on the volume: microsandbox's file sharing keeps it
+as a plain file holding the target, so the worker never follows it, and a path
+through it does not resolve. The SDK's own path checks run first. While the session's VM runs,
+the worker writes the file through the VM's own agent: the VM does not reliably
+see a file the worker replaces on the volume underneath it (one renamed over
+another reads back empty). While it is stopped, the file lands on the volume by
+rename. Reads are made on the volume, which sees the VM's writes at once.
 
 Commands and file operations of one session run one at a time, in arrival
 order, so a checked path cannot change underneath a file operation. Different
-sessions run concurrently up to `MXC_MAX_CONCURRENT` commands (8 by default);
-further commands wait for a slot.
+sessions run concurrently, one command per running VM, so `WORKER_MAX_RUNNING`
+also bounds how many commands run at once.
 
 ## Workspaces and conversations
 
 A workspace is a directory on the worker's volume, `/sandboxes/active/SESSION`,
-and has the same path inside its containers. Nothing runs between commands, so
-there is nothing to suspend between turns.
+and has the same path inside its VM. The VM stops when it is idle and starts
+again on the next command, so the SDK has nothing to suspend between turns.
 
 | Moment | What happens |
 | --- | --- |
 | First message | The harness names a workspace, builds the agent's manifest under it, and the worker creates it; the SDK writes the manifest's files (the SRE agent's runbooks) and the harness seeds the agent's memory |
-| During the turn | The agent loop runs in the harness; every tool call runs in its own MXC container |
+| During the turn | The agent loop runs in the harness; every tool call runs in the conversation's VM, which starts on its first command |
 | End of the turn | The harness fetches new evidence from the worker, copies the agent's `output/` and `work/` files, runs the agent's check, and saves the session state with the thread. The SDK session stays open |
 | Next message | The turn continues in the open session; its workspace is as the last turn left it |
 | Idle (`SRE_SESSION_IDLE_S`, 300 s) or harness shutdown | The session closes and the SDK distils the conversation into memory (below). A later message reopens the same workspace |
-| Conversation deleted | The worker removes the workspace and records the deletion; its journal stays. The conversation is not remembered |
+| Conversation deleted | The worker removes the VM and the workspace and records the deletion; its journal stays. The conversation is not remembered |
 
 The harness keeps threads in SQLite and conversation history in an SDK
 `SQLiteSession`, both on its own volume, so conversations survive a harness
-restart. The worker's volume keeps workspaces and the journal across worker
-restarts; a workspace that is gone when a conversation reopens is recreated
-from the manifest.
+restart. The worker's volume keeps workspaces, the VMs' disks and the journal
+across worker restarts; a workspace that is gone when a conversation reopens is
+recreated from the manifest, and its VM is created again.
 
 ## The turn engine and its API
 
@@ -293,13 +309,13 @@ or remove a user's directory under `/data/memory/users/`.
 
 ## Logs reach the model only as excerpts
 
-Application logs can hold customer data, so raw logs never enter a container or
-the model's context. Containers cannot read them: the API proxy refuses
+Application logs can hold customer data, so raw logs never enter a VM or
+the model's context. VMs cannot read them: the API proxy refuses
 `pods/log`. The agent reads logs only through the `pod_logs` tool, which calls
 the worker's `ReadLogs`. The worker fetches the log itself with its own token
 (a pod name, or `deploy/NAME` for the deployment's pod most likely failing:
-not ready, then most restarted, then newest; up to `MXC_LOG_MAX_TAIL_LINES`
-lines and `MXC_LOG_MAX_BYTES` bytes, optionally only those from the last
+not ready, then most restarted, then newest; up to `WORKER_LOG_MAX_TAIL_LINES`
+lines and `WORKER_LOG_MAX_BYTES` bytes, optionally only those from the last
 `since`) and applies its log policy before anything leaves it:
 
 - masks credentials, email addresses, Luhn-valid card numbers and numbers of
@@ -320,7 +336,7 @@ lines and `MXC_LOG_MAX_BYTES` bytes, optionally only those from the last
 Only the excerpt is returned, recorded as evidence and saved in the workspace,
 so quotes are checked against exactly what the model saw. The journal records
 each read with its counts and the raw log's size and SHA-256, never its text.
-The limits are worker settings (`MXC_LOG_*`, see [usage](usage.md)).
+The limits are worker settings (`WORKER_LOG_*`, see [usage](usage.md)).
 
 ## Evidence and checks
 
@@ -333,7 +349,7 @@ and no flag that points kubectl elsewhere (`--kubeconfig`, `--server`,
 comes from the API server as the worker's own read-only identity.
 
 The worker keeps the redacted output under `/sandboxes/history/SESSION`, which no
-container can see, and saves a copy in the workspace as
+VM can see, and saves a copy in the workspace as
 `evidence/NNN-kubectl-....txt` for the agent to analyze. Each `pod_logs` excerpt
 is recorded the same way, as `evidence/NNN-pod-logs-....txt`. The output comes from
 the API server through the worker's own proxy, as the worker's identity. After each turn the
@@ -365,12 +381,13 @@ components required it:
 
 - **Python harness.** The harness uses the Python Agents SDK (`openai-agents`
   0.24.0) and its `SandboxAgent`, `BaseSandboxClient` and `BaseSandboxSession`,
-  so the existing SRE UI and harness run on it. The worker is
-  TypeScript because MXC's Node SDK is how MXC is embedded.
-- **MXC rather than hand-built Bubblewrap.** Mounts, environment, the seccomp
-  filter and the slirp4netns proxy-only network come from MXC. MXC's Node SDK offers
-  persistent containers only for its Windows backends, so on Linux each command
-  is its own container over a persistent workspace directory.
+  so the existing SRE UI and harness run on it. The worker is TypeScript and
+  embeds microsandbox through its Node SDK.
+- **A microVM per conversation rather than a container per command.** Each
+  conversation gets its own kernel, memory and vCPU limits and its own disk,
+  and its VM lives across commands, so a command costs milliseconds once the VM
+  runs. microsandbox has no server of its own to self-host; the worker is the
+  paired server around it.
 - **Evidence as well as a journal.** The worker classifies kubectl reads and the
   harness checks findings against the worker's copies.
 - **Authenticated gRPC.** The pair shares a token from a Secret, on top of
@@ -378,11 +395,16 @@ components required it:
 
 ## Limits
 
-- **Kind needs a privileged worker.** Kind's nested containers mask `/proc` and
-  hide `/dev/net/tun`, and user-namespaced pods do not start there, so the Kind
-  overlay runs the worker container privileged, as uid 10001. Commands in MXC
-  containers still have no capabilities. In production the pod's outer
-  boundary is a Kata microVM; see [deployment](deployment.md).
+- **The worker pod is privileged.** Its VMs need the node's `/dev/kvm`, which a
+  pod gets as a device only when privileged (or through a KVM device plugin, not
+  set up here). The container starts as root only to give its own copy of
+  `/dev/kvm` and its volume to the worker's user, then runs as uid 10001 with no
+  capabilities and `no_new_privs`. Commands run inside the VMs. The node needs
+  KVM: on cloud VMs, a size with nested virtualization, and the worker cannot
+  run under Kata, whose pods have no `/dev/kvm`. See [deployment](deployment.md).
+- **microsandbox is beta software.** Its own documentation expects breaking
+  changes; the worker pins 0.7.13. A guest-kernel or VMM escape is the class of
+  bug the VM boundary cannot contain.
 - **Masking is pattern-based.** The worker's identity cannot read Secrets, and
   logs pass the log policy, but pod specs, events and log lines can still hold
   sensitive values in forms the patterns do not recognize: names, addresses,
@@ -395,10 +417,9 @@ components required it:
   status the Role lets the agent read reach the model's context as they are,
   after masking. Keep that Role narrow. A container's termination message,
   which can hold the end of its log, appears in pod status.
-- **MXC's network limits apply.** A slirp4netns that dies mid-run fails the run,
-  but one that hangs reaches the workload as an unreachable network; IPv6 has no
-  route. MXC's Node SDK caches `getPlatformSupport()` for the process's life,
-  so a host change needs a worker restart to be seen.
+- **A VM keeps the settings it was created with.** A stopped VM restarts with
+  its original image, limits and network policy; a changed setting reaches a
+  conversation's VM only when the conversation is new or its VM is removed.
 - **Memory can be wrong, and the guest's is shared.** A wrong conclusion that
   the extraction keeps is remembered until a later conversation corrects it, it
   expires, or an operator removes it. Without sign-in, every user adds to and
@@ -412,5 +433,9 @@ components required it:
   so per-user memory, needs an authenticating proxy in front of it. Several users can share the
   harness: their conversations run concurrently, and messages to one shared
   conversation run one after another.
-- **Per-command cost.** An MXC container with the proxy-only network takes
-  about 110 ms; a new workspace's manifest takes about fifteen of them.
+- **Start-up cost.** On ARM64 Kind, nested under macOS's hypervisor, a new
+  conversation's VM takes about 1.3 s to create and a stopped one about 1.2 s
+  to start again; a command in a running VM takes 10 to 60 ms through the
+  worker, plus what it does. A new workspace's manifest takes about fifteen
+  commands. Directly on macOS, without the nesting, the same VM restarted in
+  156 ms; a Linux host with direct KVM has not been measured.

@@ -1,8 +1,6 @@
-# Local Kind: no Kata, so the pod itself is the outer boundary. The worker runs
-# privileged (as a non-root user) because Kind's nested containers mask /proc and
-# hide /dev/net/tun, which MXC's Bubblewrap backend needs for each container's
-# procfs and its private network. Commands inside MXC containers still run with
-# no capabilities, in their own user, PID and network namespaces.
+# Local Kind: the images are loaded into the node, never pulled. The node needs
+# /dev/kvm for the worker's VMs; on macOS that means nested virtualization in the
+# Colima VM (`make cluster` checks for it).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -10,12 +8,6 @@ resources:
 patches:
   - target: {kind: StatefulSet, name: sre-sandbox-payments}
     patch: |-
-      - op: add
-        path: /spec/template/spec/containers/0/securityContext/privileged
-        value: true
-      - op: add
-        path: /spec/template/spec/containers/0/securityContext/allowPrivilegeEscalation
-        value: true
       - op: add
         path: /spec/template/spec/containers/0/imagePullPolicy
         value: Never

@@ -1,21 +1,22 @@
-# AKS with Pod Sandboxing: the worker pod runs in a Kata Containers microVM, so a
-# kernel escape from an MXC container lands in a dedicated guest kernel, not the
-# node. Unverified in this repository: check that your Kata runtime class admits
-# the worker's security context (or use the Kind overlay's privileged patch,
-# which is then confined to the guest VM). Set the images to your registry.
+# AKS: the worker's VMs need KVM, which AKS nodes expose only on VM sizes with
+# nested virtualization (Dv3/Dv5, Ev3/Ev5 and similar). Put the worker on a node
+# pool of such a size named "kvm" (or change the selector below). Not Kata Pod
+# Sandboxing: a Kata pod has no /dev/kvm of its own, so the worker could not
+# start VMs there; each session's VM is the boundary instead. Unverified in this
+# repository. Set the images to your registry.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - ../../base
 images:
-  - {name: mxc-sandbox-worker, newName: REGISTRY.azurecr.io/mxc-sandbox-worker, newTag: "0.1.0"}
+  - {name: sandbox-worker, newName: REGISTRY.azurecr.io/sandbox-worker, newTag: "0.1.0"}
   - {name: sre-agent-harness, newName: REGISTRY.azurecr.io/sre-agent-harness, newTag: "0.1.0"}
 patches:
   - target: {kind: StatefulSet, name: sre-sandbox-payments}
     patch: |-
       - op: add
-        path: /spec/template/spec/runtimeClassName
-        value: kata-vm-isolation
+        path: /spec/template/spec/nodeSelector
+        value: {kubernetes.azure.com/agentpool: kvm}
       - op: add
         path: /spec/volumeClaimTemplates/0/spec/storageClassName
         value: managed-csi-premium
