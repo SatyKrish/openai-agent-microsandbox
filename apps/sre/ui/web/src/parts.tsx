@@ -1,4 +1,4 @@
-// Copyright 2026 openai-agent-mxc contributors
+// Copyright 2026 openai-agent-microsandbox contributors
 // SPDX-License-Identifier: Apache-2.0
 //
 // The parts of an agent's message that are not text: a group of steps (tool calls), open while the

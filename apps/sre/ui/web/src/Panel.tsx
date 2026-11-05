@@ -1,4 +1,4 @@
-// Copyright 2026 openai-agent-mxc contributors
+// Copyright 2026 openai-agent-microsandbox contributors
 // SPDX-License-Identifier: Apache-2.0
 //
 // The side panel, after Artifacts: one thing at a time, named in its header. The findings are the agent's

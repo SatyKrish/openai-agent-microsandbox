@@ -1,4 +1,4 @@
-# Copyright 2026 openai-agent-mxc contributors
+# Copyright 2026 openai-agent-microsandbox contributors
 # SPDX-License-Identifier: Apache-2.0
 """OpenAI Agents SDK sandbox provider for a paired sandbox worker on Kubernetes, one microVM per session."""
 

@@ -1,4 +1,4 @@
-# Copyright 2026 openai-agent-mxc contributors
+# Copyright 2026 openai-agent-microsandbox contributors
 # SPDX-License-Identifier: Apache-2.0
 """The SDK provider against the worker's real gRPC service (see the root conftest)."""
 

@@ -1,4 +1,4 @@
-// Copyright 2026 openai-agent-mxc contributors
+// Copyright 2026 openai-agent-microsandbox contributors
 // SPDX-License-Identifier: Apache-2.0
 //
 // The worker's own reads of the Kubernetes API, with its token, for what it serves

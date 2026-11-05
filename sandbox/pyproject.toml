@@ -3,7 +3,7 @@ requires = ["setuptools>=80"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openai-agent-mxc"
+name = "openai-agent-microsandbox"
 version = "0.1.0"
 description = "OpenAI Agents SDK sandbox provider for a paired sandbox worker on Kubernetes: one microVM per session"
 readme = "README.md"

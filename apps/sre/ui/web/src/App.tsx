@@ -1,4 +1,4 @@
-// Copyright 2026 openai-agent-mxc contributors
+// Copyright 2026 openai-agent-microsandbox contributors
 // SPDX-License-Identifier: Apache-2.0
 //
 // The SRE agent's page, after Artifacts: on the left, the cluster's health now with the issue for each

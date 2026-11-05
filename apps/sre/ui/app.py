@@ -1,4 +1,4 @@
-# Copyright 2026 openai-agent-mxc contributors
+# Copyright 2026 openai-agent-microsandbox contributors
 # SPDX-License-Identifier: Apache-2.0
 """The SRE agent's UI: its own page (built from ``web/`` into ``static/app``), served beside the harness's API."""
 

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Copyright 2026 openai-agent-mxc contributors
+# Copyright 2026 openai-agent-microsandbox contributors
 # SPDX-License-Identifier: Apache-2.0
 #
 # The SRE agent's harness: the OpenAI Agents SDK loop, the shared UI and the

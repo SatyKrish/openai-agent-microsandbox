@@ -1,4 +1,4 @@
-# Copyright 2026 openai-agent-mxc contributors
+# Copyright 2026 openai-agent-microsandbox contributors
 # SPDX-License-Identifier: Apache-2.0
 """Isolation test: one SRE session's logs and evidence stay out of every other session's reach.
 
@@ -386,7 +386,7 @@ async def purge(ids: list[str]) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host-check", type=Path, metavar="OUTPUT", help="Check journals and logs from the host")
-    parser.add_argument("--context", default="kind-openai-agent-mxc")
+    parser.add_argument("--context", default="kind-openai-agent-microsandbox")
     parser.add_argument("--purge", nargs="+", metavar="ID", help="Purge these sessions' journals (in the pod)")
     args = parser.parse_args(argv)
     if args.host_check:

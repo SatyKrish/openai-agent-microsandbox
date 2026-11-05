@@ -9,7 +9,7 @@ description = "Runs OpenAI Agents SDK SandboxAgents with one sandbox worker sess
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-    "openai-agent-mxc[tracing]",
+    "openai-agent-microsandbox[tracing]",
     "starlette>=1,<2",
     "uvicorn>=0.30,<1",
 ]

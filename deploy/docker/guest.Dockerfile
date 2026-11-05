@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Copyright 2026 openai-agent-mxc contributors
+# Copyright 2026 openai-agent-microsandbox contributors
 # SPDX-License-Identifier: Apache-2.0
 #
 # What every session VM boots: the agent's tools and nothing else, with no

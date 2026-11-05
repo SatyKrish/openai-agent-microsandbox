@@ -1,4 +1,4 @@
-// Copyright 2026 openai-agent-mxc contributors
+// Copyright 2026 openai-agent-microsandbox contributors
 // SPDX-License-Identifier: Apache-2.0
 //
 // Worker settings, all from the environment. Limits are ceilings: a request can

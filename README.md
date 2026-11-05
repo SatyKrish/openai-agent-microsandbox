@@ -1,4 +1,4 @@
-# openai-agent-mxc
+# openai-agent-microsandbox
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
@@ -61,7 +61,7 @@ cp .env.example .env
 VM with nested virtualization, creates the Kind cluster, builds the guest,
 worker and harness images, and deploys them with a payments application that is
 broken in two ways, plus a service whose logs are full of customer data. Every
-command names the `kind-openai-agent-mxc` context, and your current kubectl
+command names the `kind-openai-agent-microsandbox` context, and your current kubectl
 context is restored afterwards. See the [local Kubernetes guide](docs/local-kubernetes.md).
 
 ```bash
@@ -113,7 +113,7 @@ harness serves only its API.
 
 ## Use the provider in your own application
 
-The provider is the `openai-agent-mxc` package in `sandbox/`, imported as
+The provider is the `openai-agent-microsandbox` package in `sandbox/`, imported as
 `sandbox_worker`. It implements the SDK's `BaseSandboxClient` for any `SandboxAgent`;
 the worker is the image built from `worker/`, and the image its VMs boot is
 built from `deploy/docker/guest.Dockerfile`. See
@@ -143,7 +143,7 @@ harness.
 pyproject.toml              uv workspace root: dev tools and test settings, no package
 proto/sandbox/v1/           The harness/worker gRPC contract
 worker/                     The sandbox worker (Node 24, TypeScript, microsandbox), its unit tests and a host runner for tests
-sandbox/                    The provider (openai-agent-mxc): WorkerSandboxClient, gRPC transport, tracing
+sandbox/                    The provider (openai-agent-microsandbox): WorkerSandboxClient, gRPC transport, tracing
 harness/                    The agent harness (openai-harness): turn engine, memory and HTTP API, adapted from openai-agent-substrate
 apps/sre/                   The SRE agent: SandboxAgent, skill, runbooks, findings check, its UI, verify and load test
 deploy/docker/              Guest, worker and harness images

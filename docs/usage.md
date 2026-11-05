@@ -1,6 +1,6 @@
 # Using the sandbox provider
 
-The provider is the `openai-agent-mxc` package in `sandbox/`, imported as
+The provider is the `openai-agent-microsandbox` package in `sandbox/`, imported as
 `sandbox_worker`. It implements the OpenAI Agents SDK's `BaseSandboxClient` and
 `BaseSandboxSession`, so any `SandboxAgent` can run its shell, filesystem and
 skill tools on a paired sandbox worker, in a microVM per session.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright 2026 openai-agent-mxc contributors
+# Copyright 2026 openai-agent-microsandbox contributors
 # SPDX-License-Identifier: Apache-2.0
 #
 # The worker container starts as root for two things only, then runs as 10001

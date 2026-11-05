@@ -1,4 +1,4 @@
-# Copyright 2026 openai-agent-mxc contributors
+# Copyright 2026 openai-agent-microsandbox contributors
 # SPDX-License-Identifier: Apache-2.0
 """Shared fixtures: the worker's real gRPC service on loopback, with a host runner in place of its VMs.
 

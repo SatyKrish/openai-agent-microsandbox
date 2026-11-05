@@ -25,14 +25,14 @@ make all
 
 | Target | What it does |
 | --- | --- |
-| `cluster` | Starts the `openai-agent-mxc` Colima VM (4 CPUs, 8 GiB, nested virtualization) if needed, checks that it has `/dev/kvm`, and creates the Kind cluster. Your current kubectl context is restored afterwards. |
+| `cluster` | Starts the `openai-agent-microsandbox` Colima VM (4 CPUs, 8 GiB, nested virtualization) if needed, checks that it has `/dev/kvm`, and creates the Kind cluster. Your current kubectl context is restored afterwards. |
 | `images` | Builds `sre-sandbox-guest:local` (what the VMs boot) and saves it to `build/guest-image.tar`, then `sandbox-worker:local`, which carries it, and `sre-agent-harness:local` |
 | `load` | Loads the worker and harness images into Kind |
 | `secrets` | Creates `openai-creds` from the `OPENAI_*` lines of `ENV_FILE` (default `.env`) and a random pair token, `sre-payments-pair-token` |
 | `deploy` | Applies `deploy/kubernetes/overlays/kind` and waits for both pods |
 | `demo` | Applies the broken payments workloads |
 
-Every kubectl call names `KUBE_CONTEXT` (`kind-openai-agent-mxc`). On Linux
+Every kubectl call names `KUBE_CONTEXT` (`kind-openai-agent-microsandbox`). On Linux
 without Colima, pass `COLIMA_PROFILE=` and make sure the host has `/dev/kvm`.
 
 ### Why nested virtualization and the privileged worker
@@ -45,7 +45,7 @@ later chips with the `vz` VM type. Kind's node is privileged and sees the VM's
 It starts as root only to hand its own copy of `/dev/kvm` and its volume to the
 worker's user, then runs as uid 10001 with no capabilities; commands run in the
 VMs. A Colima profile created without nested virtualization keeps that setting:
-set `nestedVirtualization: true` in `~/.colima/openai-agent-mxc/colima.yaml`
+set `nestedVirtualization: true` in `~/.colima/openai-agent-microsandbox/colima.yaml`
 and restart the profile.
 
 ## Use it
@@ -73,8 +73,8 @@ port-forward still holds it; stop that one first, or pass `UI_PORT=8002`.
 
 ## Stop, restart and tear down
 
-`colima stop --profile openai-agent-mxc` stops the VM with the cluster in it;
-`colima start --profile openai-agent-mxc` brings it back. Workspaces, the
+`colima stop --profile openai-agent-microsandbox` stops the VM with the cluster in it;
+`colima start --profile openai-agent-microsandbox` brings it back. Workspaces, the
 VMs' disks, the journal and conversations are on the pods' volumes and survive;
 a conversation's VM starts again on its next command.
 

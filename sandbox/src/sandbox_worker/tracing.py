@@ -1,4 +1,4 @@
-# Copyright 2026 openai-agent-mxc contributors
+# Copyright 2026 openai-agent-microsandbox contributors
 # SPDX-License-Identifier: Apache-2.0
 """Agents SDK trace processor exporting an allowlisted OTLP representation.
 
@@ -63,7 +63,7 @@ class OTLPTracingProcessor(TracingProcessor):
     excluded. Only span type, known tool/operation names and numeric metrics pass.
     """
 
-    def __init__(self, exporter, *, service_name="openai-agent-mxc", operation_names=(), harness_tools=()):
+    def __init__(self, exporter, *, service_name="openai-agent-microsandbox", operation_names=(), harness_tools=()):
         self.operation_names = frozenset(_OPERATIONS) | frozenset(operation_names)
         # Function tools that run in the harness, not the sandbox; also trusted constants.
         self.harness_tools = frozenset(harness_tools)
@@ -148,7 +148,7 @@ def configure_tracing(*, operation_names=(), harness_tools=()):
     if protocol != "http/protobuf":
         raise ValueError("Tracing supports OTLP http/protobuf; use Jaeger port 4318")
     exporter = OTLPSpanExporter(timeout=5)
-    processor = OTLPTracingProcessor(exporter, service_name=os.getenv("OTEL_SERVICE_NAME", "openai-agent-mxc"),
+    processor = OTLPTracingProcessor(exporter, service_name=os.getenv("OTEL_SERVICE_NAME", "openai-agent-microsandbox"),
                                      operation_names=operation_names, harness_tools=harness_tools)
     set_trace_processors([processor])
     return processor

@@ -1,4 +1,4 @@
-# Copyright 2026 openai-agent-mxc contributors
+# Copyright 2026 openai-agent-microsandbox contributors
 # SPDX-License-Identifier: Apache-2.0
 #
 # Local reference deployment on Kind. Every kubectl call names KUBE_CONTEXT, so
@@ -6,9 +6,9 @@
 # in its own Colima VM (COLIMA_PROFILE); on Linux, set COLIMA_PROFILE= to use the
 # local Docker daemon.
 
-CLUSTER        ?= openai-agent-mxc
+CLUSTER        ?= openai-agent-microsandbox
 KUBE_CONTEXT   ?= kind-$(CLUSTER)
-COLIMA_PROFILE ?= openai-agent-mxc
+COLIMA_PROFILE ?= openai-agent-microsandbox
 COLIMA_CPUS    ?= 4
 COLIMA_MEMORY  ?= 8
 ENV_FILE       ?= .env

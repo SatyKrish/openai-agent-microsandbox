@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `proto/` | The gRPC contract | Nothing |
 | `worker/` | `sandbox-worker` (Node 24, TypeScript) | `microsandbox`, `@grpc/grpc-js` |
-| `sandbox/` | `openai-agent-mxc`, imported as `sandbox_worker` | `openai-agents==0.24.0`, `grpcio`; never the harness |
+| `sandbox/` | `openai-agent-microsandbox`, imported as `sandbox_worker` | `openai-agents==0.24.0`, `grpcio`; never the harness |
 | `harness/` | `openai-harness`, imported as `openai_harness` | The provider, Starlette and uvicorn; no UI protocol |
 | `apps/sre/` | The SRE agent, its UI and its in-cluster checks | The harness |
 | `apps/sre/ui/web/` | `sre-agent-ui`, the UI's page (React, TypeScript) | `@assistant-ui/react`; the views in `ui/static/` |

@@ -10,13 +10,13 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "openai-agent-mxc",
+    "openai-agent-microsandbox",
     "openai-harness",
 ]
 
 [manifest.dependency-groups]
 dev = [
-    { name = "openai-agent-mxc", extras = ["tracing"], editable = "sandbox" },
+    { name = "openai-agent-microsandbox", extras = ["tracing"], editable = "sandbox" },
     { name = "openai-harness", editable = "harness" },
     { name = "pytest", specifier = ">=9.2,<10" },
     { name = "pytest-asyncio", specifier = ">=1.4,<2" },
@@ -739,7 +739,7 @@ wheels = [
 ]
 
 [[package]]
-name = "openai-agent-mxc"
+name = "openai-agent-microsandbox"
 version = "0.1.0"
 source = { editable = "sandbox" }
 dependencies = [
@@ -792,14 +792,14 @@ name = "openai-harness"
 version = "0.1.0"
 source = { editable = "harness" }
 dependencies = [
-    { name = "openai-agent-mxc", extra = ["tracing"] },
+    { name = "openai-agent-microsandbox", extra = ["tracing"] },
     { name = "starlette" },
     { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "openai-agent-mxc", extras = ["tracing"], editable = "sandbox" },
+    { name = "openai-agent-microsandbox", extras = ["tracing"], editable = "sandbox" },
     { name = "starlette", specifier = ">=1,<2" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
 ]

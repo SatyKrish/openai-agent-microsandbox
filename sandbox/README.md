@@ -1,4 +1,4 @@
-# openai-agent-mxc
+# openai-agent-microsandbox
 
 OpenAI Agents SDK sandbox provider for a paired sandbox worker on Kubernetes.
 `WorkerSandboxClient` implements the SDK's `BaseSandboxClient`; each session is a
